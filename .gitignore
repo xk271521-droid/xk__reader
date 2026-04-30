@@ -1,0 +1,23 @@
+.idea/
+.codex/
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+auth-preview/node_modules/
+auth-preview/dist/
+
+# Python cache and local runtime files
+backend/__pycache__/
+backend/app/**/__pycache__/
+backend/*.pyc
+backend/app/**/*.pyc
+
+# Local uploads and generated user data
+backend/uploads/
+
+# Local environment files
+.env
+.env.*
+.venv/
+venv/
