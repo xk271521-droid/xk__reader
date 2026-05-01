@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import User, UserAgreement, UserProfile
+from app.models import Folder, User, UserAgreement, UserProfile
 from app.schemas.auth import (
     AuthResponse,
     LoginRequest,
@@ -125,6 +125,10 @@ def register(
 
     db.add(profile)
     db.add(agreement)
+
+    uncategorized = Folder(user_id=user.id, name="未分类")
+    db.add(uncategorized)
+
     db.commit()
 
     created_user = db.scalar(

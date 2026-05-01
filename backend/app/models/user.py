@@ -40,6 +40,14 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    folders: Mapped[list["Folder"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    papers: Mapped[list["Paper"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class UserProfile(Base):

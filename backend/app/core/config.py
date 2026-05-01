@@ -4,6 +4,10 @@ import os
 from pathlib import Path
 from dataclasses import dataclass, field
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
 
 def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
@@ -51,6 +55,13 @@ class Settings:
     uploads_dir: str = os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads"))
     avatar_upload_dir: str = os.getenv("AVATAR_UPLOAD_DIR", str(BASE_DIR / "uploads" / "avatars"))
     avatar_max_size_bytes: int = int(os.getenv("AVATAR_MAX_SIZE_BYTES", str(2 * 1024 * 1024)))
+    papers_upload_dir: str = os.getenv("PAPERS_UPLOAD_DIR", str(BASE_DIR / "uploads" / "papers"))
+    baidu_translate_appid: str = os.getenv("BAIDU_TRANSLATE_APPID", "")
+    baidu_translate_secret: str = os.getenv("BAIDU_TRANSLATE_SECRET", "")
+
+    @property
+    def translate_enabled(self) -> bool:
+        return bool(self.baidu_translate_appid and self.baidu_translate_secret)
 
     @property
     def ai_enabled(self) -> bool:

@@ -36,6 +36,8 @@ function App() {
 
   const {
     activeView,
+    assignPaperToFolder,
+    cancelImportConflict,
     closePaper,
     createFolder,
     deletePaper,
@@ -47,6 +49,8 @@ function App() {
     folders,
     goHome,
     handleFileChange,
+    importConflict,
+    isImporting,
     isLoading,
     metadata,
     openFilePicker,
@@ -56,13 +60,17 @@ function App() {
     pageNumbers,
     pdfDocument,
     recentPapers,
+    recentReadings,
+    renameFolder,
+    resolveImportConflict,
     scale,
     setCurrentPage,
     switchToPaper,
     totalPages,
+    uncategorizedFolderId,
     zoomIn,
     zoomOut,
-  } = usePdfReader()
+  } = usePdfReader({ currentUser })
 
   const insightPanel = useResizableWidth({
     initialWidth: 300,
@@ -355,12 +363,20 @@ function App() {
         >
           <HomePage
             folders={folders}
+            importConflict={importConflict}
+            isImporting={isImporting}
+            onCancelImportConflict={cancelImportConflict}
             onCreateFolder={createFolder}
             onDeleteFolder={deleteFolder}
             onDeletePaper={deletePaper}
+            onMovePaper={assignPaperToFolder}
             onOpenFilePicker={openFilePicker}
             onOpenPaper={switchToPaper}
+            onRenameFolder={renameFolder}
+            onResolveImportConflict={resolveImportConflict}
             recentPapers={recentPapers}
+            recentReadings={recentReadings}
+            uncategorizedFolderId={uncategorizedFolderId}
           />
         </div>
 

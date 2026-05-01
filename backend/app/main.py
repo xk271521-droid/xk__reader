@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.router import api_router
 from app.core.config import settings
 from app.db.session import Base, engine
-from app.models import User, UserAgreement, UserProfile  # noqa: F401
+from app.models import Folder, Paper, User, UserAgreement, UserProfile  # noqa: F401
 
 
 def create_app() -> FastAPI:
@@ -23,6 +23,7 @@ def create_app() -> FastAPI:
     uploads_dir = Path(settings.uploads_dir)
     uploads_dir.mkdir(parents=True, exist_ok=True)
     Path(settings.avatar_upload_dir).mkdir(parents=True, exist_ok=True)
+    Path(settings.papers_upload_dir).mkdir(parents=True, exist_ok=True)
     application.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 
     @application.on_event("startup")

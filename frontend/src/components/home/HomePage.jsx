@@ -1,7 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   BookCopy,
   BookMarked,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   FilePlus2,
   FileText,
@@ -15,7 +17,6 @@ import {
   Trash2,
 } from 'lucide-react'
 
-const UNCATEGORIZED_ID = ''
 const homeSections = [
   { id: 'recent', label: '最近阅读', icon: Clock3 },
   { id: 'library', label: '我的文献', icon: LibraryBig },
@@ -179,16 +180,21 @@ function RecentSection({ groupedPapers, onOpenPaper }) {
 
 function CategorySection({
   folders,
+  highlightPaperId,
+  jumpPaperId,
+  onClearHighlight,
   onDeletePaper,
+  onMovePaper,
   onOpenPaper,
   recentPapers,
   searchTerm,
   selectedFolderId,
+  uncategorizedFolderId,
 }) {
   const [menuPaperId, setMenuPaperId] = useState('')
   const keyword = searchTerm.trim().toLowerCase()
   const currentCategoryName =
-    selectedFolderId === UNCATEGORIZED_ID
+    selectedFolderId === uncategorizedFolderId
       ? '未分类'
       : folders.find((folder) => folder.id === selectedFolderId)?.name || '未分类'
 
@@ -205,6 +211,57 @@ function CategorySection({
       .filter(Boolean)
       .some((field) => field.toLowerCase().includes(keyword))
   })
+
+  const PAGE_SIZE = 15
+  const [currentPage, setCurrentPage] = useState(1)
+  const totalPages = Math.max(1, Math.ceil(papersInCategory.length / PAGE_SIZE))
+
+  useEffect(() => {
+    setCurrentPage(1)
+    setMenuPaperId('')
+  }, [selectedFolderId, searchTerm])
+
+  // Jump to paper and auto-scroll page
+  const jumpTargetIndex = useMemo(() => {
+    if (!jumpPaperId) return -1
+    return papersInCategory.findIndex((p) => p.id === jumpPaperId)
+  }, [jumpPaperId, papersInCategory])
+
+  useEffect(() => {
+    if (jumpTargetIndex < 0) return
+    const page = Math.floor(jumpTargetIndex / PAGE_SIZE) + 1
+    setCurrentPage(page)
+  }, [jumpTargetIndex, PAGE_SIZE])
+
+  // Auto-clear highlight after 2.5s
+  useEffect(() => {
+    if (!highlightPaperId) return
+    const timer = setTimeout(() => {
+      onClearHighlight?.()
+    }, 2500)
+    return () => clearTimeout(timer)
+  }, [highlightPaperId, onClearHighlight])
+
+  const pageStart = (currentPage - 1) * PAGE_SIZE
+  const pagePapers = papersInCategory.slice(pageStart, pageStart + PAGE_SIZE)
+  // Pad to PAGE_SIZE rows to maintain fixed height
+  const paddedRows = [
+    ...pagePapers,
+    ...Array.from({ length: Math.max(0, PAGE_SIZE - pagePapers.length) }, (_, i) => ({
+      _empty: true,
+      _key: `empty-${i}`,
+    })),
+  ]
+
+  function handlePrevPage() {
+    setCurrentPage((p) => Math.max(1, p - 1))
+    setMenuPaperId('')
+  }
+
+  function handleNextPage() {
+    setCurrentPage((p) => Math.min(totalPages, p + 1))
+    setMenuPaperId('')
+  }
 
   return (
     <div className="home-category-panel">
@@ -228,60 +285,129 @@ function CategorySection({
         </div>
 
         {papersInCategory.length > 0 ? (
-          papersInCategory.map((paper) => (
-            <div key={paper.id} className="home-category-table__row">
-              <button
-                type="button"
-                className="home-category-paper"
-                onClick={() => onOpenPaper(paper.id)}
-                title={paper.title}
+          paddedRows.map((paper) =>
+            paper._empty ? (
+              <div key={paper._key} className="home-category-table__row home-category-table__row--empty" />
+            ) : (
+              <div
+                key={paper.id}
+                className={`home-category-table__row${highlightPaperId === paper.id ? ' is-highlight' : ''}`}
               >
-                <FileText />
-                <span>{paper.title}</span>
-              </button>
-              <span title={getTranslatedTitle(paper)}>{getTranslatedTitle(paper)}</span>
-              <span title={paper.metadata.author || '-'}>{paper.metadata.author || '-'}</span>
-              <span>{paper.metadata.pageCount || 0} 页</span>
-              <div className="home-row-menu-wrap">
                 <button
                   type="button"
-                  className="home-row-menu-trigger"
-                  aria-label={`打开 ${paper.title} 更多操作`}
-                  title="更多"
-                  onClick={() =>
-                    setMenuPaperId((currentId) => (currentId === paper.id ? '' : paper.id))
-                  }
+                  className="home-category-paper"
+                  onClick={() => onOpenPaper(paper.id)}
+                  title={paper.title}
                 >
-                  <MoreHorizontal />
+                  <FileText />
+                  <span>{paper.title}</span>
                 </button>
+                <span title={getTranslatedTitle(paper)}>{getTranslatedTitle(paper)}</span>
+                <span title={paper.metadata.author || '-'}>{paper.metadata.author || '-'}</span>
+                <span>{paper.metadata.pageCount || 0} 页</span>
+                <div className="home-row-menu-wrap">
+                  <button
+                    type="button"
+                    className="home-row-menu-trigger"
+                    aria-label={`打开 ${paper.title} 更多操作`}
+                    title="更多"
+                    onClick={() =>
+                      setMenuPaperId((currentId) => (currentId === paper.id ? '' : paper.id))
+                    }
+                  >
+                    <MoreHorizontal />
+                  </button>
 
-                {menuPaperId === paper.id ? (
-                  <div className="home-row-menu">
-                    <button
-                      type="button"
-                      className="home-row-menu__item home-row-menu__item--danger"
-                      onClick={() => {
-                        setMenuPaperId('')
-                        onDeletePaper(paper.id)
-                      }}
-                    >
-                      删除
-                    </button>
-                  </div>
-                ) : null}
+                  {menuPaperId === paper.id ? (
+                    <div className="home-row-menu">
+                      <div className="home-row-menu__item-wrap">
+                        <button
+                          type="button"
+                          className="home-row-menu__item"
+                          onClick={() => setMenuPaperId('')}
+                        >
+                          移入...
+                        </button>
+                        <div className="home-row-submenu">
+                          {folders
+                            .filter((f) => String(f.id) !== String(paper.folderId))
+                            .map((f) => (
+                              <button
+                                key={f.id}
+                                type="button"
+                                className="home-row-menu__item"
+                                onClick={() => {
+                                  setMenuPaperId('')
+                                  onMovePaper(paper.id, String(f.id))
+                                }}
+                              >
+                                {f.name}
+                              </button>
+                            ))}
+                          {String(paper.folderId) !== String(uncategorizedFolderId) ? (
+                            <button
+                              type="button"
+                              className="home-row-menu__item"
+                              onClick={() => {
+                                setMenuPaperId('')
+                                onMovePaper(paper.id, String(uncategorizedFolderId))
+                              }}
+                            >
+                              未分类
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="home-row-menu__item home-row-menu__item--danger"
+                        onClick={() => {
+                          setMenuPaperId('')
+                          onDeletePaper(paper.id)
+                        }}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          ))
+            ),
+          )
         ) : (
           <div className="home-empty-state home-empty-state--compact">
             <div className="home-empty-state__icon">
               <FolderClosed />
             </div>
             <h3>当前分类下还没有文献</h3>
-            <p>用顶部“导入文献”把论文放进对应分类里，导入后不会自动跳进阅读页。</p>
+            <p>用顶部"导入文献"把论文放进对应分类里，导入后不会自动跳进阅读页。</p>
           </div>
         )}
       </div>
+
+      {papersInCategory.length > 0 ? (
+        <div className="home-pagination">
+          <button
+            type="button"
+            className="home-pagination__btn"
+            disabled={currentPage <= 1}
+            onClick={handlePrevPage}
+            aria-label="上一页"
+          >
+            <ChevronLeft />
+          </button>
+          <span className="home-pagination__info">第 {currentPage}/{totalPages} 页</span>
+          <button
+            type="button"
+            className="home-pagination__btn"
+            disabled={currentPage >= totalPages}
+            onClick={handleNextPage}
+            aria-label="下一页"
+          >
+            <ChevronRight />
+          </button>
+        </div>
+      ) : null}
 
     </div>
   )
@@ -330,39 +456,105 @@ function TrashSection() {
 
 export function HomePage({
   folders,
+  importConflict,
+  isImporting,
+  onCancelImportConflict,
   onCreateFolder,
   onDeleteFolder,
   onDeletePaper,
+  onMovePaper,
   onOpenFilePicker,
   onOpenPaper,
+  onRenameFolder,
+  onResolveImportConflict,
   recentPapers,
+  recentReadings = [],
+  uncategorizedFolderId,
 }) {
   const [activeSection, setActiveSection] = useState('recent')
   const [searchTerm, setSearchTerm] = useState('')
-  const [selectedFolderId, setSelectedFolderId] = useState(UNCATEGORIZED_ID)
+  const [selectedFolderId, setSelectedFolderId] = useState(uncategorizedFolderId)
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [folderName, setFolderName] = useState('')
-  const [folderMessage, setFolderMessage] = useState('')
   const [showImportMenu, setShowImportMenu] = useState(false)
+  const [editingFolderId, setEditingFolderId] = useState('')
+  const [editFolderName, setEditFolderName] = useState('')
+  const [highlightPaperId, setHighlightPaperId] = useState('')
+  const [jumpPaperId, setJumpPaperId] = useState('')
+
+  useEffect(() => {
+    if (uncategorizedFolderId && selectedFolderId === '') {
+      setSelectedFolderId(uncategorizedFolderId)
+    }
+  }, [uncategorizedFolderId, selectedFolderId])
 
   const groupedPapers = useMemo(
     () => buildGroupedPapers(recentPapers, searchTerm),
     [recentPapers, searchTerm],
   )
+
+  const groupedReadings = useMemo(() => {
+    const deduped = [...recentReadings]
+      .sort((a, b) => b.openedAt - a.openedAt)
+      .reduce((acc, r) => {
+        if (!acc.has(r.fileName)) acc.set(r.fileName, r)
+        return acc
+      }, new Map())
+
+    return buildGroupedPapers(
+      [...deduped.values()].map((r) => ({
+        id: r.paperId,
+        title: r.title,
+        fileName: r.fileName,
+        folderName: r.folderName,
+        lastViewedAt: r.openedAt,
+        metadata: { author: r.author },
+        isOpen: false,
+      })),
+      searchTerm,
+    )
+  }, [recentReadings, searchTerm])
+
   const weeklyStats = useMemo(() => buildWeeklyStats(recentPapers), [recentPapers])
 
-  function handleCreateFolder() {
-    const result = onCreateFolder(folderName)
+  const globalSearchResults = useMemo(() => {
+    if ((activeSection !== 'library' && activeSection !== 'recent') || !searchTerm.trim()) return []
+    const kw = searchTerm.trim().toLowerCase()
+    return recentPapers
+      .filter((p) =>
+        [p.title, p.fileName, p.metadata?.author, p.metadata?.subject, p.metadata?.keywords]
+          .filter(Boolean)
+          .some((field) => (field || '').toLowerCase().includes(kw)),
+      )
+      .map((paper) => ({
+        ...paper,
+        _folderName:
+          paper.folderId === uncategorizedFolderId
+            ? '未分类'
+            : folders.find((f) => f.id === paper.folderId)?.name || '未分类',
+      }))
+  }, [activeSection, searchTerm, recentPapers, folders, uncategorizedFolderId])
+
+  function handleGlobalSearchClick(paper) {
+    setSearchTerm('')
+    setSelectedFolderId(paper.folderId)
+    setHighlightPaperId(paper.id)
+    setJumpPaperId(paper.id)
+  }
+
+  function handleClearHighlight() {
+    setHighlightPaperId('')
+    setJumpPaperId('')
+  }
+
+  async function handleCreateFolder() {
+    const result = await onCreateFolder(folderName)
     if (result.ok) {
       setFolderName('')
-      setFolderMessage(`已创建分类：${result.folder.name}`)
       setSelectedFolderId(result.folder.id)
       setIsCreatingFolder(false)
       setActiveSection('library')
-      return
     }
-
-    setFolderMessage(result.message)
   }
 
   function handleImportToFolder(folderId) {
@@ -373,7 +565,7 @@ export function HomePage({
   function handleDeleteFolder(folderId) {
     onDeleteFolder(folderId)
     if (selectedFolderId === folderId) {
-      setSelectedFolderId(UNCATEGORIZED_ID)
+      setSelectedFolderId(uncategorizedFolderId)
     }
   }
 
@@ -431,44 +623,76 @@ export function HomePage({
                       </div>
                     ) : null}
 
-                    {folderMessage ? (
-                      <p className="home-sidebar-message">{folderMessage}</p>
-                    ) : null}
-
                     <div className="home-sidebar-folder-tree">
-                      <button
-                        type="button"
-                        className={`home-sidebar-folder-tree__item${
-                          selectedFolderId === UNCATEGORIZED_ID ? ' is-active' : ''
-                        }`}
-                        onClick={() => setSelectedFolderId(UNCATEGORIZED_ID)}
-                      >
-                        <span>未分类</span>
-                      </button>
+                      <div className="home-sidebar-folder-tree__row">
+                        <button
+                          type="button"
+                          className={`home-sidebar-folder-tree__item${
+                            selectedFolderId === uncategorizedFolderId ? ' is-active' : ''
+                          }`}
+                          onClick={() => setSelectedFolderId(uncategorizedFolderId)}
+                        >
+                          <span>未分类</span>
+                        </button>
+                        <span className="home-sidebar-folder-tree__placeholder" />
+                      </div>
 
                       {folders.map((folder) => (
                         <div key={folder.id} className="home-sidebar-folder-tree__row">
-                          <button
-                            type="button"
-                            className={`home-sidebar-folder-tree__item${
-                              selectedFolderId === folder.id ? ' is-active' : ''
-                            }`}
-                            onClick={() => setSelectedFolderId(folder.id)}
-                          >
-                            <span>{folder.name}</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="home-sidebar-folder-tree__delete"
-                            aria-label={`删除分类 ${folder.name}`}
-                            title={`删除分类 ${folder.name}`}
-                            onClick={(event) => {
-                              event.stopPropagation()
-                              handleDeleteFolder(folder.id)
-                            }}
-                          >
-                            <Trash2 />
-                          </button>
+                          {editingFolderId === folder.id ? (
+                            <div className="home-sidebar-folder-tree__edit">
+                              <input
+                                type="text"
+                                className="home-sidebar-folder-tree__edit-input"
+                                value={editFolderName}
+                                onChange={(event) => setEditFolderName(event.target.value)}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter') {
+                                    event.preventDefault()
+                                    if (editFolderName.trim()) {
+                                      onRenameFolder(folder.id, editFolderName.trim())
+                                    }
+                                    setEditingFolderId('')
+                                  } else if (event.key === 'Escape') {
+                                    setEditingFolderId('')
+                                  }
+                                }}
+                                onBlur={() => setEditingFolderId('')}
+                                autoFocus
+                              />
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className={`home-sidebar-folder-tree__item${
+                                selectedFolderId === folder.id ? ' is-active' : ''
+                              }`}
+                              onClick={() => setSelectedFolderId(folder.id)}
+                              onDoubleClick={() => {
+                                if (folder.name !== '未分类') {
+                                  setEditingFolderId(folder.id)
+                                  setEditFolderName(folder.name)
+                                }
+                              }}
+                              title="双击重命名"
+                            >
+                              <span>{folder.name}</span>
+                            </button>
+                          )}
+                          {folder.name !== '未分类' ? (
+                            <button
+                              type="button"
+                              className="home-sidebar-folder-tree__delete"
+                              aria-label={`删除分类 ${folder.name}`}
+                              title={`删除分类 ${folder.name}`}
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                handleDeleteFolder(folder.id)
+                              }}
+                            >
+                              <Trash2 />
+                            </button>
+                          ) : null}
                         </div>
                       ))}
                     </div>
@@ -481,6 +705,7 @@ export function HomePage({
       </aside>
 
       <div className="home-content">
+        {activeSection !== 'resources' && activeSection !== 'trash' ? (
         <div className={`home-toolbar${activeSection === 'library' ? ' is-library' : ''}`}>
           <div className="home-toolbar__actions">
             <button
@@ -497,7 +722,7 @@ export function HomePage({
                 <button
                   type="button"
                   className="home-import-menu__item"
-                  onClick={() => handleImportToFolder(UNCATEGORIZED_ID)}
+                  onClick={() => handleImportToFolder(uncategorizedFolderId)}
                 >
                   导入到未分类
                 </button>
@@ -515,16 +740,39 @@ export function HomePage({
             ) : null}
           </div>
 
-          <label className="home-search">
-            <Search />
-            <input
-              type="search"
-              placeholder="搜索当前工作区文献"
-              value={searchTerm}
-              onChange={(event) => setSearchTerm(event.target.value)}
-            />
-          </label>
+          <div className="home-search-wrap">
+            <label className="home-search">
+              <Search />
+              <input
+                type="search"
+                placeholder={
+                  activeSection === 'library'
+                    ? '搜索全部文献标题、作者、关键词…'
+                    : '搜索当前工作区文献'
+                }
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+              />
+            </label>
+
+            {globalSearchResults.length > 0 ? (
+              <div className="home-search-results">
+                {globalSearchResults.map((paper) => (
+                  <button
+                    key={paper.id}
+                    type="button"
+                    className="home-search-results__item"
+                    onClick={() => handleGlobalSearchClick(paper)}
+                  >
+                    <span className="home-search-results__title">{paper.title}</span>
+                    <span className="home-search-results__folder">{paper._folderName}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </div>
+        ) : null}
 
         {activeSection === 'recent' ? (
           <>
@@ -575,23 +823,71 @@ export function HomePage({
         </div>
 
         {activeSection === 'recent' ? (
-          <RecentSection groupedPapers={groupedPapers} onOpenPaper={onOpenPaper} />
+          <RecentSection groupedPapers={groupedReadings} onOpenPaper={onOpenPaper} />
         ) : null}
 
         {activeSection === 'library' ? (
           <CategorySection
             folders={folders}
+            highlightPaperId={highlightPaperId}
+            jumpPaperId={jumpPaperId}
+            onClearHighlight={handleClearHighlight}
             onDeletePaper={onDeletePaper}
+            onMovePaper={onMovePaper}
             onOpenPaper={onOpenPaper}
             recentPapers={recentPapers}
             searchTerm={searchTerm}
             selectedFolderId={selectedFolderId}
+            uncategorizedFolderId={uncategorizedFolderId}
           />
         ) : null}
 
         {activeSection === 'resources' ? <ResourcesSection /> : null}
         {activeSection === 'trash' ? <TrashSection /> : null}
       </div>
+
+      {isImporting || importConflict ? (
+        <div className="home-import-overlay">
+          {importConflict ? (
+            <div className="home-conflict-dialog">
+              <p>{importConflict.message}</p>
+              <div className="home-conflict-dialog__actions">
+                {importConflict.conflictType === 'other_folder' ? (
+                  <>
+                    <button
+                      type="button"
+                      className="home-primary-button"
+                      onClick={onResolveImportConflict}
+                    >
+                      确认移入
+                    </button>
+                    <button
+                      type="button"
+                      className="home-secondary-button"
+                      onClick={onCancelImportConflict}
+                    >
+                      取消
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="home-primary-button"
+                    onClick={onCancelImportConflict}
+                  >
+                    知道了
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="home-import-spinner">
+              <div className="home-import-spinner__ring" />
+              <p>导入中...</p>
+            </div>
+          )}
+        </div>
+      ) : null}
     </section>
   )
 }

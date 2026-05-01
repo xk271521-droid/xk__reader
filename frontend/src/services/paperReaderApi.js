@@ -1,10 +1,134 @@
+import { getStoredAuthToken } from './authApi'
+
+const PAPERS_BASE = '/api/papers'
+
 async function parseJsonResponse(response) {
   if (!response.ok) {
-    throw new Error(`Request failed with status ${response.status}`)
+    let detail = '请求失败，请稍后再试。'
+    try {
+      const payload = await response.json()
+      if (typeof payload?.detail === 'string') {
+        detail = payload.detail
+      }
+    } catch {
+      // ignore parse error
+    }
+    throw new Error(detail)
   }
 
   return response.json()
 }
+
+function authHeaders() {
+  const token = getStoredAuthToken()
+  if (!token) return {}
+  return { Authorization: `Bearer ${token}` }
+}
+
+// ── Folders ──────────────────────────────────────────────
+
+export async function fetchFolders() {
+  const response = await fetch(`${PAPERS_BASE}/folders`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function createFolder(name) {
+  const response = await fetch(`${PAPERS_BASE}/folders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ name }),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function renameFolder(id, name) {
+  const response = await fetch(`${PAPERS_BASE}/folders/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ name }),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function deleteFolder(id) {
+  const response = await fetch(`${PAPERS_BASE}/folders/${id}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  if (!response.ok) {
+    let detail = '删除失败'
+    try {
+      const payload = await response.json()
+      if (typeof payload?.detail === 'string') detail = payload.detail
+    } catch {}
+    throw new Error(detail)
+  }
+  return null
+}
+
+// ── Papers ───────────────────────────────────────────────
+
+export async function fetchPapers(folderId) {
+  let url = PAPERS_BASE
+  if (folderId != null && folderId !== '') {
+    url += `?folder_id=${folderId}`
+  }
+  const response = await fetch(url, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function uploadPaper(file, metadata, folderId) {
+  const formData = new FormData()
+  formData.append('file', file)
+  if (metadata) {
+    formData.append('metadata_json', JSON.stringify(metadata))
+  }
+  if (folderId != null && folderId !== '') {
+    formData.append('folder_id', String(folderId))
+  }
+
+  const response = await fetch(PAPERS_BASE, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: formData,
+  })
+  return parseJsonResponse(response)
+}
+
+export async function updatePaper(id, data) {
+  const response = await fetch(`${PAPERS_BASE}/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function deletePaper(id) {
+  const response = await fetch(`${PAPERS_BASE}/${id}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  if (!response.ok) {
+    let detail = '删除失败'
+    try {
+      const payload = await response.json()
+      if (typeof payload?.detail === 'string') detail = payload.detail
+    } catch {}
+    throw new Error(detail)
+  }
+  return null
+}
+
+export function getPaperFileUrl(paperId) {
+  return `${PAPERS_BASE}/${paperId}/file`
+}
+
+// ── Legacy (unchanged) ───────────────────────────────────
 
 export async function fetchBackendHealth() {
   const response = await fetch('/api/health')
@@ -19,6 +143,5 @@ export async function fetchSelectionInsight(payload) {
     },
     body: JSON.stringify(payload),
   })
-
   return parseJsonResponse(response)
 }
