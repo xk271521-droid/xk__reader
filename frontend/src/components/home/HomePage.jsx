@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   BookCopy,
-  BookMarked,
   ChevronLeft,
   ChevronRight,
   Clock3,
@@ -10,9 +9,12 @@ import {
   FolderClosed,
   FolderPlus,
   LibraryBig,
+  Moon,
   MoreHorizontal,
   Package2,
   Search,
+  Sun,
+  Sunrise,
   TimerReset,
   Trash2,
 } from 'lucide-react'
@@ -89,32 +91,18 @@ function buildGroupedPapers(recentPapers, searchTerm) {
     .filter((group) => group.items.length > 0)
 }
 
-function buildWeeklyStats(recentPapers) {
-  const now = Date.now()
-  const weekThreshold = now - 7 * 24 * 60 * 60 * 1000
-  const weeklyPapers = recentPapers.filter((paper) => paper.lastViewedAt >= weekThreshold)
-  const totalPages = weeklyPapers.reduce((sum, paper) => sum + (paper.metadata.pageCount || 0), 0)
+function periodLabel(period) {
+  if (period === 'morning') return '上午 (6-12时)'
+  if (period === 'afternoon') return '下午 (12-18时)'
+  if (period === 'evening') return '晚上 (18-次日6时)'
+  return '--'
+}
 
-  return [
-    {
-      id: 'sessions',
-      label: '本周阅读次数',
-      value: `${Math.max(weeklyPapers.length * 2, recentPapers.length)} 次`,
-      icon: TimerReset,
-    },
-    {
-      id: 'papers',
-      label: '本周阅读篇数',
-      value: `${weeklyPapers.length} 篇`,
-      icon: BookCopy,
-    },
-    {
-      id: 'duration',
-      label: '预估阅读时长',
-      value: `${Math.max(30, Math.round(totalPages * 1.8 || 30))} 分钟`,
-      icon: BookMarked,
-    },
-  ]
+function periodIcon(period) {
+  if (period === 'morning') return Sunrise
+  if (period === 'afternoon') return Sun
+  if (period === 'evening') return Moon
+  return Clock3
 }
 
 function getTranslatedTitle(paper) {
@@ -469,6 +457,7 @@ export function HomePage({
   onResolveImportConflict,
   recentPapers,
   recentReadings = [],
+  readingStats = null,
   uncategorizedFolderId,
 }) {
   const [activeSection, setActiveSection] = useState('recent')
@@ -515,7 +504,39 @@ export function HomePage({
     )
   }, [recentReadings, searchTerm])
 
-  const weeklyStats = useMemo(() => buildWeeklyStats(recentPapers), [recentPapers])
+  const weeklyStats = useMemo(() => {
+    if (!readingStats) {
+      return [
+        { id: 'sessions', label: '本周阅读次数', value: '-- 次', icon: TimerReset, period: null },
+        { id: 'papers', label: '本周阅读篇数', value: '-- 篇', icon: BookCopy, period: null },
+        { id: 'rhythm', label: '阅读活跃时段', value: '--', icon: Clock3, period: null },
+      ]
+    }
+    const dominant = readingStats.dominant_period
+    return [
+      {
+        id: 'sessions',
+        label: '本周阅读次数',
+        value: `${readingStats.weekly_opens} 次`,
+        icon: TimerReset,
+        period: null,
+      },
+      {
+        id: 'papers',
+        label: '本周阅读篇数',
+        value: `${readingStats.weekly_distinct_papers} 篇`,
+        icon: BookCopy,
+        period: null,
+      },
+      {
+        id: 'rhythm',
+        label: '阅读活跃时段',
+        value: periodLabel(dominant),
+        icon: periodIcon(dominant),
+        period: dominant,
+      },
+    ]
+  }, [readingStats])
 
   const globalSearchResults = useMemo(() => {
     if ((activeSection !== 'library' && activeSection !== 'recent') || !searchTerm.trim()) return []
@@ -790,10 +811,15 @@ export function HomePage({
             <div className="home-stats-grid">
               {weeklyStats.map((item) => {
                 const Icon = item.icon
+                const cardClass = [
+                  'home-stat-card',
+                  item.period ? `home-stat-card--${item.period}` : '',
+                ].filter(Boolean).join(' ')
+                const iconClass = item.period ? 'icon-animate-pulse' : ''
                 return (
-                  <article key={item.id} className="home-stat-card">
+                  <article key={item.id} className={cardClass}>
                     <div className="home-stat-card__icon">
-                      <Icon />
+                      <Icon className={iconClass} />
                     </div>
                     <div>
                       <p>{item.label}</p>

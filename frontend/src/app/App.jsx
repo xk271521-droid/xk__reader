@@ -60,6 +60,7 @@ function App() {
     pageNumbers,
     pdfDocument,
     recentPapers,
+    readingStats,
     recentReadings,
     renameFolder,
     resolveImportConflict,
@@ -85,7 +86,7 @@ function App() {
 
   const { selectionCard, handleSelection } = useSelectionInsight({
     readerRef,
-    paperTitle: fileName,
+    paperTitle: metadata.title || fileName,
   })
 
   useEffect(() => {
@@ -376,6 +377,7 @@ function App() {
             onResolveImportConflict={resolveImportConflict}
             recentPapers={recentPapers}
             recentReadings={recentReadings}
+            readingStats={readingStats}
             uncategorizedFolderId={uncategorizedFolderId}
           />
         </div>

@@ -128,6 +128,35 @@ export function getPaperFileUrl(paperId) {
   return `${PAPERS_BASE}/${paperId}/file`
 }
 
+// ── Reading Records ──────────────────────────────────────
+
+export async function recordReadingEvent(paperId, openedAt) {
+  const body = { paper_id: Number(paperId) }
+  if (openedAt != null) body.opened_at = new Date(openedAt).toISOString()
+  const response = await fetch('/api/reading-records', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchReadingStats() {
+  const response = await fetch('/api/reading-records/stats', {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function syncReadingRecords(records) {
+  const response = await fetch('/api/reading-records/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ records }),
+  })
+  return parseJsonResponse(response)
+}
+
 // ── Legacy (unchanged) ───────────────────────────────────
 
 export async function fetchBackendHealth() {

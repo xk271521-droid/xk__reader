@@ -7,8 +7,11 @@ import {
   deletePaper as apiDeletePaper,
   fetchFolders,
   fetchPapers,
+  fetchReadingStats,
   getPaperFileUrl,
+  recordReadingEvent,
   renameFolder as apiRenameFolder,
+  syncReadingRecords,
   updatePaper as apiUpdatePaper,
   uploadPaper,
 } from '../services/paperReaderApi'
@@ -257,6 +260,7 @@ export function usePdfReader({ currentUser } = {}) {
   const [uncategorizedFolderId, setUncategorizedFolderId] = useState('')
   const [recentReadings, setRecentReadings] = useState(getStoredRecentReadings())
   const [importConflict, setImportConflict] = useState(null)
+  const [readingStats, setReadingStats] = useState(null)
 
   // ── Cleanup on unmount ──────────────────────────────────
 
@@ -306,6 +310,66 @@ export function usePdfReader({ currentUser } = {}) {
       // Close tabs that came from previous session
       setOpenTabIds([])
       setActiveView('home')
+
+      // ── Sync reading records ──
+      const localReadings = getStoredRecentReadings()
+      const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000
+
+      // Upload local records to server (only within 30 days)
+      const uploadable = localReadings
+        .filter((r) => r.openedAt > thirtyDaysAgo)
+        .map((r) => ({
+          paper_id: Number(r.paperId),
+          opened_at: new Date(r.openedAt).toISOString(),
+        }))
+        .filter((r) => !Number.isNaN(r.paper_id))
+
+      if (uploadable.length > 0) {
+        syncReadingRecords(uploadable).catch(() => {})
+      }
+
+      // Pull server stats + records
+      try {
+        const statsData = await fetchReadingStats()
+        setReadingStats(statsData)
+
+        // Merge server records into localStorage
+        const mergedMap = new Map()
+        const allLocalFolders = [...userFolders, uncategorized]
+        const folderById = new Map(allLocalFolders.map((f) => [String(f.id), f]))
+
+        // Add server records
+        ;(statsData.recent_records || []).forEach((r) => {
+          const key = `${r.paper_id}_${r.opened_at}`
+          const paper = localPapers.find((p) => String(p.id) === String(r.paper_id))
+          mergedMap.set(key, {
+            paperId: String(r.paper_id),
+            title: r.title || (paper ? paper.fileName.replace(/\.pdf$/i, '') : ''),
+            fileName: r.file_name || (paper ? paper.fileName : ''),
+            folderName: r.folder_name || (paper ? folderById.get(String(paper.folderId))?.name : '') || '未分类',
+            author: r.author || (paper?.metadata?.author || ''),
+            openedAt: Date.parse(r.opened_at),
+          })
+        })
+
+        // Add localStorage entries (deduped by key)
+        localReadings.forEach((r) => {
+          const key = `${r.paperId}_${r.openedAt}`
+          if (!mergedMap.has(key)) {
+            mergedMap.set(key, r)
+          }
+        })
+
+        const mergedList = [...mergedMap.values()]
+          .filter((r) => r.openedAt > thirtyDaysAgo)
+          .sort((a, b) => b.openedAt - a.openedAt)
+          .slice(0, 50)
+
+        localStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(mergedList))
+        setRecentReadings(mergedList)
+      } catch {
+        // stats fetch failed — keep localStorage state
+      }
     } catch (error) {
       console.error('syncFromBackend failed:', error)
     }
@@ -434,16 +498,26 @@ export function usePdfReader({ currentUser } = {}) {
     )
     setActiveView(paperId)
 
+    // Only record reading event if this is a fresh open (not switching tabs)
+    const isAlreadyOpen = openTabIds.includes(paperId)
+
     // Write to localStorage recent readings
     const folderName = folderMap.get(paper.folderId)?.name || '未分类'
     const readings = addRecentReadingToStorage({ ...paper, folderName })
     setRecentReadings(readings)
 
-    // Sync last_viewed_at to backend
+    // Sync to backend
     if (getStoredAuthToken()) {
       const serverId = Number(paperId)
       if (!Number.isNaN(serverId)) {
         apiUpdatePaper(serverId, { last_viewed_at: true }).catch(() => {})
+        // Only record a new reading event if not already open in tabs
+        if (!isAlreadyOpen) {
+          recordReadingEvent(serverId, Date.now())
+            .then(() => fetchReadingStats())
+            .then((stats) => { if (stats) setReadingStats(stats) })
+            .catch(() => {})
+        }
       }
     }
 
@@ -947,6 +1021,7 @@ export function usePdfReader({ currentUser } = {}) {
     ),
     pdfDocument: activePaper?.pdfDocument ?? null,
     recentPapers,
+    readingStats,
     recentReadings,
     renameFolder,
     resolveImportConflict,

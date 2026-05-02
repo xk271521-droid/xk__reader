@@ -27,6 +27,7 @@ export function PaperReader({
 
       <div className="reader-body has-insight">
         <PdfViewport
+          activeTool={activeTool}
           error={pdfReader.error}
           isLoading={pdfReader.isLoading}
           pageMetrics={pdfReader.pageMetrics}

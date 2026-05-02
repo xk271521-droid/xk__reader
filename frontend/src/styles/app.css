@@ -962,6 +962,119 @@
   color: var(--accent-strong);
 }
 
+/* ── Time-of-day stat card animations ── */
+
+.home-stat-card--morning {
+  background: linear-gradient(135deg, #FFF9ED, #FFFAF5);
+  border-color: rgba(251, 191, 36, 0.3);
+}
+
+.home-stat-card--morning .home-stat-card__icon {
+  background: rgba(251, 191, 36, 0.15);
+  color: #D97706;
+}
+
+.home-stat-card--afternoon {
+  background: linear-gradient(135deg, #FFF7ED, #FFFBEB);
+  border-color: rgba(249, 115, 22, 0.25);
+}
+
+.home-stat-card--afternoon .home-stat-card__icon {
+  background: rgba(249, 115, 22, 0.15);
+  color: #EA580C;
+}
+
+.home-stat-card--evening {
+  background: linear-gradient(135deg, #1E1B4B, #312E81);
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
+.home-stat-card--evening .home-stat-card__icon {
+  background: rgba(99, 102, 241, 0.2);
+  color: #A5B4FC;
+}
+
+.home-stat-card--evening p {
+  color: #A5B4FC;
+}
+
+.home-stat-card--evening strong {
+  color: #E0E7FF;
+}
+
+.icon-animate-pulse {
+  animation: period-pulse 2.5s ease-in-out infinite;
+}
+
+@keyframes period-pulse {
+
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+
+  50% {
+    transform: scale(1.15);
+    opacity: 0.8;
+  }
+}
+
+/* Morning: gentle rise */
+.home-stat-card--morning .icon-animate-pulse {
+  animation: morning-rise 2.5s ease-out infinite;
+}
+
+@keyframes morning-rise {
+  0% {
+    transform: translateY(3px) scale(1);
+    opacity: 0.7;
+  }
+
+  100% {
+    transform: translateY(0) scale(1.1);
+    opacity: 1;
+  }
+}
+
+/* Afternoon: warm shimmer */
+.home-stat-card--afternoon .icon-animate-pulse {
+  animation: afternoon-shimmer 3s ease-in-out infinite;
+}
+
+@keyframes afternoon-shimmer {
+
+  0%,
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+
+  50% {
+    transform: scale(1.1);
+    filter: brightness(1.2);
+  }
+}
+
+/* Evening: gentle moon glow */
+.home-stat-card--evening .icon-animate-pulse {
+  animation: evening-glow 3s ease-in-out infinite;
+}
+
+@keyframes evening-glow {
+
+  0%,
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 4px rgba(129, 140, 248, 0.5));
+  }
+
+  50% {
+    transform: scale(1.12);
+    filter: drop-shadow(0 0 8px rgba(129, 140, 248, 0.8));
+  }
+}
+
 .home-section-head {
   display: flex;
   align-items: baseline;
@@ -1059,11 +1172,11 @@
 }
 
 .home-category-table__head span,
-.home-category-table__row > span {
+.home-category-table__row>span {
   min-width: 0;
 }
 
-.home-category-table__row > span {
+.home-category-table__row>span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1426,6 +1539,7 @@
     opacity: 0;
     transform: translateY(-4px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);
@@ -1433,9 +1547,12 @@
 }
 
 @keyframes flashHighlight {
-  0%, 100% {
+
+  0%,
+  100% {
     background-color: transparent;
   }
+
   50% {
     background-color: rgba(59, 130, 246, 0.12);
   }
@@ -1876,7 +1993,9 @@
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .home-row-menu__item-wrap {
@@ -2321,9 +2440,32 @@ body.is-resizing-panel {
   overflow: auto;
 }
 
+.insight-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .insight-panel__header h2 {
   margin: 8px 0 0;
   font-size: 22px;
+}
+
+.insight-kind-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #f5fcf7 0%, #eaf5ee 100%);
+  border: 1px solid #d7e8db;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .insight-placeholder {
@@ -2340,12 +2482,58 @@ body.is-resizing-panel {
   gap: 12px;
 }
 
+.insight-meta-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.insight-meta-row span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: #f5f8f6;
+  border: 1px solid #e0e8e2;
+  color: #688095;
+  font-size: 12px;
+}
+
 .insight-block {
   background: linear-gradient(180deg, #ffffff 0%, #f8fbf9 100%);
   border: 1px solid #e4ece5;
   border-radius: 22px;
   padding: 16px 16px 14px;
   box-shadow: 0 12px 26px rgba(18, 31, 48, 0.04);
+}
+
+.insight-block__title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.insight-block__title-row button {
+  border: 0;
+  border-radius: 999px;
+  background: #eff5f1;
+  color: #425468;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.insight-block__title-row button:hover {
+  background: #e2eee7;
+  color: #142334;
+}
+
+.insight-block__title-row span {
+  margin-bottom: 0;
 }
 
 .insight-block span {
@@ -2360,6 +2548,59 @@ body.is-resizing-panel {
 .insight-placeholder p {
   margin: 0;
   line-height: 1.8;
+}
+
+.insight-focus-list,
+.insight-glossary-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.insight-focus-list p {
+  position: relative;
+  padding-left: 16px;
+}
+
+.insight-focus-list p::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 11px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #2f9e62;
+}
+
+.insight-glossary-item {
+  padding: 12px 12px 10px;
+  border-radius: 16px;
+  border: 1px solid #e7ede7;
+  background: #fbfdfb;
+}
+
+.insight-glossary-item strong {
+  display: block;
+  margin-bottom: 4px;
+  color: #152434;
+  font-size: 14px;
+}
+
+.insight-glossary-item p {
+  color: #5b6c7c;
+}
+
+.insight-status-card {
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid #e4ece5;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.insight-status-card--error {
+  border-color: #f0d3cf;
+  background: #fff8f7;
 }
 
 .muted,
@@ -2529,7 +2770,7 @@ body.is-resizing-panel {
   line-height: 1.7;
 }
 
-.workspace-list-card p + p {
+.workspace-list-card p+p {
   margin-top: 10px;
 }
 
@@ -2637,6 +2878,7 @@ body.is-resizing-panel {
 }
 
 @media (max-width: 1200px) {
+
   .home-stats-grid,
   .home-panel-grid {
     grid-template-columns: 1fr;
@@ -2644,6 +2886,7 @@ body.is-resizing-panel {
 }
 
 @media (max-width: 1100px) {
+
   .reader-body,
   .reader-body.has-insight {
     grid-template-columns: 1fr;
@@ -3084,4 +3327,58 @@ body.is-resizing-panel {
   .account-input {
     width: 100%;
   }
+}
+
+/* =========================
+   PDF text selection restore
+   只保留这一段，放在 app.css 最底部
+   ========================= */
+
+.pdf-page-frame {
+  position: relative;
+}
+
+.pdf-page-frame canvas {
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pdf-page-badge {
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pdf-stage .textLayer {
+  pointer-events: auto;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.pdf-stage .textLayer span,
+.pdf-stage .textLayer br {
+  pointer-events: auto;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text;
+}
+
+.pdf-stage .textLayer,
+.pdf-stage .textLayer span,
+.pdf-stage .textLayer br {
+  color: transparent !important;
+  -webkit-text-fill-color: transparent;
+}
+
+.pdf-stage.is-selection-locked .textLayer,
+.pdf-stage.is-selection-locked .textLayer span,
+.pdf-stage.is-selection-locked .textLayer br,
+.pdf-stage.is-selection-locked .textLayer .endOfContent {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+.pdf-stage .textLayer ::selection {
+  background: rgba(77, 166, 255, 0.26);
 }

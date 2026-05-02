@@ -48,6 +48,10 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    reading_records: Mapped[list["ReadingRecord"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class UserProfile(Base):

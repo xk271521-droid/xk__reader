@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.router import api_router
 from app.core.config import settings
 from app.db.session import Base, engine
-from app.models import Folder, Paper, User, UserAgreement, UserProfile  # noqa: F401
+from app.models import Folder, Paper, ReadingRecord, User, UserAgreement, UserProfile  # noqa: F401
 
 
 def create_app() -> FastAPI:

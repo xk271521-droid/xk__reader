@@ -76,3 +76,14 @@ def translate_title(text: str, discipline: str = "") -> str | None:
 
     domain = _map_discipline_to_domain(discipline)
     return _baidu_translate(text, domain=domain)
+
+
+def translate_text(text: str, domain: str = "academic") -> str | None:
+    """通用文本翻译。已有中文则原样返回，失败时返回 None。"""
+    if not text:
+        return None
+
+    if _has_chinese(text):
+        return text
+
+    return _baidu_translate(text, domain=domain)

@@ -15,7 +15,7 @@ def selection_insight(
     payload: SelectionInsightRequest,
 ) -> SelectionInsightResponse:
     text = payload.text.strip()
-    if len(text) < 3:
+    if len(text) < 2:
         raise HTTPException(status_code=400, detail="Selected text is too short.")
 
     return build_selection_insight(text=text, paper_title=payload.paper_title)

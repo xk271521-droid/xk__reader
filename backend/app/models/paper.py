@@ -63,6 +63,10 @@ class Paper(Base):
 
     user: Mapped["User"] = relationship(back_populates="papers")
     folder: Mapped["Folder"] = relationship(back_populates="papers")
+    reading_records: Mapped[list["ReadingRecord"]] = relationship(
+        back_populates="paper",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         # 同一用户下，文件名+大小联合唯一，防止重复导入
