@@ -3,11 +3,46 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select
 
 from app.api.router import api_router
 from app.core.config import settings
-from app.db.session import Base, engine
-from app.models import Folder, Paper, ReadingRecord, User, UserAgreement, UserProfile  # noqa: F401
+from app.db.session import Base, SessionLocal, engine
+from app.models import AiProvider, Folder, Paper, ReadingRecord, User, UserAgreement, UserProfile  # noqa: F401
+
+
+def _ensure_system_providers() -> None:
+    """启动时创建/更新系统默认 AI 厂商"""
+    from app.services.crypto import encrypt_api_key
+
+    db = SessionLocal()
+    try:
+        for idx, sp in enumerate(settings.system_providers):
+            existing = db.scalar(
+                select(AiProvider).where(
+                    AiProvider.user_id.is_(None),
+                    AiProvider.base_url == sp["base_url"],
+                    AiProvider.model == sp["model"],
+                )
+            )
+            if existing:
+                existing.encrypted_api_key = encrypt_api_key(sp["api_key"])
+                existing.label = sp["label"]
+                existing.sort_order = sp.get("sort_order", idx)
+                existing.is_active = True
+            else:
+                provider = AiProvider(
+                    user_id=None,
+                    label=sp["label"],
+                    base_url=sp["base_url"],
+                    encrypted_api_key=encrypt_api_key(sp["api_key"]),
+                    model=sp["model"],
+                    sort_order=sp.get("sort_order", idx),
+                )
+                db.add(provider)
+        db.commit()
+    finally:
+        db.close()
 
 
 def create_app() -> FastAPI:
@@ -29,6 +64,7 @@ def create_app() -> FastAPI:
     @application.on_event("startup")
     def create_tables() -> None:
         Base.metadata.create_all(bind=engine)
+        _ensure_system_providers()
 
     return application
 

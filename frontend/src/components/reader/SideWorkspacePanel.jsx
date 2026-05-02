@@ -160,12 +160,10 @@ export function SideWorkspacePanel({
   selectionCard,
   width,
 }) {
-  if (!activePanel) {
-    return null
-  }
+  const isCollapsed = !activePanel
 
   return (
-    <aside className="workspace-panel" style={{ width }}>
+    <aside className={`workspace-panel${isCollapsed ? ' is-collapsed' : ''}`} style={{ width: isCollapsed ? 0 : width }}>
       {activePanel === 'info' ? <InfoPanel fileName={fileName} metadata={metadata} /> : null}
       {activePanel === 'notes' ? <NotesPanel /> : null}
       {activePanel === 'ask' ? <AskPanel selectionCard={selectionCard} /> : null}

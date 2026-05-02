@@ -174,3 +174,52 @@ export async function fetchSelectionInsight(payload) {
   })
   return parseJsonResponse(response)
 }
+
+// ── AI 厂商 & 摘要 ─────────────────────────────────────
+
+export async function fetchAiProviders() {
+  const response = await fetch('/api/providers', {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function createAiProvider(data) {
+  const response = await fetch('/api/providers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function updateAiProvider(id, data) {
+  const response = await fetch(`/api/providers/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function deleteAiProvider(id) {
+  const response = await fetch(`/api/providers/${id}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  if (!response.ok) {
+    let detail = '删除失败'
+    try { const p = await response.json(); if (typeof p?.detail === 'string') detail = p.detail } catch {}
+    throw new Error(detail)
+  }
+  return null
+}
+
+export async function fetchPaperSummary(text, providerId) {
+  const response = await fetch('/api/summarize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ text, provider_id: providerId }),
+  })
+  return parseJsonResponse(response)
+}

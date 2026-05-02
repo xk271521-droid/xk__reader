@@ -9,12 +9,17 @@ from app.core.config import settings
 
 BAIDU_API_URL = "https://fanyi-api.baidu.com/api/trans/vip/translate"
 
+VALID_DOMAINS: set[str] = {
+    "it", "finance", "machinery", "senimed", "academic",
+    "aerospace", "news", "law", "contract",
+}
+
 DISCIPLINE_DOMAIN_MAP: dict[tuple[str, ...], str] = {
     ("计算机", "软件", "人工智能", "电子", "信息", "数据", "网络", "编程", "算法"): "it",
     ("金融", "经济", "会计", "管理", "商业", "贸易", "财务"): "finance",
     ("机械", "制造", "工程", "材料", "自动化", "电气", "土木"): "machinery",
     ("生物", "医学", "药学", "临床", "化学", "遗传", "免疫", "神经"): "senimed",
-    ("文学", "语言", "历史", "哲学", "艺术", "音乐"): "novel",
+    ("文学", "语言", "历史", "哲学", "艺术", "音乐"): "academic",
 }
 
 
@@ -33,8 +38,8 @@ def _map_discipline_to_domain(discipline: str) -> str:
     return "academic"
 
 
-def _baidu_translate(text: str, domain: str = "academic") -> str | None:
-    """调用百度翻译 API，成功返回译文，失败返回 None"""
+def _baidu_translate(text: str, domain: str = "") -> str | None:
+    """调用百度翻译 API，成功返回译文，失败返回 None。domain 为空时不传领域参数走通用翻译。"""
     if not settings.translate_enabled:
         return None
 
@@ -49,8 +54,10 @@ def _baidu_translate(text: str, domain: str = "academic") -> str | None:
         "appid": settings.baidu_translate_appid,
         "salt": salt,
         "sign": sign,
-        "domain": domain,
     }
+
+    if domain:
+        params["domain"] = domain
 
     try:
         req = Request(
@@ -78,12 +85,15 @@ def translate_title(text: str, discipline: str = "") -> str | None:
     return _baidu_translate(text, domain=domain)
 
 
-def translate_text(text: str, domain: str = "academic") -> str | None:
-    """通用文本翻译。已有中文则原样返回，失败时返回 None。"""
+def translate_text(text: str, domain: str = "") -> str | None:
+    """通用文本翻译。已有中文则原样返回，失败时返回 None。domain 为空时走通用翻译。"""
     if not text:
         return None
 
     if _has_chinese(text):
         return text
+
+    if domain and domain not in VALID_DOMAINS:
+        domain = ""
 
     return _baidu_translate(text, domain=domain)

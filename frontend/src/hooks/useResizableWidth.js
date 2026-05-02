@@ -4,6 +4,8 @@ function clampWidth(width, minWidth, maxWidth) {
   return Math.min(maxWidth, Math.max(minWidth, width))
 }
 
+const NOOP = () => {}
+
 export function useResizableWidth({ initialWidth, minWidth, maxWidth }) {
   const [width, setWidth] = useState(initialWidth)
   const resizeStateRef = useRef(null)
@@ -11,18 +13,18 @@ export function useResizableWidth({ initialWidth, minWidth, maxWidth }) {
   const stopResizeRef = useRef(null)
 
   const handlePointerMove = useCallback((event) => {
-    if (!resizeStateRef.current) {
-      return
-    }
+    if (!resizeStateRef.current) return
 
-    const { startX, startWidth } = resizeStateRef.current
-    const nextWidth = clampWidth(
-      startWidth - (event.clientX - startX),
-      minWidth,
-      maxWidth,
-    )
-
-    setWidth(nextWidth)
+    const { startX, startWidth, direction } = resizeStateRef.current
+    requestAnimationFrame(() => {
+      const delta = event.clientX - startX
+      const nextWidth = clampWidth(
+        direction === 'left' ? startWidth + delta : startWidth - delta,
+        minWidth,
+        maxWidth,
+      )
+      setWidth(nextWidth)
+    })
   }, [maxWidth, minWidth])
 
   const stopResize = useCallback(() => {
@@ -47,6 +49,18 @@ export function useResizableWidth({ initialWidth, minWidth, maxWidth }) {
     window.addEventListener('pointerup', stopResize)
   }, [handlePointerMove, stopResize, width])
 
+  function startResizeLeft(event) {
+    resizeStateRef.current = {
+      startX: event.clientX,
+      startWidth: width,
+      direction: 'left',
+    }
+
+    document.body.classList.add('is-resizing-panel')
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', stopResize)
+  }
+
   useEffect(() => {
     handlePointerMoveRef.current = handlePointerMove
     stopResizeRef.current = stopResize
@@ -66,5 +80,6 @@ export function useResizableWidth({ initialWidth, minWidth, maxWidth }) {
     width,
     setWidth,
     startResize,
+    startResizeLeft,
   }
 }

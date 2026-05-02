@@ -1,8 +1,13 @@
 import {
-  FileText,
+  Columns,
+  Crop,
+  Download,
   Highlighter,
   MessageSquareText,
   MousePointer2,
+  Paintbrush,
+  Pencil,
+  Search,
   Sparkles,
   ZoomIn,
   ZoomOut,
@@ -11,8 +16,11 @@ import {
 const toolItems = [
   { id: 'select', label: '选择', icon: MousePointer2 },
   { id: 'highlight', label: '高亮', icon: Highlighter },
+  { id: 'underline', label: '下划线', icon: Pencil },
   { id: 'note', label: '批注', icon: MessageSquareText },
-  { id: 'summary', label: '总结', icon: Sparkles },
+  { id: 'search', label: '查找', icon: Search },
+  { id: 'screenshot', label: '截图', icon: Crop },
+  { id: 'download', label: '下载', icon: Download },
 ]
 
 function ToolbarIconButton({ children, label, onClick, active = false }) {
@@ -31,6 +39,8 @@ function ToolbarIconButton({ children, label, onClick, active = false }) {
 
 export function PdfToolbar({
   activeTool,
+  isThumbnailsOpen,
+  onToggleThumbnails,
   onToolChange,
   onZoomIn,
   onZoomOut,
@@ -41,7 +51,13 @@ export function PdfToolbar({
   return (
     <div className="reader-toolbar">
       <div className="toolbar-group toolbar-group--file">
-        <FileText className="toolbar-file-icon" aria-hidden="true" />
+        <ToolbarIconButton
+          label={isThumbnailsOpen ? '关闭缩略图' : '打开缩略图'}
+          onClick={onToggleThumbnails}
+          active={isThumbnailsOpen}
+        >
+          <Columns />
+        </ToolbarIconButton>
       </div>
 
       <div className="toolbar-group toolbar-group--tools">

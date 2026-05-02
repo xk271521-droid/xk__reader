@@ -1,23 +1,28 @@
+import { PageThumbnails } from './PageThumbnails'
 import { PdfToolbar } from './PdfToolbar'
 import { PdfViewport } from './PdfViewport'
-import { SelectionInsightPanel } from './SelectionInsightPanel'
 
 export function PaperReader({
   pdfReader,
   readerRef,
-  selectionCard,
   activeTool,
-  insightPanelWidth,
+  isThumbnailsOpen,
+  thumbnailWidth,
+  onThumbnailResizeStart,
+  onToggleThumbnails,
   onToolChange,
-  onInsightResizeStart,
   onSelect,
+  onThumbnailPageClick,
+  onWheelZoom,
 }) {
   return (
     <section className="reader-frame">
       <PdfToolbar
         fileName={pdfReader.fileName}
         activeTool={activeTool}
+        isThumbnailsOpen={isThumbnailsOpen}
         onToolChange={onToolChange}
+        onToggleThumbnails={onToggleThumbnails}
         onZoomIn={pdfReader.zoomIn}
         onZoomOut={pdfReader.zoomOut}
         pageNumber={pdfReader.pageNumber}
@@ -25,7 +30,26 @@ export function PaperReader({
         totalPages={pdfReader.totalPages}
       />
 
-      <div className="reader-body has-insight">
+      <div className={`reader-body${isThumbnailsOpen ? ' has-thumbnails' : ''}`}>
+        <div className="thumbnails-slide" style={{ width: isThumbnailsOpen ? thumbnailWidth : 0 }}>
+          <PageThumbnails
+            currentPage={pdfReader.pageNumber}
+            pageMetrics={pdfReader.pageMetrics}
+            pageNumbers={pdfReader.pageNumbers}
+            pdfDocument={pdfReader.pdfDocument}
+            width={thumbnailWidth}
+            onPageClick={onThumbnailPageClick}
+          />
+
+          <div
+            aria-label="调整缩略图面板宽度"
+            aria-orientation="vertical"
+            className="reader-resizer reader-resizer--left"
+            onPointerDown={onThumbnailResizeStart}
+            role="separator"
+          />
+        </div>
+
         <PdfViewport
           activeTool={activeTool}
           error={pdfReader.error}
@@ -39,17 +63,8 @@ export function PaperReader({
           onFitToWidth={pdfReader.fitToWidth}
           onSelect={onSelect}
           onVisiblePageChange={pdfReader.setCurrentPage}
+          onWheelZoom={onWheelZoom}
         />
-
-        <div
-          aria-label="调整即时理解面板宽度"
-          aria-orientation="vertical"
-          className="reader-resizer"
-          onPointerDown={onInsightResizeStart}
-          role="separator"
-        />
-
-        <SelectionInsightPanel selectionCard={selectionCard} width={insightPanelWidth} />
       </div>
     </section>
   )

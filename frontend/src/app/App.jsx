@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { Copy, LogIn, LogOut, Settings2, UserRound } from 'lucide-react'
+import { Brain, Copy, LogIn, LogOut, Settings2, UserRound } from 'lucide-react'
+import { AiConfigPage } from '../components/account/AiConfigPage'
 import { UserCenterPage } from '../components/account/UserCenterPage'
 import { HomePage } from '../components/home/HomePage'
 import { StatusPanel } from '../components/layout/StatusPanel'
 import { UtilityRail } from '../components/layout/UtilityRail'
 import { PaperReader } from '../components/reader/PaperReader'
+import { SelectionInsightPanel } from '../components/reader/SelectionInsightPanel'
 import { SideWorkspacePanel } from '../components/reader/SideWorkspacePanel'
 import Login from '../log/Login.jsx'
 import { useBackendStatus } from '../hooks/useBackendStatus'
@@ -27,11 +29,13 @@ function App() {
   const userMenuRef = useRef(null)
   const [activeWorkspacePanel, setActiveWorkspacePanel] = useState('')
   const [activeTool, setActiveTool] = useState('select')
+  const [isThumbnailsOpen, setIsThumbnailsOpen] = useState(false)
   const [authMode, setAuthMode] = useState('login')
   const [isAuthViewOpen, setIsAuthViewOpen] = useState(false)
   const [currentUser, setCurrentUser] = useState(null)
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
   const [accountSection, setAccountSection] = useState('')
+  const [currentProviderId, setCurrentProviderId] = useState(null)
   const serverStatus = useBackendStatus()
 
   const {
@@ -71,8 +75,15 @@ function App() {
     uncategorizedFolderId,
     zoomIn,
     zoomOut,
+    zoomBy,
+    activePaperSummary,
   } = usePdfReader({ currentUser })
 
+  const thumbnailPanel = useResizableWidth({
+    initialWidth: 300,
+    minWidth: 160,
+    maxWidth: 420,
+  })
   const insightPanel = useResizableWidth({
     initialWidth: 300,
     minWidth: 180,
@@ -84,9 +95,11 @@ function App() {
     maxWidth: 620,
   })
 
-  const { selectionCard, handleSelection } = useSelectionInsight({
+  const { selectionCard, handleSelection, dismissSelectionCard, setDomain } = useSelectionInsight({
     readerRef,
     paperTitle: metadata.title || fileName,
+    paperSummary: activePaperSummary,
+    currentProviderId,
   })
 
   useEffect(() => {
@@ -116,6 +129,28 @@ function App() {
     return () => {
       cancelled = true
     }
+  }, [])
+
+  // Toolbar button ripple effect
+  useEffect(() => {
+    function handleRipple(event) {
+      const btn = event.target.closest('.toolbar-icon-button, .toolbar-tool')
+      if (!btn) return
+
+      const ripple = document.createElement('span')
+      ripple.className = 'ripple-effect'
+      const rect = btn.getBoundingClientRect()
+      const size = Math.max(rect.width, rect.height)
+      ripple.style.left = `${event.clientX - rect.left - size / 2}px`
+      ripple.style.top = `${event.clientY - rect.top - size / 2}px`
+      ripple.style.width = `${size}px`
+      ripple.style.height = `${size}px`
+      btn.appendChild(ripple)
+      ripple.addEventListener('animationend', () => ripple.remove())
+    }
+
+    document.addEventListener('click', handleRipple)
+    return () => document.removeEventListener('click', handleRipple)
   }, [])
 
   useEffect(() => {
@@ -317,6 +352,10 @@ function App() {
                         <Settings2 />
                         <span>系统设置</span>
                       </button>
+                      <button type="button" onClick={() => openAccountSection('ai-config')}>
+                        <Brain />
+                        <span>AI 配置</span>
+                      </button>
                       <button type="button" className="is-danger" onClick={handleLogout}>
                         <LogOut />
                         <span>退出登录</span>
@@ -390,12 +429,36 @@ function App() {
           <PaperReader
             pdfReader={paperReaderState}
             readerRef={readerRef}
-            selectionCard={selectionCard}
             activeTool={activeTool}
-            insightPanelWidth={insightPanel.width}
+            isThumbnailsOpen={isThumbnailsOpen}
+            thumbnailWidth={thumbnailPanel.width}
+            onThumbnailResizeStart={thumbnailPanel.startResizeLeft}
+            onToggleThumbnails={() => setIsThumbnailsOpen((v) => !v)}
             onToolChange={setActiveTool}
-            onInsightResizeStart={insightPanel.startResize}
             onSelect={handleSelection}
+            onThumbnailPageClick={(pageNum) => {
+              setCurrentPage(pageNum)
+              const el = readerRef.current?.querySelector(`[data-page-number="${pageNum}"]`)
+              if (el) el.scrollIntoView({ block: 'start', behavior: 'instant' })
+            }}
+            onWheelZoom={zoomBy}
+          />
+
+          <div
+            aria-label="调整即时理解面板宽度"
+            aria-orientation="vertical"
+            className="workspace-resizer"
+            onPointerDown={insightPanel.startResize}
+            role="separator"
+          />
+
+          <SelectionInsightPanel
+            domain={selectionCard.domain}
+            onDomainChange={setDomain}
+            selectionCard={selectionCard}
+            width={insightPanel.width}
+            currentProviderId={currentProviderId}
+            onProviderChange={setCurrentProviderId}
           />
 
           {activeWorkspacePanel ? (
@@ -424,7 +487,10 @@ function App() {
             !isAuthViewOpen && isAccountView ? ' is-active' : ' is-hidden'
           }`}
         >
-          <UserCenterPage
+          {accountSection === 'ai-config' ? (
+            <AiConfigPage onBack={() => setAccountSection('')} />
+          ) : (
+            <UserCenterPage
             key={[
               accountSection || 'profile',
               currentUser?.uid || 'guest',
@@ -442,6 +508,7 @@ function App() {
             onSectionChange={setAccountSection}
             onUploadAvatar={handleUploadAvatar}
           />
+          )}
         </div>
       </main>
     </div>

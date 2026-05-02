@@ -52,12 +52,17 @@ class Settings:
         os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080")
     )
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    secret_key: str = os.getenv("SECRET_KEY", "change-me-before-production")
     uploads_dir: str = os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads"))
     avatar_upload_dir: str = os.getenv("AVATAR_UPLOAD_DIR", str(BASE_DIR / "uploads" / "avatars"))
     avatar_max_size_bytes: int = int(os.getenv("AVATAR_MAX_SIZE_BYTES", str(2 * 1024 * 1024)))
     papers_upload_dir: str = os.getenv("PAPERS_UPLOAD_DIR", str(BASE_DIR / "uploads" / "papers"))
     baidu_translate_appid: str = os.getenv("BAIDU_TRANSLATE_APPID", "")
     baidu_translate_secret: str = os.getenv("BAIDU_TRANSLATE_SECRET", "")
+
+    # 系统默认 AI 提供者（所有用户共享）
+    default_glm_api_key: str = os.getenv("DEFAULT_GLM_API_KEY", "")
+    default_deepseek_api_key: str = os.getenv("DEFAULT_DEEPSEEK_API_KEY", "")
 
     @property
     def translate_enabled(self) -> bool:
@@ -66,6 +71,28 @@ class Settings:
     @property
     def ai_enabled(self) -> bool:
         return bool(self.openai_api_key)
+
+    @property
+    def system_providers(self) -> list[dict[str, str]]:
+        """启动时自动创建的系统默认厂商列表"""
+        providers = []
+        if self.default_glm_api_key:
+            providers.append({
+                "label": "智谱 GLM-4-Flash (官方)",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "api_key": self.default_glm_api_key,
+                "model": "glm-4-flash",
+                "sort_order": 0,
+            })
+        if self.default_deepseek_api_key:
+            providers.append({
+                "label": "DeepSeek V3 (官方)",
+                "base_url": "https://api.deepseek.com",
+                "api_key": self.default_deepseek_api_key,
+                "model": "deepseek-chat",
+                "sort_order": 1,
+            })
+        return providers
 
 
 settings = Settings()

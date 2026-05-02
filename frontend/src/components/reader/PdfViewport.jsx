@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { PdfPage } from './PdfPage'
+import { SelectionFloatingMenu } from './SelectionFloatingMenu'
 
 const PAGE_OVERSCAN = 2
 
@@ -113,9 +114,11 @@ export function PdfViewport({
   onFitToWidth,
   onSelect,
   onVisiblePageChange,
+  onWheelZoom,
 }) {
   const pageListRef = useRef(null)
   const fittedDocumentRef = useRef(null)
+  const [floatingMenu, setFloatingMenu] = useState({ visible: false, x: 0, y: 0 })
 
   const startRef = useRef({
     startedInText: false,
@@ -223,7 +226,7 @@ export function PdfViewport({
     }
 
     const rect = range.getBoundingClientRect()
-    if (rect.height > 220 || text.length > 800) {
+    if (rect.height > 220 || text.length > 1500) {
       return
     }
 
@@ -392,7 +395,7 @@ export function PdfViewport({
       // 防止误选整页、大段摘要、作者信息等
       // 想更严格就把 220 改小，例如 160
       // 想允许多选几行就把 220 改大，例如 300
-      if (rect.height > 220 || text.length > 800) {
+      if (rect.height > 220 || text.length > 1500) {
         currentSelection.removeAllRanges()
         resetSelectionGesture()
         return
@@ -400,6 +403,12 @@ export function PdfViewport({
 
       // 通过检查后，再触发你原来的翻译/理解逻辑
       onSelect?.()
+
+      // Show floating annotation menu
+      const menuX = rect.left + rect.width / 2
+      const menuY = rect.top - 8
+      setFloatingMenu({ visible: true, x: menuX, y: menuY })
+
       resetSelectionGesture()
     }, 0)
   }
@@ -471,6 +480,21 @@ export function PdfViewport({
     }
   }, [onFitToWidth, pdfDocument, readerRef])
 
+  // Ctrl+wheel zoom — must use native listener with passive:false
+  useEffect(() => {
+    const container = readerRef.current
+    if (!container || !onWheelZoom) return
+
+    function handleWheel(e) {
+      if (!(e.ctrlKey || e.metaKey)) return
+      e.preventDefault()
+      onWheelZoom(e.deltaY < 0 ? 1 : -1)
+    }
+
+    container.addEventListener('wheel', handleWheel, { passive: false })
+    return () => container.removeEventListener('wheel', handleWheel)
+  }, [onWheelZoom, readerRef])
+
   useEffect(() => {
     const container = readerRef.current
 
@@ -511,6 +535,73 @@ export function PdfViewport({
     }
   }, [onVisiblePageChange, pageNumber, pdfDocument, readerRef, scale])
 
+  // Dismiss floating menu on outside click
+  useEffect(() => {
+    if (!floatingMenu.visible) return
+
+    function handleClick(e) {
+      if (!e.target.closest('.selection-floating-menu')) {
+        setFloatingMenu({ visible: false, x: 0, y: 0 })
+      }
+    }
+
+    document.addEventListener('pointerdown', handleClick)
+    return () => document.removeEventListener('pointerdown', handleClick)
+  }, [floatingMenu.visible])
+
+  function handleHighlight(color) {
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0) return
+    try {
+      const span = document.createElement('span')
+      span.style.backgroundColor = color
+      span.style.borderRadius = '2px'
+      const range = sel.getRangeAt(0)
+      range.surroundContents(span)
+    } catch { /* complex range */ }
+    sel.removeAllRanges()
+    setFloatingMenu({ visible: false, x: 0, y: 0 })
+  }
+
+  function handleUnderline() {
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0) return
+    try {
+      const span = document.createElement('span')
+      span.style.textDecoration = 'underline'
+      span.style.textUnderlineOffset = '3px'
+      sel.getRangeAt(0).surroundContents(span)
+    } catch { /* complex range */ }
+    sel.removeAllRanges()
+    setFloatingMenu({ visible: false, x: 0, y: 0 })
+  }
+
+  function handleWavyUnderline() {
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0) return
+    try {
+      const span = document.createElement('span')
+      span.style.textDecoration = 'underline wavy #EF4444'
+      span.style.textUnderlineOffset = '3px'
+      sel.getRangeAt(0).surroundContents(span)
+    } catch { /* complex range */ }
+    sel.removeAllRanges()
+    setFloatingMenu({ visible: false, x: 0, y: 0 })
+  }
+
+  function handleNote() {
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0) return
+    try {
+      const span = document.createElement('span')
+      span.style.backgroundColor = 'rgba(250, 204, 21, 0.3)'
+      span.style.borderBottom = '2px dashed #EAB308'
+      sel.getRangeAt(0).surroundContents(span)
+    } catch { /* complex range */ }
+    sel.removeAllRanges()
+    setFloatingMenu({ visible: false, x: 0, y: 0 })
+  }
+
   if (error) {
     return <div className="reader-empty--error">{error}</div>
   }
@@ -538,7 +629,28 @@ export function PdfViewport({
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
+      onContextMenu={(e) => {
+        const sel = window.getSelection()
+        if (sel && !sel.isCollapsed && sel.toString().trim()) {
+          e.preventDefault()
+        }
+      }}
     >
+      <div
+        className="reader-progress"
+        style={{ width: '0%' }}
+        ref={(el) => {
+          if (!el || !readerRef.current) return
+          const container = readerRef.current
+          const update = () => {
+            const max = container.scrollHeight - container.clientHeight
+            if (max <= 0) { el.style.width = '0%'; return }
+            el.style.width = `${(container.scrollTop / max) * 100}%`
+          }
+          container.addEventListener('scroll', update, { passive: true })
+          update()
+        }}
+      />
       {isLoading ? <div className="pdf-loading">正在重新渲染页面...</div> : null}
 
       <div className="pdf-page-list" ref={pageListRef}>
@@ -553,6 +665,15 @@ export function PdfViewport({
           />
         ))}
       </div>
+
+      <SelectionFloatingMenu
+        position={floatingMenu.visible ? { x: floatingMenu.x, y: floatingMenu.y } : null}
+        visible={floatingMenu.visible}
+        onHighlight={handleHighlight}
+        onUnderline={handleUnderline}
+        onWavyUnderline={handleWavyUnderline}
+        onNote={handleNote}
+      />
     </div>
   )
 }

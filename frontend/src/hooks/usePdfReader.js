@@ -7,6 +7,8 @@ import {
   deletePaper as apiDeletePaper,
   fetchFolders,
   fetchPapers,
+  fetchAiProviders,
+  fetchPaperSummary,
   fetchReadingStats,
   getPaperFileUrl,
   recordReadingEvent,
@@ -18,7 +20,7 @@ import {
 
 const DEFAULT_SCALE = 1.35
 const MIN_SCALE = 0.9
-const MAX_SCALE = 2.4
+const MAX_SCALE = 4.0
 const SCALE_STEP = 0.15
 const EMPTY_METADATA = {
   title: '',
@@ -202,6 +204,17 @@ async function extractFirstPagesText(documentProxy, maxPages = 2) {
   return chunks.join('\n')
 }
 
+async function extractFullText(documentProxy, maxPages = 200) {
+  const pageCount = Math.min(documentProxy.numPages, maxPages)
+  const chunks = []
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    const page = await documentProxy.getPage(pageNumber)
+    const textContent = await page.getTextContent()
+    chunks.push(textContent.items.map((item) => item.str).join(' '))
+  }
+  return chunks.join('\n')
+}
+
 async function extractPaperMetadata(documentProxy, file) {
   const metadataResult = await documentProxy.getMetadata().catch(() => null)
   const info = metadataResult?.info ?? {}
@@ -251,12 +264,15 @@ export function usePdfReader({ currentUser } = {}) {
   const importFolderIdRef = useRef('')
   const shouldActivateImportedPaperRef = useRef(true)
   const paperResourcesRef = useRef(new Map())
+  const summaryMapRef = useRef(new Map())
   const uncategorizedFolderIdRef = useRef('')
   const lastSyncUserRef = useRef(null)
   const [activeView, setActiveView] = useState('home')
   const [papers, setPapers] = useState([])
   const [folders, setFolders] = useState([])
   const [openTabIds, setOpenTabIds] = useState([])
+  const openTabIdsRef = useRef(openTabIds)
+  openTabIdsRef.current = openTabIds
   const [uncategorizedFolderId, setUncategorizedFolderId] = useState('')
   const [recentReadings, setRecentReadings] = useState(getStoredRecentReadings())
   const [importConflict, setImportConflict] = useState(null)
@@ -499,7 +515,8 @@ export function usePdfReader({ currentUser } = {}) {
     setActiveView(paperId)
 
     // Only record reading event if this is a fresh open (not switching tabs)
-    const isAlreadyOpen = openTabIds.includes(paperId)
+    // Uses ref (not state) to avoid stale closure — ref is synced to latest openTabIds every render
+    const isAlreadyOpen = openTabIdsRef.current.includes(paperId)
 
     // Write to localStorage recent readings
     const folderName = folderMap.get(paper.folderId)?.name || '未分类'
@@ -530,6 +547,26 @@ export function usePdfReader({ currentUser } = {}) {
     }
   }
 
+
+  async function triggerSummarization(paperId, documentProxy) {
+    if (summaryMapRef.current.has(paperId)) return
+    try {
+      const fullText = await extractFullText(documentProxy)
+      if (!fullText || fullText.length < 100) return
+      const truncated = fullText.slice(0, 40000)
+      const activeId = activeView
+      const { providers } = await fetchAiProviders()
+      const provider = providers?.find(p => p.is_active)
+      if (!provider) return
+      const data = await fetchPaperSummary(truncated, provider.id)
+      if (data?.summary) {
+        summaryMapRef.current.set(paperId, data.summary)
+        if (activeView === activeId) {
+          setPapers(p => p.map(pp => pp.id === paperId ? { ...pp } : pp))
+        }
+      }
+    } catch { /* silent */ }
+  }
   async function loadPdfFromUrl(paperId, url) {
     updatePaper(paperId, () => ({ isLoading: true, error: '' }))
 
@@ -571,6 +608,8 @@ export function usePdfReader({ currentUser } = {}) {
         ...(metadata ? { metadata } : {}),
         ...(pageMetrics.length ? { pageMetrics } : {}),
       }))
+
+      triggerSummarization(paperId, documentProxy)
     } catch {
       updatePaper(paperId, () => ({
         isLoading: false,
@@ -584,6 +623,7 @@ export function usePdfReader({ currentUser } = {}) {
   }
 
   function closePaper(paperId) {
+    summaryMapRef.current.delete(paperId)
     setOpenTabIds((currentIds) => {
       const closingIndex = currentIds.indexOf(paperId)
       const nextIds = currentIds.filter((id) => id !== paperId)
@@ -606,6 +646,7 @@ export function usePdfReader({ currentUser } = {}) {
   }
 
   function deletePaper(paperId) {
+    summaryMapRef.current.delete(paperId)
     // Call API first
     if (getStoredAuthToken()) {
       const serverId = Number(paperId)
@@ -881,6 +922,8 @@ export function usePdfReader({ currentUser } = {}) {
         pageMetrics,
       }))
 
+        triggerSummarization(paperId, documentProxy)
+
       // ── Step 4: Upload to backend with COMPLETE metadata ──
       if (getStoredAuthToken()) {
         const serverFolderId = Number(targetFolderId) || undefined
@@ -968,6 +1011,13 @@ export function usePdfReader({ currentUser } = {}) {
     }))
   }
 
+  function zoomBy(direction) {
+    if (!activePaper) return
+    updatePaper(activePaper.id, (paper) => ({
+      scale: clampScale(paper.scale + direction * SCALE_STEP),
+    }))
+  }
+
   function fitToWidth(availableWidth, pageWidth) {
     if (!activePaper || !availableWidth || !pageWidth) {
       return
@@ -1020,6 +1070,7 @@ export function usePdfReader({ currentUser } = {}) {
       (_, index) => index + 1,
     ),
     pdfDocument: activePaper?.pdfDocument ?? null,
+    activePaperSummary: activePaper ? summaryMapRef.current.get(activePaper.id) ?? '' : '',
     recentPapers,
     readingStats,
     recentReadings,
@@ -1032,5 +1083,6 @@ export function usePdfReader({ currentUser } = {}) {
     uncategorizedFolderId,
     zoomIn,
     zoomOut,
+    zoomBy,
   }
 }

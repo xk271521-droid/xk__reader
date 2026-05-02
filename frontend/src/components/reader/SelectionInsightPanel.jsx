@@ -1,29 +1,55 @@
+import { useEffect, useState } from 'react'
+import { fetchAiProviders } from '../../services/paperReaderApi'
+
 function getTextKindLabel(textKind) {
   switch (textKind) {
-    case 'word':
-      return '术语'
-    case 'phrase':
-      return '短语'
-    case 'sentence':
-      return '句子'
-    case 'title':
-      return '标题'
-    case 'passage':
-      return '段落'
-    default:
-      return '选区'
+    case 'word': return '术语'
+    case 'phrase': return '短语'
+    case 'sentence': return '句子'
+    case 'title': return '标题'
+    case 'passage': return '段落'
+    default: return '选区'
   }
 }
 
 function copyText(text) {
-  if (!text || !navigator.clipboard) {
-    return
-  }
-
+  if (!text || !navigator.clipboard) return
   navigator.clipboard.writeText(text).catch(() => {})
 }
 
-export function SelectionInsightPanel({ selectionCard, width }) {
+const DOMAIN_OPTIONS = [
+  { value: '', label: '通用翻译' },
+  { value: 'it', label: '信息技术' },
+  { value: 'finance', label: '金融财经' },
+  { value: 'machinery', label: '机械制造' },
+  { value: 'senimed', label: '生物医药' },
+  { value: 'academic', label: '学术论文' },
+  { value: 'aerospace', label: '航空航天' },
+  { value: 'news', label: '新闻资讯' },
+  { value: 'law', label: '法律法规' },
+  { value: 'contract', label: '合同' },
+]
+
+export function SelectionInsightPanel({ domain, onDomainChange, selectionCard, width, currentProviderId, onProviderChange }) {
+  const [providers, setProviders] = useState([])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchAiProviders()
+      .then(data => {
+        if (!cancelled) setProviders((data?.providers || []).filter(p => p.is_active))
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
+  // 自动选择第一个启用的厂商
+  useEffect(() => {
+    if (currentProviderId == null && providers.length > 0) {
+      onProviderChange?.(providers[0].id)
+    }
+  }, [providers, currentProviderId, onProviderChange])
+
   return (
     <aside className="insight-panel" style={{ width }}>
       <div className="insight-panel__header">
@@ -32,11 +58,33 @@ export function SelectionInsightPanel({ selectionCard, width }) {
           <h2>即时理解</h2>
         </div>
 
-        {selectionCard.visible ? (
-          <span className="insight-kind-chip">
-            {getTextKindLabel(selectionCard.textKind)}
-          </span>
-        ) : null}
+        <div className="insight-header-selects">
+          {selectionCard.visible ? (
+            <select
+              className="insight-domain-select"
+              value={domain}
+              onChange={(e) => onDomainChange(e.target.value)}
+            >
+              {DOMAIN_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          ) : null}
+
+          {providers.length > 0 ? (
+            <select
+              className="insight-model-select"
+              value={currentProviderId ?? ''}
+              onChange={(e) => onProviderChange?.(Number(e.target.value))}
+            >
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          ) : null}
+        </div>
       </div>
 
       {!selectionCard.visible ? (
@@ -51,16 +99,6 @@ export function SelectionInsightPanel({ selectionCard, width }) {
             <span>{selectionCard.wordCount} words</span>
             <span>{selectionCard.charCount} chars</span>
             <span>{getTextKindLabel(selectionCard.textKind)}</span>
-          </div>
-
-          <div className="insight-block">
-            <div className="insight-block__title-row">
-              <span>原文片段</span>
-              <button type="button" onClick={() => copyText(selectionCard.text)}>
-                复制原文
-              </button>
-            </div>
-            <p>{selectionCard.text}</p>
           </div>
 
           {selectionCard.loading ? (
@@ -86,6 +124,16 @@ export function SelectionInsightPanel({ selectionCard, width }) {
               <p>{selectionCard.translation}</p>
             </div>
           ) : null}
+
+          <div className="insight-block">
+            <div className="insight-block__title-row">
+              <span>原文片段</span>
+              <button type="button" onClick={() => copyText(selectionCard.text)}>
+                复制原文
+              </button>
+            </div>
+            <p>{selectionCard.text}</p>
+          </div>
 
           {selectionCard.explanation ? (
             <div className="insight-block">
