@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+from app.api.routes.annotation import router as annotation_router
 
 from app.api.routes.ai_provider import router as ai_provider_router
 from app.api.routes.auth import router as auth_router
@@ -14,4 +15,5 @@ api_router.include_router(auth_router, tags=["auth"])
 api_router.include_router(health_router, tags=["health"])
 api_router.include_router(paper_router, tags=["papers"])
 api_router.include_router(reading_record_router, tags=["reading-records"])
+api_router.include_router(annotation_router, tags=["annotations"])
 api_router.include_router(selection_router, tags=["selection"])

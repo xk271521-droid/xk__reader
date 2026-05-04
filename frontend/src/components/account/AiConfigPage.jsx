@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Check, Edit3, Power, Trash2, Plus, X } from 'lucide-react'
+import { ArrowLeft, Check, Edit3, Power, PowerOff, Trash2, Plus, X } from 'lucide-react'
 import {
   fetchAiProviders,
   createAiProvider,
@@ -69,9 +69,17 @@ export function AiConfigPage({ onBack }) {
 
   async function toggleActive(provider) {
     try {
-      await updateAiProvider(provider.id, { is_active: !provider.is_active })
+      // 启用当前厂商时，先把其他已启用的关掉（互斥）
+      const newActive = !provider.is_active
+      if (newActive) {
+        const others = providers.filter((p) => p.id !== provider.id && p.is_active)
+        await Promise.all(others.map((p) => updateAiProvider(p.id, { is_active: false })))
+      }
+      await updateAiProvider(provider.id, { is_active: newActive })
       await loadProviders()
-    } catch { /* ignore */ }
+    } catch {
+      alert('切换失败，请检查后端连接')
+    }
   }
 
   async function remove(provider) {
@@ -117,10 +125,10 @@ export function AiConfigPage({ onBack }) {
                   <button
                     type="button"
                     className={`ai-toggle${p.is_active ? ' is-on' : ''}`}
-                    title={p.is_active ? '已启用' : '已禁用'}
                     onClick={() => toggleActive(p)}
                   >
-                    <Power />
+                    {p.is_active ? <Power /> : <PowerOff />}
+                    <span>{p.is_active ? '已启用' : '已禁用'}</span>
                   </button>
                   {!p.is_system ? (
                     <>

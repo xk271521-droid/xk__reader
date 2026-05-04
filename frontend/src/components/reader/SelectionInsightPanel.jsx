@@ -1,5 +1,3 @@
-import { useEffect, useState } from 'react'
-import { fetchAiProviders } from '../../services/paperReaderApi'
 
 function getTextKindLabel(textKind) {
   switch (textKind) {
@@ -30,25 +28,7 @@ const DOMAIN_OPTIONS = [
   { value: 'contract', label: '合同' },
 ]
 
-export function SelectionInsightPanel({ domain, onDomainChange, selectionCard, width, currentProviderId, onProviderChange }) {
-  const [providers, setProviders] = useState([])
-
-  useEffect(() => {
-    let cancelled = false
-    fetchAiProviders()
-      .then(data => {
-        if (!cancelled) setProviders((data?.providers || []).filter(p => p.is_active))
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [])
-
-  // 自动选择第一个启用的厂商
-  useEffect(() => {
-    if (currentProviderId == null && providers.length > 0) {
-      onProviderChange?.(providers[0].id)
-    }
-  }, [providers, currentProviderId, onProviderChange])
+export function SelectionInsightPanel({ domain, onDomainChange, selectionCard, width, aiEnabled, onToggleAI }) {
 
   return (
     <aside className="insight-panel" style={{ width }}>
@@ -58,7 +38,7 @@ export function SelectionInsightPanel({ domain, onDomainChange, selectionCard, w
           <h2>即时理解</h2>
         </div>
 
-        <div className="insight-header-selects">
+        <div className="insight-header-actions">
           {selectionCard.visible ? (
             <select
               className="insight-domain-select"
@@ -71,19 +51,6 @@ export function SelectionInsightPanel({ domain, onDomainChange, selectionCard, w
             </select>
           ) : null}
 
-          {providers.length > 0 ? (
-            <select
-              className="insight-model-select"
-              value={currentProviderId ?? ''}
-              onChange={(e) => onProviderChange?.(Number(e.target.value))}
-            >
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
-          ) : null}
         </div>
       </div>
 
@@ -113,6 +80,16 @@ export function SelectionInsightPanel({ domain, onDomainChange, selectionCard, w
             </div>
           ) : null}
 
+          <div className="insight-block">
+            <div className="insight-block__title-row">
+              <span>原文片段</span>
+              <button type="button" onClick={() => copyText(selectionCard.text)}>
+                复制原文
+              </button>
+            </div>
+            <p>{selectionCard.text}</p>
+          </div>
+
           {selectionCard.translation ? (
             <div className="insight-block">
               <div className="insight-block__title-row">
@@ -127,57 +104,24 @@ export function SelectionInsightPanel({ domain, onDomainChange, selectionCard, w
 
           <div className="insight-block">
             <div className="insight-block__title-row">
-              <span>原文片段</span>
-              <button type="button" onClick={() => copyText(selectionCard.text)}>
-                复制原文
-              </button>
+              <span>上下文理解</span>
+              <label
+                className={`ai-toggle-switch${aiEnabled ? ' is-on' : ''}`}
+                title={aiEnabled ? "AI 已开启" : "AI 已关闭"}
+              >
+                <input type="checkbox" checked={aiEnabled} onChange={onToggleAI} />
+                <span className="ai-toggle-switch__slider" />
+                <span className="ai-toggle-switch__label">AI</span>
+              </label>
             </div>
-            <p>{selectionCard.text}</p>
-          </div>
-
-          {selectionCard.explanation ? (
-            <div className="insight-block">
-              <span>阅读理解</span>
+            {aiEnabled && selectionCard.explaining ? (
+              <div className="insight-loading-dots">AI 正在分析…</div>
+            ) : selectionCard.explanation ? (
               <p>{selectionCard.explanation}</p>
-            </div>
-          ) : null}
-
-          {selectionCard.focusPoints.length > 0 ? (
-            <div className="insight-block">
-              <span>精读抓手</span>
-              <div className="insight-focus-list">
-                {selectionCard.focusPoints.map((item) => (
-                  <p key={item}>{item}</p>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {selectionCard.glossary.length > 0 ? (
-            <div className="insight-block">
-              <span>术语提示</span>
-              <div className="insight-glossary-list">
-                {selectionCard.glossary.map((item) => (
-                  <article className="insight-glossary-item" key={item.term}>
-                    <strong>{item.term}</strong>
-                    <p>{item.note}</p>
-                  </article>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {selectionCard.keywords.length > 0 ? (
-            <div className="insight-block">
-              <span>关键词</span>
-              <div className="keyword-row">
-                {selectionCard.keywords.map((keyword) => (
-                  <span key={keyword}>{keyword}</span>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
+            ) : aiEnabled && selectionCard.wordCount < 5 && !selectionCard.loading ? (
+              <p className="muted">选中 5 个以上单词可启用 AI 上下文理解</p>
+            ) : null}
+          </div>
           {selectionCard.source ? (
             <p className="card-footnote">结果来源：{selectionCard.source}</p>
           ) : null}

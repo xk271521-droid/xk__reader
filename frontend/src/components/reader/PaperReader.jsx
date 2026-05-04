@@ -14,6 +14,17 @@ export function PaperReader({
   onSelect,
   onThumbnailPageClick,
   onWheelZoom,
+  searchTerm,
+  onSearchChange,
+  matchIndex,
+  totalMatches,
+  onSearchPrev,
+  onSearchNext,
+  currentPaperId,
+  annotations,
+  onCreateAnnotation,
+  onDeleteAnnotation,
+  onAskAI,
 }) {
   return (
     <section className="reader-frame">
@@ -28,6 +39,12 @@ export function PaperReader({
         pageNumber={pdfReader.pageNumber}
         scale={pdfReader.scale}
         totalPages={pdfReader.totalPages}
+        searchTerm={searchTerm}
+        onSearchChange={onSearchChange}
+        matchIndex={matchIndex}
+        totalMatches={totalMatches}
+        onSearchPrev={onSearchPrev}
+        onSearchNext={onSearchNext}
       />
 
       <div className={`reader-body${isThumbnailsOpen ? ' has-thumbnails' : ''}`}>
@@ -64,6 +81,10 @@ export function PaperReader({
           onSelect={onSelect}
           onVisiblePageChange={pdfReader.setCurrentPage}
           onWheelZoom={onWheelZoom}
+          currentPaperId={currentPaperId}
+          annotations={annotations}
+          onCreateAnnotation={onCreateAnnotation}
+          onDeleteAnnotation={onDeleteAnnotation}
         />
       </div>
     </section>

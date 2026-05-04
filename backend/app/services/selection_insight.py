@@ -127,49 +127,6 @@ def build_local_translation(text: str, text_kind: str) -> str:
     return f"暂未拿到实时译文，先保留当前原文重点：{preview}"
 
 
-def build_explanation(
-    *,
-    text_kind: str,
-    paper_title: str | None,
-    glossary: List[SelectionGlossaryItem],
-) -> str:
-    topic = paper_title or "当前论文"
-    lead_term = glossary[0].term if glossary else ""
-    term_hint = (
-        f" 其中可以优先盯住 {lead_term} 这个词，判断它是方法、任务还是结果指标。"
-        if lead_term else ""
-    )
-    if text_kind == "word":
-        return (
-            f"这次选中的内容更像 {topic} 里的单个术语。"
-            " 这类词不要孤立记忆，最好回到所在句里看它被哪些词限定。"
-            f"{term_hint}"
-        )
-    if text_kind == "phrase":
-        return (
-            f"这段内容更像 {topic} 里的短语片段，还不是完整结论。"
-            " 阅读时先补全它前后的主干，再判断作者是在命名方法、描述对象还是限定条件。"
-            f"{term_hint}"
-        )
-    if text_kind == "title":
-        return (
-            f"这段内容更像 {topic} 的标题或关键命题。"
-            " 最有效的读法是先拆出研究对象，再找方法名称，最后看作者强调的提升目标。"
-            f"{term_hint}"
-        )
-    if text_kind == "passage":
-        return (
-            f"这次选中的内容已经接近一个完整段落，建议按主题句 → 论证细节 → 结果落点的顺序去读 {topic}。"
-            " 先找总述，再看补充说明，理解会比逐词硬翻更快。"
-            f"{term_hint}"
-        )
-    return (
-        f"这次选中的内容更像 {topic} 里的完整句子。"
-        " 先抓主语、核心动作和结论，再看作者是在介绍方法、解释原理还是汇报结果。"
-        f"{term_hint}"
-    )
-
-
 def build_selection_insight(
     *,
     text: str,
@@ -193,26 +150,37 @@ def build_selection_insight(
         translation = build_local_translation(normalized_text, text_kind)
         source = "AI阅读助手"
 
-    # 解释：优先 LLM，失败回退规则模板
-    explanation = _ai_explanation_or_fallback(
-        text=normalized_text,
-        text_kind=text_kind,
-        paper_title=paper_title,
-        glossary=glossary,
-        summary=summary,
-        context=context,
-        provider_id=provider_id,
-    )
-
+    # 解释由前端单独调 explain 端点获取，主接口不做 AI 调用
     return SelectionInsightResponse(
         translation=translation,
-        explanation=explanation,
+        explanation="",
         keywords=keywords,
         source=source,
         text_kind=text_kind,
         focus_points=build_focus_points(text_kind, keywords),
         glossary=glossary,
     )
+
+
+AI_OOPS = [
+    "🤖 哎呀，AI 小助手刚走神了，没来得及分析这段——先看看下面的提示凑合用？",
+    "😅 本想让 AI 帮你拆解的，结果它溜号了。先看看人类的提示吧！",
+    "🙈 AI 说它还没学会读这一段……不过别担心，下面的阅读提示也能帮到你。",
+    "🤔 AI 挠了挠头表示没看懂，但下面的小贴士应该能搭把手。",
+    "😴 AI 可能睡着了（毕竟它不用喝咖啡），先看阅读提示顶着！",
+    "🫠 AI 表示这段超出它的理解范围了——不过别急，试试看下面的阅读建议。",
+]
+
+
+def _ai_oops() -> str:
+    import random
+    return random.choice(AI_OOPS)
+
+
+FRIENDLY_HINT = (
+    "\n\n💡 **小提示**：在右上角头像 → AI 配置 里添加并启用一个厂商（比如 DeepSeek），"
+    "下次划词就能享受 AI 加持啦～"
+)
 
 
 def _ai_explanation_or_fallback(
@@ -225,12 +193,11 @@ def _ai_explanation_or_fallback(
     context: str,
     provider_id: int | None,
 ) -> str:
-    if not provider_id or not summary or not summary.strip():
-        return build_explanation(
-            text_kind=text_kind,
-            paper_title=paper_title,
-            glossary=glossary,
-        )
+    if not provider_id:
+        return _ai_oops() + FRIENDLY_HINT
+
+    if not summary or not summary.strip():
+        return _ai_oops() + "\n\n> 还没生成论文摘要，AI 暂时没有上下文可以参考。先读完或者生成摘要再试～"
 
     try:
         from app.db.session import SessionLocal
@@ -247,11 +214,7 @@ def _ai_explanation_or_fallback(
                 )
             )
             if not provider:
-                return build_explanation(
-                    text_kind=text_kind,
-                    paper_title=paper_title,
-                    glossary=glossary,
-                )
+                return _ai_oops()
 
             api_key = decrypt_api_key(provider.encrypted_api_key)
             result = explain_selection(
@@ -269,8 +232,4 @@ def _ai_explanation_or_fallback(
     except Exception:
         pass
 
-    return build_explanation(
-        text_kind=text_kind,
-        paper_title=paper_title,
-        glossary=glossary,
-    )
+    return _ai_oops()

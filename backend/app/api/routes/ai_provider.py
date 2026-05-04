@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
@@ -92,23 +92,41 @@ def update_provider(
     db: Session = Depends(get_db),
 ) -> AiProviderResponse:
     provider = db.scalar(
-        select(AiProvider).where(
-            AiProvider.id == provider_id,
-            AiProvider.user_id == user.id,
-        )
+        select(AiProvider).where(AiProvider.id == provider_id)
     )
     if not provider:
+        raise HTTPException(status_code=404, detail="厂商不存在")
+    is_system = provider.user_id is None
+    if not is_system and provider.user_id != user.id:
         raise HTTPException(status_code=404, detail="厂商不存在或无权修改")
-    if payload.label is not None:
-        provider.label = payload.label
-    if payload.base_url is not None:
-        provider.base_url = payload.base_url
-    if payload.api_key is not None:
-        provider.encrypted_api_key = encrypt_api_key(payload.api_key)
-    if payload.model is not None:
-        provider.model = payload.model
-    if payload.is_active is not None:
-        provider.is_active = payload.is_active
+
+    # 互斥：启用当前厂商时，把同一用户下其他厂商全关掉
+    if payload.is_active is True:
+        db.execute(
+            update(AiProvider)
+            .where(
+                AiProvider.id != provider_id,
+                (AiProvider.user_id == user.id) | (AiProvider.user_id.is_(None)),
+            )
+            .values(is_active=False)
+        )
+        provider.is_active = True
+    elif payload.is_active is not None:
+        provider.is_active = False
+
+    if is_system:
+        # 系统厂商只允许切换启用状态
+        if any(getattr(payload, f) is not None for f in ("label", "base_url", "api_key", "model")):
+            raise HTTPException(status_code=403, detail="系统厂商只能切换启用状态")
+    else:
+        if payload.label is not None:
+            provider.label = payload.label
+        if payload.base_url is not None:
+            provider.base_url = payload.base_url
+        if payload.api_key is not None:
+            provider.encrypted_api_key = encrypt_api_key(payload.api_key)
+        if payload.model is not None:
+            provider.model = payload.model
     db.commit()
     db.refresh(provider)
     plain = decrypt_api_key(provider.encrypted_api_key)

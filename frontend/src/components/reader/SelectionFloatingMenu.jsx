@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Highlighter, MessageSquareText, Pencil, Underline } from 'lucide-react'
+import { Highlighter, MessageSquareText, Pencil, Sparkles, Underline } from 'lucide-react'
 
 const HIGHLIGHT_COLORS = [
   { color: '#FEF08A', label: '黄' },
@@ -15,13 +15,16 @@ export function SelectionFloatingMenu({
   onUnderline,
   onWavyUnderline,
   onNote,
+  onAskAI,
+  autoShowColors = false,
+  compact = false,
 }) {
   const menuRef = useRef(null)
-  const [showColors, setShowColors] = useState(false)
+  const [showColors, setShowColors] = useState(autoShowColors)
 
   useEffect(() => {
-    if (!visible) setShowColors(false)
-  }, [visible])
+    if (!visible) setShowColors(autoShowColors)
+  }, [visible, autoShowColors])
 
   if (!visible || !position) return null
 
@@ -40,12 +43,12 @@ export function SelectionFloatingMenu({
             type="button"
             className="selection-floating-menu__btn"
             title="高亮"
+            onMouseDown={(e) => e.preventDefault()}
             onClick={() => setShowColors((v) => !v)}
           >
             <Highlighter />
           </button>
-          {showColors ? (
-            <div className="selection-floating-menu__colors">
+          <div className="selection-floating-menu__colors" style={{ display: showColors || compact ? 'flex' : 'none' }}>
               {HIGHLIGHT_COLORS.map((c) => (
                 <button
                   key={c.color}
@@ -53,42 +56,24 @@ export function SelectionFloatingMenu({
                   className="selection-floating-menu__color-dot"
                   style={{ background: c.color }}
                   title={c.label}
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={() => {
                     setShowColors(false)
-                    onHighlight?.(c.color)
+                    console.log("onHighlight exists:", typeof onHighlight); onHighlight?.(c.color); console.log("onHighlight called")
                   }}
                 />
               ))}
             </div>
-          ) : null}
         </div>
 
-        <button
-          type="button"
-          className="selection-floating-menu__btn"
-          title="下划线"
-          onClick={() => onUnderline?.()}
-        >
-          <Underline />
-        </button>
-
-        <button
-          type="button"
-          className="selection-floating-menu__btn"
-          title="波浪线"
-          onClick={() => onWavyUnderline?.()}
-        >
-          <Underline className="selection-floating-menu__wavy-icon" />
-        </button>
-
-        <button
-          type="button"
-          className="selection-floating-menu__btn"
-          title="注释"
-          onClick={() => onNote?.()}
-        >
-          <MessageSquareText />
-        </button>
+        {!compact ? (
+          <>
+          {onAskAI ? <button type="button" className="selection-floating-menu__btn" title="AI 解释" onMouseDown={(e) => e.preventDefault()} onClick={() => onAskAI?.()}><Sparkles /></button> : null}
+          <button type="button" className="selection-floating-menu__btn" title="下划线" onMouseDown={(e) => e.preventDefault()} onClick={() => onUnderline?.()}><Underline /></button>
+          <button type="button" className="selection-floating-menu__btn" title="波浪线" onMouseDown={(e) => e.preventDefault()} onClick={() => onWavyUnderline?.()}><Underline className="selection-floating-menu__wavy-icon" /></button>
+          <button type="button" className="selection-floating-menu__btn" title="注释" onMouseDown={(e) => e.preventDefault()} onClick={() => onNote?.()}><MessageSquareText /></button>
+          </>
+        ) : null}
       </div>
     </div>
   )

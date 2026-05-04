@@ -69,6 +69,44 @@ def generate_summary(
     return content.strip() if content else ""
 
 
+def explain_selection_stream(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    selected_text: str,
+    summary: str,
+    context: str = "",
+):
+    """流式返回解释内容，yield token strings"""
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=60.0,
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": EXPLANATION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": EXPLANATION_USER_TEMPLATE.format(
+                    summary=summary,
+                    selected_text=selected_text,
+                    context=context or "（无额外上下文）",
+                ),
+            },
+        ],
+        temperature=0.7,
+        max_tokens=800,
+        stream=True,
+    )
+    for chunk in response:
+        delta = chunk.choices[0].delta
+        if delta.content:
+            yield delta.content
+
+
 def explain_selection(
     *,
     base_url: str,
@@ -101,3 +139,56 @@ def explain_selection(
     )
     content = response.choices[0].message.content
     return content.strip() if content else ""
+
+
+def explain_selection_stream(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    selected_text: str,
+    summary: str,
+    context: str = "",
+):
+    """流式返回解释内容，yield token strings"""
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=60.0,
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": EXPLANATION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": EXPLANATION_USER_TEMPLATE.format(
+                    summary=summary,
+                    selected_text=selected_text,
+                    context=context or "（无额外上下文）",
+                ),
+            },
+        ],
+        temperature=0.7,
+        max_tokens=800,
+        stream=True,
+    )
+    for chunk in response:
+        delta = chunk.choices[0].delta
+        if delta.content:
+            yield delta.content
+
+
+ASK_SYSTEM_PROMPT = '你是一位耐心的学术论文阅读导师。请结合论文摘要和选中文字，用通俗中文回答。控制在300字以内。'
+
+ASK_USER_TEMPLATE = '论文摘要: {summary}\n正在阅读的片段: {selected_text}\n问题: {question}'
+
+def ask_question(*, base_url, api_key, model, question, selected_text="", summary=""):
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+    user_msg = ASK_USER_TEMPLATE.format(summary=summary or "(无)", selected_text=selected_text or "(无)", question=question)
+    response = client.chat.completions.create(model=model, temperature=0.7, max_tokens=600, messages=[
+        {"role": "system", "content": ASK_SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ])
+    c = response.choices[0].message.content
+    return c.strip() if c else ""

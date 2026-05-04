@@ -52,6 +52,10 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    annotations: Mapped[list["Annotation"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class UserProfile(Base):

@@ -11,6 +11,8 @@ import { SideWorkspacePanel } from '../components/reader/SideWorkspacePanel'
 import Login from '../log/Login.jsx'
 import { useBackendStatus } from '../hooks/useBackendStatus'
 import { usePdfReader } from '../hooks/usePdfReader'
+import { useAnnotations } from '../hooks/useAnnotations'
+import { usePdfSearch } from '../hooks/usePdfSearch'
 import { useResizableWidth } from '../hooks/useResizableWidth'
 import { useSelectionInsight } from '../hooks/useSelectionInsight'
 import {
@@ -21,6 +23,7 @@ import {
   uploadAvatar,
   updateCurrentUser,
 } from '../services/authApi'
+import { getPaperFileUrl } from '../services/paperReaderApi'
 import 'pdfjs-dist/web/pdf_viewer.css'
 import '../styles/app.css'
 
@@ -35,8 +38,24 @@ function App() {
   const [currentUser, setCurrentUser] = useState(null)
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
   const [accountSection, setAccountSection] = useState('')
-  const [currentProviderId, setCurrentProviderId] = useState(null)
+  const [chatMessages, setChatMessages] = useState({})
+  const [chatInput, setChatInput] = useState({})
+  const [chatAsking, setChatAsking] = useState({})
+  const [providerLabel, setProviderLabel] = useState('')
   const serverStatus = useBackendStatus()
+
+  // Get active AI provider name
+  useEffect(function () {
+    fetch('/api/providers', { headers: getStoredAuthToken() ? { Authorization: 'Bearer ' + getStoredAuthToken() } : {} })
+      .then(function (r) { return r.json() })
+      .then(function (d) {
+        var a = (d && d.providers || []).find(function (p) { return p.is_active })
+        if (a) setProviderLabel(a.label + ' / ' + a.model)
+      })
+      .catch(function () {})
+  }, [currentUser])
+
+  const pdfSearch = usePdfSearch(readerRef)
 
   const {
     activeView,
@@ -78,6 +97,18 @@ function App() {
     zoomBy,
     activePaperSummary,
   } = usePdfReader({ currentUser })
+  const { annotations, loading: annLoading, createAnnotation, deleteAnnotation } = useAnnotations(
+    activeView !== 'home' ? Number(activeView) : null
+  )
+  const activeFileUrl = activeView !== 'home' ? getPaperFileUrl(Number(activeView)) : null
+  useEffect(() => {
+    if (activeTool !== 'download' || !activeFileUrl) return
+    const a = document.createElement('a')
+    a.href = activeFileUrl
+    a.download = fileName || 'paper.pdf'
+    a.click()
+    setActiveTool('select')
+  }, [activeTool, activeFileUrl, fileName])
 
   const thumbnailPanel = useResizableWidth({
     initialWidth: 300,
@@ -95,11 +126,10 @@ function App() {
     maxWidth: 620,
   })
 
-  const { selectionCard, handleSelection, dismissSelectionCard, setDomain } = useSelectionInsight({
+  const { selectionCard, handleSelection, dismissSelectionCard, setDomain, aiEnabled, toggleAI } = useSelectionInsight({
     readerRef,
     paperTitle: metadata.title || fileName,
     paperSummary: activePaperSummary,
-    currentProviderId,
   })
 
   useEffect(() => {
@@ -193,6 +223,7 @@ function App() {
 
   function handleLogout() {
     clearStoredAuthToken()
+    localStorage.removeItem('xk_read_recent')
     setCurrentUser(null)
     setIsUserMenuOpen(false)
     setAccountSection('')
@@ -442,6 +473,17 @@ function App() {
               if (el) el.scrollIntoView({ block: 'start', behavior: 'instant' })
             }}
             onWheelZoom={zoomBy}
+            searchTerm={pdfSearch.searchTerm}
+            onSearchChange={pdfSearch.onSearchChange}
+            matchIndex={pdfSearch.matchIndex}
+            totalMatches={pdfSearch.totalMatches}
+            onSearchPrev={pdfSearch.onSearchPrev}
+            onSearchNext={pdfSearch.onSearchNext}
+            currentPaperId={activeView !== 'home' ? Number(activeView) : null}
+            annotations={annotations}
+            onCreateAnnotation={createAnnotation}
+            onDeleteAnnotation={deleteAnnotation}
+            onAskAI={function () { if (selectionCard.text) { setActiveWorkspacePanel("ask"); setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = selectionCard.text; return n }) } }}
           />
 
           <div
@@ -457,8 +499,8 @@ function App() {
             onDomainChange={setDomain}
             selectionCard={selectionCard}
             width={insightPanel.width}
-            currentProviderId={currentProviderId}
-            onProviderChange={setCurrentProviderId}
+            aiEnabled={aiEnabled}
+            onToggleAI={toggleAI}
           />
 
           {activeWorkspacePanel ? (
@@ -477,6 +519,38 @@ function App() {
             metadata={metadata}
             selectionCard={selectionCard}
             width={workspacePanel.width}
+            chatMessages={chatMessages[activeView] || []}
+            chatInput={chatInput[activeView] || ''}
+            chatAsking={chatAsking[activeView] || false}
+            providerLabel={providerLabel}
+            onChatInputChange={function (v) { setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = v; return n }) }}
+            onChatSubmit={async function (q) {
+              if (!q || !q.trim()) return
+              var msg = chatMessages[activeView] || []
+              msg = msg.concat([{ role: 'user', text: q }])
+              setChatMessages(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = msg; return n })
+              setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = ''; return n })
+              setChatAsking(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = true; return n })
+              try {
+                var resp = await fetch('/api/ask', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (getStoredAuthToken() || '') },
+                  body: JSON.stringify({ question: q, selected_text: selectionCard.text || '', paper_title: metadata.title || fileName || '', summary: activePaperSummary || '', provider_id: null })
+                })
+                var d = await resp.json()
+                var ans = d.answer || ''
+                setChatMessages(function (p) {
+                  var n = {}; for (var k in p) n[k] = p[k]
+                  n[activeView] = msg.concat([{ role: 'ai', text: ans }])
+                  return n
+                })
+              } catch (_) {}
+              setChatAsking(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = false; return n })
+            }}
+            onAskFromSelection={function (text) {
+              setActiveWorkspacePanel('ask')
+              setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = text; return n })
+            }}
           />
 
           <UtilityRail activeItem={activeWorkspacePanel} onSelect={setActiveWorkspacePanel} />

@@ -175,6 +175,15 @@ export async function fetchSelectionInsight(payload) {
   return parseJsonResponse(response)
 }
 
+export async function fetchSelectionInsightExplain(payload) {
+  const response = await fetch('/api/selection-insight/explain', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
 // ── AI 厂商 & 摘要 ─────────────────────────────────────
 
 export async function fetchAiProviders() {

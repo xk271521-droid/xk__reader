@@ -191,7 +191,7 @@ function createEmptyPaperFromServer(serverPaper) {
   }
 }
 
-async function extractFirstPagesText(documentProxy, maxPages = 2) {
+async function extractFirstPagesText(documentProxy, maxPages = 5) {
   const pageCount = Math.min(documentProxy.numPages, maxPages)
   const chunks = []
 
@@ -575,7 +575,7 @@ export function usePdfReader({ currentUser } = {}) {
       const token = getStoredAuthToken()
       const loadingTask = getDocument({
         url,
-        httpHeaders: token ? { Authorization: `Bearer ${token}` } : {},
+        httpHeaders: token ? { Authorization: `Bearer ${token}` } : {}
       })
 
       const resource = paperResourcesRef.current.get(paperId)
@@ -595,10 +595,22 @@ export function usePdfReader({ currentUser } = {}) {
         currentResource.documentProxy = documentProxy
       }
 
-      const [metadata, pageMetrics] = await Promise.all([
+      const [pdfMeta, pageMetrics] = await Promise.all([
         extractPaperMetadata(documentProxy, { name: '' }),
         extractPageMetrics(documentProxy),
       ]).catch(() => [null, []])
+
+      let metadata = pdfMeta
+      if (pdfMeta && pdfMeta.doi) {
+        const cr = await fetchCrossrefMetadata(pdfMeta.doi)
+        if (cr) {
+          metadata = { ...pdfMeta, title: cr.title || pdfMeta.title, author: cr.author || pdfMeta.author, subject: cr.subject || pdfMeta.subject }
+          const sid = Number(paperId)
+          if (!Number.isNaN(sid)) {
+            apiUpdatePaper(sid, { author: metadata.author, subject: metadata.subject || undefined }).catch(function(){})
+          }
+        }
+      }
 
       updatePaper(paperId, () => ({
         isLoading: false,

@@ -115,10 +115,17 @@ export function PdfViewport({
   onSelect,
   onVisiblePageChange,
   onWheelZoom,
+  annotations = [],
+  currentPaperId,
+  onCreateAnnotation,
+  onDeleteAnnotation,
+  onDownloadPaper,
+  onAskAI,
 }) {
   const pageListRef = useRef(null)
   const fittedDocumentRef = useRef(null)
   const [floatingMenu, setFloatingMenu] = useState({ visible: false, x: 0, y: 0 })
+  const savedSelectionRef = useRef(null)
 
   const startRef = useRef({
     startedInText: false,
@@ -252,7 +259,16 @@ export function PdfViewport({
   }, [pageNumber, pageNumbers])
 
   function handleMouseDown(event) {
-    if (activeTool !== 'select') {
+    // 橡皮擦模式：点击标注删除
+    if (activeTool === 'eraser') {
+      const annEl = event.target.closest('[data-annotation-id]')
+      if (annEl) {
+        const annId = Number(annEl.dataset.annotationId)
+        if (annId && onDeleteAnnotation) onDeleteAnnotation(annId)
+      }
+      return
+    }
+    if (activeTool !== 'select' && activeTool !== 'highlight' && activeTool !== 'underline') {
       return
     }
 
@@ -277,7 +293,7 @@ export function PdfViewport({
   }
 
   function handleMouseMove(event) {
-    if (activeTool !== 'select' || !selectingRef.current.active) {
+    if ((activeTool !== 'select' && activeTool !== 'highlight') || !selectingRef.current.active) {
       return
     }
 
@@ -312,7 +328,19 @@ export function PdfViewport({
   }
 
   function handleMouseUp() {
-    if (activeTool !== 'select') {
+    const sel = window.getSelection()
+    if (activeTool === 'eraser') {
+      sel?.removeAllRanges()
+      return
+    }
+    if (activeTool === 'underline') {
+      if (sel && !sel.isCollapsed) {
+        handleUnderline()
+        // TODO: save to API — needs page number + text
+      }
+      return
+    }
+    if (activeTool !== 'select' && activeTool !== 'highlight' && activeTool !== 'underline') {
       return
     }
 
@@ -402,12 +430,18 @@ export function PdfViewport({
       }
 
       // 通过检查后，再触发你原来的翻译/理解逻辑
-      onSelect?.()
+      if (activeTool === 'select') {
+        onSelect?.()
+      }
 
-      // Show floating annotation menu
-      const menuX = rect.left + rect.width / 2
-      const menuY = rect.top - 8
-      setFloatingMenu({ visible: true, x: menuX, y: menuY })
+      // Show floating annotation menu (for select and highlight modes)
+      if (activeTool === 'select' || activeTool === 'highlight') {
+        const menuX = rect.left + rect.width / 2
+        const menuY = rect.top - 8
+        const selectedPage = Number(startRef.current.pageFrame?.dataset?.pageNumber || 0)
+        savedSelectionRef.current = { text, pageNumber: Number(startRef.current.pageFrame?.dataset?.pageNumber || 0) }
+        setFloatingMenu({ visible: true, x: menuX, y: menuY })
+      }
 
       resetSelectionGesture()
     }, 0)
@@ -428,6 +462,64 @@ export function PdfViewport({
       document.removeEventListener('selectionchange', handleSelectionChange)
     }
   }, [])
+
+  // 渲染已有标注
+  useEffect(() => {
+    const container = readerRef.current
+    if (!container || !annotations.length) return
+
+    // 按页码分组
+    const byPage = {}
+    annotations.forEach((a) => {
+      if (!byPage[a.page_number]) byPage[a.page_number] = []
+      byPage[a.page_number].push(a)
+    })
+
+    Object.entries(byPage).forEach(([pageNum, anns]) => {
+      const pageFrame = container.querySelector('[data-page-number="' + pageNum + '"]')
+      if (!pageFrame) return
+      const textLayer = pageFrame.querySelector('.textLayer')
+      if (!textLayer) return
+      const allSpans = Array.from(textLayer.querySelectorAll('span'))
+
+      anns.forEach((ann) => {
+        // 跳过已渲染的
+        if (textLayer.querySelector('[data-annotation-id="' + ann.id + '"]')) return
+
+        const searchText = ann.selected_text
+        const color = ann.color || '#FEF08A'
+        let isUnderline = ann.type === 'underline' || ann.type === 'wavy_underline'
+
+        // 在 textLayer span 中找匹配文字
+        for (let i = 0; i < allSpans.length; i++) {
+          const span = allSpans[i]
+          if (span.closest('[data-annotation-id]')) continue
+          const idx = span.textContent.indexOf(searchText)
+          if (idx === -1) continue
+          try {
+            const range = document.createRange()
+            range.setStart(span.firstChild, idx)
+            range.setEnd(span.firstChild, idx + searchText.length)
+            const mark = document.createElement('span')
+            mark.setAttribute('data-annotation-id', String(ann.id))
+            if (isUnderline) {
+              mark.style.textDecoration = ann.type === 'wavy_underline' ? 'underline wavy #EF4444' : 'underline'
+              mark.style.textUnderlineOffset = '3px'
+            } else {
+              mark.style.backgroundColor = color
+              mark.style.borderRadius = '2px'
+              mark.style.padding = '0 1px'
+            }
+            range.surroundContents(mark)
+            // 光标移到mark末尾后会跳过后续匹配，所以重新查找
+            break
+          } catch {
+            continue
+          }
+        }
+      })
+    })
+  }, [annotations, readerRef])
 
   useEffect(() => {
     function handleWindowMouseUp() {
@@ -549,46 +641,82 @@ export function PdfViewport({
     return () => document.removeEventListener('pointerdown', handleClick)
   }, [floatingMenu.visible])
 
+  function getSelectedPageNumber() {
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0) return null
+    const node = sel.anchorNode
+    const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node
+    const pageFrame = el?.closest('[data-page-number]')
+    return pageFrame ? Number(pageFrame.dataset.pageNumber) : null
+  }
+
+  function getTextLayerFromRange(range) {
+    const container = range.commonAncestorContainer
+    return container.nodeType === 1
+      ? container.closest('.textLayer')
+      : container.parentElement?.closest('.textLayer') || null
+  }
+
   function handleHighlight(color) {
-    const sel = window.getSelection()
-    if (!sel || sel.rangeCount === 0) return
-    try {
-      const span = document.createElement('span')
-      span.style.backgroundColor = color
-      span.style.borderRadius = '2px'
-      const range = sel.getRangeAt(0)
-      range.surroundContents(span)
-    } catch { /* complex range */ }
-    sel.removeAllRanges()
+    var saved = savedSelectionRef.current
+    if (!saved) return
+    var text = saved.text, pageNumber = saved.pageNumber
+    savedSelectionRef.current = null
+    var pageFrame = readerRef.current?.querySelector('[data-page-number="' + pageNumber + '"]')
+    var textLayer = pageFrame?.querySelector('.textLayer')
+    if (!textLayer) return
+    var lower = text.replace(/\s+/g, ' ').trim().toLowerCase()
+    textLayer.querySelectorAll('span').forEach(function (s) {
+      var t = s.textContent.trim().toLowerCase()
+      if (t === lower || lower.includes(t) || t.includes(lower)) {
+        s.style.backgroundColor = color
+        s.style.borderRadius = '2px'
+        s.style.padding = '0 1px'
+      }
+    })
+    if (pageNumber && text && onCreateAnnotation) {
+      onCreateAnnotation({ pageNumber: pageNumber, startOffset: 0, endOffset: 0, selectedText: text, type: 'highlight', color: color })
+    }
+    window.getSelection()?.removeAllRanges()
     setFloatingMenu({ visible: false, x: 0, y: 0 })
   }
-
   function handleUnderline() {
-    const sel = window.getSelection()
-    if (!sel || sel.rangeCount === 0) return
-    try {
-      const span = document.createElement('span')
-      span.style.textDecoration = 'underline'
-      span.style.textUnderlineOffset = '3px'
-      sel.getRangeAt(0).surroundContents(span)
-    } catch { /* complex range */ }
-    sel.removeAllRanges()
+    var saved = savedSelectionRef.current
+    if (!saved) return
+    var text = saved.text, pageNumber = saved.pageNumber
+    savedSelectionRef.current = null
+    var pageFrame = readerRef.current?.querySelector('[data-page-number="' + pageNumber + '"]')
+    var textLayer = pageFrame?.querySelector('.textLayer')
+    if (!textLayer) return
+    var lower = text.replace(/\s+/g, ' ').trim().toLowerCase()
+    textLayer.querySelectorAll('span').forEach(function (s) {
+      var t = s.textContent.trim().toLowerCase()
+      if (t === lower || lower.includes(t) || t.includes(lower)) {
+        s.style.textDecoration = 'underline'
+        s.style.textUnderlineOffset = '3px'
+      }
+    })
+    if (pageNumber && text && onCreateAnnotation) {
+      onCreateAnnotation({ pageNumber: pageNumber, startOffset: 0, endOffset: 0, selectedText: text, type: 'underline', color: null })
+    }
+    window.getSelection()?.removeAllRanges()
     setFloatingMenu({ visible: false, x: 0, y: 0 })
   }
-
   function handleWavyUnderline() {
-    const sel = window.getSelection()
-    if (!sel || sel.rangeCount === 0) return
-    try {
-      const span = document.createElement('span')
+    const saved = savedSelectionRef.current
+    if (!saved) return
+    const { text, pageNumber, spans } = saved
+    savedSelectionRef.current = null
+    spans.forEach(function(span) {
       span.style.textDecoration = 'underline wavy #EF4444'
       span.style.textUnderlineOffset = '3px'
-      sel.getRangeAt(0).surroundContents(span)
-    } catch { /* complex range */ }
-    sel.removeAllRanges()
+    })
+    if (pageNumber && text && onCreateAnnotation) {
+      onCreateAnnotation({ pageNumber, startOffset: 0, endOffset: 0, selectedText: text, type: 'wavy_underline', color: null })
+    }
+    window.getSelection()?.removeAllRanges()
     setFloatingMenu({ visible: false, x: 0, y: 0 })
   }
-
   function handleNote() {
     const sel = window.getSelection()
     if (!sel || sel.rangeCount === 0) return
@@ -669,10 +797,13 @@ export function PdfViewport({
       <SelectionFloatingMenu
         position={floatingMenu.visible ? { x: floatingMenu.x, y: floatingMenu.y } : null}
         visible={floatingMenu.visible}
+        autoShowColors={activeTool === "highlight"}
+        compact={activeTool === "highlight"}
         onHighlight={handleHighlight}
         onUnderline={handleUnderline}
         onWavyUnderline={handleWavyUnderline}
         onNote={handleNote}
+        onAskAI={onAskAI}
       />
     </div>
   )

@@ -1,10 +1,15 @@
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from app.schemas.selection import (
+    AskRequest,
+    AskResponse,
+    SelectionInsightExplainResponse,
     SelectionInsightRequest,
     SelectionInsightResponse,
 )
 from app.services.selection_insight import build_selection_insight
+from app.services.selection_insight import _ai_explanation_or_fallback  # type: ignore[reportPrivateUsage]
 
 
 router = APIRouter()
@@ -26,3 +31,97 @@ def selection_insight(
         context=payload.context or "",
         provider_id=payload.provider_id,
     )
+
+
+@router.post("/selection-insight/explain", response_model=SelectionInsightExplainResponse)
+def selection_insight_explain(
+    payload: SelectionInsightRequest,
+) -> SelectionInsightExplainResponse:
+    text = payload.text.strip()
+    if len(text) < 2:
+        raise HTTPException(status_code=400, detail="Selected text is too short.")
+
+    explanation = _ai_explanation_or_fallback(
+        text=text,
+        text_kind="",
+        paper_title=payload.paper_title,
+        glossary=[],
+        summary=payload.summary,
+        context=payload.context or "",
+        provider_id=payload.provider_id,
+    )
+    return SelectionInsightExplainResponse(explanation=explanation)
+
+
+@router.post("/selection-insight/explain-stream")
+def selection_insight_explain_stream(payload: SelectionInsightRequest):
+    text = payload.text.strip()
+    if len(text) < 2:
+        raise HTTPException(status_code=400, detail="Selected text is too short.")
+
+    def generate():
+        try:
+            from app.db.session import SessionLocal
+            from app.models.ai_provider import AiProvider
+            from app.services.crypto import decrypt_api_key
+            from app.services.llm import explain_selection_stream
+            from sqlalchemy import select
+
+            db = SessionLocal()
+            try:
+                provider = db.scalar(
+                    select(AiProvider).where(
+                        AiProvider.id == payload.provider_id,
+                        AiProvider.is_active.is_(True),
+                    )
+                )
+                if not provider:
+                    yield "data: AI config unavailable\n\n"
+                    return
+
+                api_key = decrypt_api_key(provider.encrypted_api_key)
+                for token in explain_selection_stream(
+                    base_url=provider.base_url,
+                    api_key=api_key,
+                    model=provider.model,
+                    selected_text=text,
+                    summary=payload.summary or "",
+                    context=payload.context or "",
+                ):
+                    yield f"data: {token}\n\n"
+            finally:
+                db.close()
+        except Exception:
+            yield "data: AI generation failed\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/ask", response_model=AskResponse)
+def ask_question(payload: AskRequest):
+    q = payload.question.strip()
+    if len(q) < 2:
+        raise HTTPException(status_code=400, detail="Question too short.")
+    try:
+        from app.db.session import SessionLocal
+        from app.models.ai_provider import AiProvider
+        from app.services.crypto import decrypt_api_key
+        from app.services.llm import ask_question as llm_ask
+        from sqlalchemy import select
+        db = SessionLocal()
+        try:
+            pid = getattr(payload, "provider_id", None)
+            provider = None
+            if pid:
+                provider = db.scalar(select(AiProvider).where(AiProvider.id == pid, AiProvider.is_active.is_(True)))
+            if not provider:
+                provider = db.scalar(select(AiProvider).where(AiProvider.is_active.is_(True)).order_by(AiProvider.sort_order).limit(1))
+            if not provider:
+                return {"answer": "没有可用的AI厂商，请先在AI配置中启用一个。"}
+            key = decrypt_api_key(provider.encrypted_api_key)
+            ans = llm_ask(base_url=provider.base_url, api_key=key, model=provider.model, question=q, selected_text=getattr(payload, "selected_text", "") or "", summary=getattr(payload, "summary", "") or "")
+            return {"answer": ans}
+        finally:
+            db.close()
+    except Exception as e:
+        return {"answer": "AI回答失败：" + str(e)[:100]}

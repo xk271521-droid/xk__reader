@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.api.router import api_router
 from app.core.config import settings
 from app.db.session import Base, SessionLocal, engine
-from app.models import AiProvider, Folder, Paper, ReadingRecord, User, UserAgreement, UserProfile  # noqa: F401
+from app.models import Annotation, AiProvider, Folder, Paper, ReadingRecord, User, UserAgreement, UserProfile  # noqa: F401
 
 
 def _ensure_system_providers() -> None:
@@ -29,7 +29,7 @@ def _ensure_system_providers() -> None:
                 existing.encrypted_api_key = encrypt_api_key(sp["api_key"])
                 existing.label = sp["label"]
                 existing.sort_order = sp.get("sort_order", idx)
-                existing.is_active = True
+                # 已有厂商：不改启用状态，避免覆盖用户的开关选择
             else:
                 provider = AiProvider(
                     user_id=None,
@@ -38,8 +38,20 @@ def _ensure_system_providers() -> None:
                     encrypted_api_key=encrypt_api_key(sp["api_key"]),
                     model=sp["model"],
                     sort_order=sp.get("sort_order", idx),
+                    is_active=(idx == 0),  # 只有第一个默认启用
                 )
                 db.add(provider)
+
+        # 迁移修复：如果有多个系统厂商同时启用，只保留第一个
+        system_providers = db.scalars(
+            select(AiProvider).where(
+                AiProvider.user_id.is_(None),
+                AiProvider.is_active.is_(True),
+            ).order_by(AiProvider.sort_order, AiProvider.id)
+        ).all()
+        if len(system_providers) > 1:
+            for p in system_providers[1:]:
+                p.is_active = False
         db.commit()
     finally:
         db.close()

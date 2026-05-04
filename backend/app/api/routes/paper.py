@@ -171,6 +171,185 @@ def delete_folder(
 # ── Papers ───────────────────────────────────────────────
 
 
+@router.get("/references")
+def get_references(doi: str = ""):
+    """通过多个 API 获取参考文献"""
+    if not doi:
+        return {"references": [], "source": ""}
+
+    from urllib.request import Request, urlopen
+    from urllib.parse import quote
+
+    def try_crossref():
+        url = f"https://api.crossref.org/works/{doi}"
+        req = Request(url, headers={"Accept": "application/json"})
+        resp = urlopen(req, timeout=8)
+        data = __import__("json").loads(resp.read())
+        raw = (data.get("message") or {}).get("reference") or []
+        if not raw:
+            return None
+        refs = []
+        for r in raw:
+            refs.append({
+                "title": r.get("article-title") or r.get("unstructured") or "",
+                "authors": r.get("author", ""),
+                "year": r.get("year"),
+                "journal": r.get("journal-title", ""),
+                "doi": r.get("DOI", ""),
+            })
+        return (refs, f"Crossref ({len(raw)} 条)")
+
+    def try_semantic_scholar():
+        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=paperId"
+        req = Request(url, headers={"Accept": "application/json"})
+        resp = urlopen(req, timeout=8)
+        paper_id = __import__("json").loads(resp.read()).get("paperId")
+        if not paper_id:
+            return None
+        url2 = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}/references?limit=1000&fields=title,authors,year,journal,externalIds"
+        req2 = Request(url2, headers={"Accept": "application/json"})
+        resp2 = urlopen(req2, timeout=8)
+        data = __import__("json").loads(resp2.read())
+        raw = data.get("data") or []
+        if not raw:
+            return None
+        refs = []
+        for r in raw:
+            p = r.get("citedPaper") or {}
+            authors = p.get("authors") or []
+            author_str = ", ".join(a.get("name", "") for a in authors[:3])
+            if len(authors) > 3:
+                author_str += " et al."
+            refs.append({
+                "title": p.get("title", ""),
+                "authors": author_str,
+                "year": p.get("year"),
+                "journal": (p.get("journal") or {}).get("name") if p.get("journal") else "",
+                "doi": (p.get("externalIds") or {}).get("DOI", ""),
+            })
+        return (refs, f"Semantic Scholar ({len(raw)} 条)")
+
+    def try_openalex():
+        import ssl
+        ctx = ssl._create_unverified_context()
+        url = f"https://api.openalex.org/works/doi:{doi}"
+        req = Request(url, headers={"Accept": "application/json"})
+        resp = urlopen(req, timeout=8)
+        data = __import__("json").loads(resp.read())
+        ref_ids = data.get("referenced_works") or []
+        if not ref_ids:
+            return None
+        batch = ref_ids[:50]
+        batch_str = "|".join(b.rsplit("/", 1)[-1] for b in batch)
+        url2 = "https://api.openalex.org/works?filter=" + quote("openalex_id:" + batch_str) + "&per_page=100"
+        req2 = Request(url2, headers={"Accept": "application/json"})
+        resp2 = urlopen(req2, timeout=10)
+        data2 = __import__("json").loads(resp2.read())
+        refs = []
+        for r in data2.get("results") or []:
+            refs.append({
+                "title": r.get("title", ""),
+                "authors": ", ".join(
+                    (a.get("author") or {}).get("display_name", "")
+                    for a in (r.get("authorships") or [])[:3]
+                ),
+                "year": r.get("publication_year"),
+                "journal": ((r.get("primary_location") or {}).get("source") or {}).get("display_name", ""),
+                "doi": (r.get("doi") or "").replace("https://doi.org/", ""),
+            })
+        return (refs, f"OpenAlex ({len(raw)} 条)")
+
+    for fn in (try_crossref, try_semantic_scholar, try_openalex):
+        try:
+            result = fn()
+            if result:
+                return {"references": result[0], "source": result[1]}
+        except Exception:
+            continue
+
+    return {"references": [], "source": "所有来源均无数据"}
+
+
+@router.get("/citations")
+def get_citations(doi: str = ""):
+    """获取引用该论文的其他论文"""
+    if not doi:
+        return {"citations": [], "source": ""}
+
+    from urllib.request import Request, urlopen
+    from urllib.parse import quote
+
+    def try_openalex():
+        import ssl
+        ctx = ssl._create_unverified_context()
+        url = f"https://api.openalex.org/works/doi:{doi}"
+        req = Request(url, headers={"Accept": "application/json"})
+        resp = urlopen(req, timeout=8)
+        data = __import__("json").loads(resp.read())
+        count = data.get("cited_by_count", 0)
+        oid = data.get("id", "").rsplit("/", 1)[-1]
+        if not oid:
+            return None
+        req2 = Request("https://api.openalex.org/works?filter=" + quote("cites:" + oid) + "&per_page=100", headers={"Accept": "application/json"})
+        resp2 = urlopen(req2, timeout=10)
+        data2 = __import__("json").loads(resp2.read())
+        refs = []
+        for r in data2.get("results") or []:
+            refs.append({
+                "title": r.get("title", ""),
+                "authors": ", ".join(
+                    a.get("author", {}).get("display_name", "")
+                    for a in (r.get("authorships") or [])[:3]
+                ),
+                "year": r.get("publication_year"),
+                "journal": (r.get("primary_location") or {}).get("source", {}).get("display_name", ""),
+                "doi": r.get("doi", "").replace("https://doi.org/", ""),
+            })
+        return (refs, f"OpenAlex (共被引 {count} 次)")
+
+    def try_semantic_scholar():
+        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=paperId,citationCount"
+        req = Request(url, headers={"Accept": "application/json"})
+        resp = urlopen(req, timeout=8)
+        data = __import__("json").loads(resp.read())
+        paper_id = data.get("paperId")
+        count = data.get("citationCount", 0)
+        if not paper_id:
+            return None
+        url2 = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}/citations?limit=100&fields=title,authors,year,journal,externalIds"
+        req2 = Request(url2, headers={"Accept": "application/json"})
+        resp2 = urlopen(req2, timeout=8)
+        raw = __import__("json").loads(resp2.read()).get("data") or []
+        if not raw:
+            return None
+        refs = []
+        for r in raw:
+            p = r.get("citingPaper") or {}
+            authors = p.get("authors") or []
+            author_str = ", ".join(a.get("name", "") for a in authors[:3])
+            if len(authors) > 3:
+                author_str += " et al."
+            refs.append({
+                "title": p.get("title", ""),
+                "authors": author_str,
+                "year": p.get("year"),
+                "journal": (p.get("journal") or {}).get("name") if p.get("journal") else "",
+                "doi": (p.get("externalIds") or {}).get("DOI", ""),
+            })
+        return (refs, f"Semantic Scholar (共被引 {count} 次)")
+
+    for name, fn in [("S2", try_semantic_scholar), ("OA", try_openalex)]:
+        try:
+            result = fn()
+            if result:
+                return {"citations": result[0], "source": result[1]}
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+
+    return {"citations": [], "source": "暂无引用数据"}
+
+
 @router.get("", response_model=list[PaperResponse])
 def list_papers(
     current_user: Annotated[User, Depends(get_current_user)],
@@ -377,6 +556,9 @@ def delete_paper(
 
     db.delete(paper)
     db.commit()
+
+
+# ── References / Citations ────────────────────────────────
 
 
 # ── Helpers ──────────────────────────────────────────────
