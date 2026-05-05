@@ -114,10 +114,15 @@ export function SelectionInsightPanel({ domain, onDomainChange, selectionCard, w
                 <span className="ai-toggle-switch__label">AI</span>
               </label>
             </div>
-            {aiEnabled && selectionCard.explaining ? (
+            {selectionCard.explanation ? (
+              <>
+                <p>{selectionCard.explanation}</p>
+                {aiEnabled && selectionCard.explaining ? (
+                  <div className="insight-loading-dots">AI 正在继续补充…</div>
+                ) : null}
+              </>
+            ) : aiEnabled && selectionCard.explaining ? (
               <div className="insight-loading-dots">AI 正在分析…</div>
-            ) : selectionCard.explanation ? (
-              <p>{selectionCard.explanation}</p>
             ) : aiEnabled && selectionCard.wordCount < 5 && !selectionCard.loading ? (
               <p className="muted">选中 5 个以上单词可启用 AI 上下文理解</p>
             ) : null}

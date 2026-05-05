@@ -8,17 +8,14 @@ from app.schemas.selection import (
     SelectionInsightRequest,
     SelectionInsightResponse,
 )
-from app.services.selection_insight import build_selection_insight
 from app.services.selection_insight import _ai_explanation_or_fallback  # type: ignore[reportPrivateUsage]
-
+from app.services.selection_insight import build_selection_insight
 
 router = APIRouter()
 
 
 @router.post("/selection-insight", response_model=SelectionInsightResponse)
-def selection_insight(
-    payload: SelectionInsightRequest,
-) -> SelectionInsightResponse:
+def selection_insight(payload: SelectionInsightRequest) -> SelectionInsightResponse:
     text = payload.text.strip()
     if len(text) < 2:
         raise HTTPException(status_code=400, detail="Selected text is too short.")
@@ -34,9 +31,7 @@ def selection_insight(
 
 
 @router.post("/selection-insight/explain", response_model=SelectionInsightExplainResponse)
-def selection_insight_explain(
-    payload: SelectionInsightRequest,
-) -> SelectionInsightExplainResponse:
+def selection_insight_explain(payload: SelectionInsightRequest) -> SelectionInsightExplainResponse:
     text = payload.text.strip()
     if len(text) < 2:
         raise HTTPException(status_code=400, detail="Selected text is too short.")
@@ -99,29 +94,103 @@ def selection_insight_explain_stream(payload: SelectionInsightRequest):
 
 @router.post("/ask", response_model=AskResponse)
 def ask_question(payload: AskRequest):
-    q = payload.question.strip()
-    if len(q) < 2:
+    question = payload.question.strip()
+    if len(question) < 2:
         raise HTTPException(status_code=400, detail="Question too short.")
+
     try:
         from app.db.session import SessionLocal
         from app.models.ai_provider import AiProvider
         from app.services.crypto import decrypt_api_key
         from app.services.llm import ask_question as llm_ask
         from sqlalchemy import select
+
         db = SessionLocal()
         try:
-            pid = getattr(payload, "provider_id", None)
+            provider_id = getattr(payload, "provider_id", None)
             provider = None
-            if pid:
-                provider = db.scalar(select(AiProvider).where(AiProvider.id == pid, AiProvider.is_active.is_(True)))
+            if provider_id:
+                provider = db.scalar(
+                    select(AiProvider).where(
+                        AiProvider.id == provider_id,
+                        AiProvider.is_active.is_(True),
+                    )
+                )
             if not provider:
-                provider = db.scalar(select(AiProvider).where(AiProvider.is_active.is_(True)).order_by(AiProvider.sort_order).limit(1))
+                provider = db.scalar(
+                    select(AiProvider)
+                    .where(AiProvider.is_active.is_(True))
+                    .order_by(AiProvider.sort_order)
+                    .limit(1)
+                )
             if not provider:
                 return {"answer": "没有可用的AI厂商，请先在AI配置中启用一个。"}
-            key = decrypt_api_key(provider.encrypted_api_key)
-            ans = llm_ask(base_url=provider.base_url, api_key=key, model=provider.model, question=q, selected_text=getattr(payload, "selected_text", "") or "", summary=getattr(payload, "summary", "") or "")
-            return {"answer": ans}
+
+            api_key = decrypt_api_key(provider.encrypted_api_key)
+            answer = llm_ask(
+                base_url=provider.base_url,
+                api_key=api_key,
+                model=provider.model,
+                question=question,
+                selected_text=getattr(payload, "selected_text", "") or "",
+                summary=getattr(payload, "summary", "") or "",
+            )
+            return {"answer": answer}
         finally:
             db.close()
-    except Exception as e:
-        return {"answer": "AI回答失败：" + str(e)[:100]}
+    except Exception as exc:
+        return {"answer": f"AI回答失败：{str(exc)[:100]}"}
+
+
+@router.post("/ask-stream")
+def ask_question_stream(payload: AskRequest):
+    question = payload.question.strip()
+    if len(question) < 2:
+        raise HTTPException(status_code=400, detail="Question too short.")
+
+    def generate():
+        try:
+            from app.db.session import SessionLocal
+            from app.models.ai_provider import AiProvider
+            from app.services.crypto import decrypt_api_key
+            from app.services.llm import ask_question_stream as llm_ask_stream
+            from sqlalchemy import select
+
+            db = SessionLocal()
+            try:
+                provider_id = getattr(payload, "provider_id", None)
+                provider = None
+                if provider_id:
+                    provider = db.scalar(
+                        select(AiProvider).where(
+                            AiProvider.id == provider_id,
+                            AiProvider.is_active.is_(True),
+                        )
+                    )
+                if not provider:
+                    provider = db.scalar(
+                        select(AiProvider)
+                        .where(AiProvider.is_active.is_(True))
+                        .order_by(AiProvider.sort_order)
+                        .limit(1)
+                    )
+                if not provider:
+                    yield "data: 没有可用的AI厂商，请先在AI配置中启用一个。\n\n"
+                    return
+
+                api_key = decrypt_api_key(provider.encrypted_api_key)
+                for token in llm_ask_stream(
+                    base_url=provider.base_url,
+                    api_key=api_key,
+                    model=provider.model,
+                    question=question,
+                    selected_text=getattr(payload, "selected_text", "") or "",
+                    summary=getattr(payload, "summary", "") or "",
+                ):
+                    yield f"data: {token}\n\n"
+            finally:
+                db.close()
+        except Exception as exc:
+            yield f"data: AI回答失败：{str(exc)[:100]}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")

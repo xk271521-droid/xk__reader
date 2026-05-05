@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { getStoredAuthToken } from '../services/authApi'
-import { loadPdfJs } from '../services/pdfjsClient'
+import { createPdfLoadingTask, loadPdfJs } from '../services/pdfjsClient'
 import {
   createFolder as apiCreateFolder,
   deleteFolder as apiDeleteFolder,
@@ -571,11 +571,10 @@ export function usePdfReader({ currentUser } = {}) {
     updatePaper(paperId, () => ({ isLoading: true, error: '' }))
 
     try {
-      const { getDocument } = await loadPdfJs()
       const token = getStoredAuthToken()
-      const loadingTask = getDocument({
+      const loadingTask = await createPdfLoadingTask({
         url,
-        httpHeaders: token ? { Authorization: `Bearer ${token}` } : {}
+        httpHeaders: token ? { Authorization: `Bearer ${token}` } : {},
       })
 
       const resource = paperResourcesRef.current.get(paperId)
@@ -892,8 +891,7 @@ export function usePdfReader({ currentUser } = {}) {
 
     // ── Step 1: Load PDF locally ──
     try {
-      const { getDocument } = await loadPdfJs()
-      const loadingTask = getDocument(objectUrl)
+      const loadingTask = await createPdfLoadingTask(objectUrl)
       const resource = paperResourcesRef.current.get(paperId)
 
       if (!resource) {

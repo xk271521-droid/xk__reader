@@ -41,6 +41,7 @@ function App() {
   const [chatMessages, setChatMessages] = useState({})
   const [chatInput, setChatInput] = useState({})
   const [chatAsking, setChatAsking] = useState({})
+  const [notesByPaper, setNotesByPaper] = useState({})
   const [providerLabel, setProviderLabel] = useState('')
   const serverStatus = useBackendStatus()
 
@@ -97,10 +98,18 @@ function App() {
     zoomBy,
     activePaperSummary,
   } = usePdfReader({ currentUser })
-  const { annotations, loading: annLoading, createAnnotation, deleteAnnotation } = useAnnotations(
-    activeView !== 'home' ? Number(activeView) : null
-  )
-  const activeFileUrl = activeView !== 'home' ? getPaperFileUrl(Number(activeView)) : null
+  const activePaperId = activeView !== 'home' ? Number(activeView) : null
+  const {
+    annotations,
+    loading: annLoading,
+    createAnnotation,
+    deleteAnnotation,
+    eraseAnnotationRange,
+    restoreAnnotations,
+  } = useAnnotations(activePaperId)
+  const [annotationUndoStacks, setAnnotationUndoStacks] = useState({})
+  const eraseUndoSessionsRef = useRef(new Set())
+  const activeFileUrl = activePaperId ? getPaperFileUrl(activePaperId) : null
   useEffect(() => {
     if (activeTool !== 'download' || !activeFileUrl) return
     const a = document.createElement('a')
@@ -220,10 +229,142 @@ function App() {
     zoomIn,
     zoomOut,
   }
+  const canUndoAnnotation = activePaperId
+    ? (annotationUndoStacks[activePaperId]?.length || 0) > 0
+    : false
+  const activeNoteText = activePaperId ? (notesByPaper[activePaperId] || '') : ''
+
+  function snapshotAnnotations(items) {
+    return (items || []).map((annotation) => ({
+      page_number: annotation.page_number,
+      start_char: annotation.start_char,
+      end_char: annotation.end_char,
+      quote_text: annotation.quote_text,
+      rects: annotation.rects || [],
+      type: annotation.type,
+      color: annotation.color || null,
+      source: annotation.source || 'native',
+      geometry_version: annotation.geometry_version || 'v1',
+    }))
+  }
+
+  function pushAnnotationUndo(paperId, snapshot) {
+    if (!paperId) return
+    setAnnotationUndoStacks((prev) => {
+      const stack = prev[paperId] || []
+      return {
+        ...prev,
+        [paperId]: [...stack, snapshot].slice(-80),
+      }
+    })
+  }
+
+  function clearAnnotationUndo(paperId) {
+    if (!paperId) return
+    setAnnotationUndoStacks((prev) => {
+      const next = { ...prev }
+      delete next[paperId]
+      return next
+    })
+    for (const sessionKey of Array.from(eraseUndoSessionsRef.current)) {
+      if (sessionKey.startsWith(`${paperId}:`)) {
+        eraseUndoSessionsRef.current.delete(sessionKey)
+      }
+    }
+  }
+
+  function appendNoteBlock(blockText) {
+    if (!activePaperId || !blockText) return
+    setNotesByPaper((previous) => {
+      const current = previous[activePaperId] || ''
+      const separator = current.trim() ? '\n\n' : ''
+      return {
+        ...previous,
+        [activePaperId]: `${current}${separator}${blockText}`.trim(),
+      }
+    })
+  }
+
+  function handleScreenshotTranslate(selectionPayload) {
+    if (!selectionPayload?.text) return
+    handleSelection(selectionPayload)
+  }
+
+  function handleAskAIText(text) {
+    if (!text) return
+    setActiveWorkspacePanel('ask')
+    setChatInput(function (previous) {
+      var next = {}
+      for (var key in previous) next[key] = previous[key]
+      next[activeView] = text
+      return next
+    })
+  }
+
+  function handleInsertScreenshotNote(payload) {
+    if (!activePaperId || !payload?.text) return
+    setActiveWorkspacePanel('notes')
+    const pageLabel = payload.pageNumber ? `p.${payload.pageNumber}` : 'p.?'
+    appendNoteBlock(`[截图笔记 ${pageLabel}]\n原文片段：\n${payload.text}`)
+  }
+
+  async function handleCreateAnnotation(payload) {
+    if (!activePaperId) return null
+    const before = snapshotAnnotations(annotations)
+    const result = await createAnnotation(payload)
+    if (result) pushAnnotationUndo(activePaperId, before)
+    return result
+  }
+
+  async function handleDeleteAnnotation(annotationId) {
+    if (!activePaperId) return null
+    const before = snapshotAnnotations(annotations)
+    const result = await deleteAnnotation(annotationId)
+    if (result) pushAnnotationUndo(activePaperId, before)
+    return result
+  }
+
+  async function handleEraseAnnotationRange(payload) {
+    if (!activePaperId) return null
+    const before = snapshotAnnotations(annotations)
+    const result = await eraseAnnotationRange(payload)
+    if (!result) return null
+
+    const sessionKey = payload?.eraseSessionId
+      ? `${activePaperId}:${payload.eraseSessionId}`
+      : ''
+    if (!sessionKey || !eraseUndoSessionsRef.current.has(sessionKey)) {
+      pushAnnotationUndo(activePaperId, before)
+      if (sessionKey) eraseUndoSessionsRef.current.add(sessionKey)
+    }
+    return result
+  }
+
+  async function handleUndoAnnotation() {
+    if (!activePaperId) return
+    const stack = annotationUndoStacks[activePaperId] || []
+    const previous = stack[stack.length - 1]
+    if (!previous) return
+
+    const result = await restoreAnnotations(previous)
+    if (!result) return
+
+    setAnnotationUndoStacks((prev) => ({
+      ...prev,
+      [activePaperId]: (prev[activePaperId] || []).slice(0, -1),
+    }))
+  }
+
+  function handleClosePaper(paperId) {
+    clearAnnotationUndo(paperId)
+    closePaper(paperId)
+  }
 
   function handleLogout() {
     clearStoredAuthToken()
     localStorage.removeItem('xk_read_recent')
+    setAnnotationUndoStacks({})
+    eraseUndoSessionsRef.current.clear()
     setCurrentUser(null)
     setIsUserMenuOpen(false)
     setAccountSection('')
@@ -303,13 +444,13 @@ function App() {
                     className="doc-tab__close"
                     onClick={(event) => {
                       event.stopPropagation()
-                      closePaper(paper.id)
+                      handleClosePaper(paper.id)
                     }}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter' || event.key === ' ') {
                         event.preventDefault()
                         event.stopPropagation()
-                        closePaper(paper.id)
+                        handleClosePaper(paper.id)
                       }
                     }}
                     role="button"
@@ -476,14 +617,22 @@ function App() {
             searchTerm={pdfSearch.searchTerm}
             onSearchChange={pdfSearch.onSearchChange}
             matchIndex={pdfSearch.matchIndex}
+            matches={pdfSearch.matches}
+            onSearchExecute={pdfSearch.performSearch}
             totalMatches={pdfSearch.totalMatches}
             onSearchPrev={pdfSearch.onSearchPrev}
             onSearchNext={pdfSearch.onSearchNext}
-            currentPaperId={activeView !== 'home' ? Number(activeView) : null}
+            canUndoAnnotation={canUndoAnnotation}
+            onUndoAnnotation={handleUndoAnnotation}
+            currentPaperId={activePaperId}
             annotations={annotations}
-            onCreateAnnotation={createAnnotation}
-            onDeleteAnnotation={deleteAnnotation}
+            onCreateAnnotation={handleCreateAnnotation}
+            onDeleteAnnotation={handleDeleteAnnotation}
+            onEraseAnnotationRange={handleEraseAnnotationRange}
             onAskAI={function () { if (selectionCard.text) { setActiveWorkspacePanel("ask"); setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = selectionCard.text; return n }) } }}
+            onScreenshotTranslate={handleScreenshotTranslate}
+            onScreenshotAskAI={handleAskAIText}
+            onScreenshotInsertNote={handleInsertScreenshotNote}
           />
 
           <div
@@ -517,35 +666,80 @@ function App() {
             activePanel={activeWorkspacePanel}
             fileName={fileName}
             metadata={metadata}
+            currentUser={currentUser}
             selectionCard={selectionCard}
             width={workspacePanel.width}
             chatMessages={chatMessages[activeView] || []}
             chatInput={chatInput[activeView] || ''}
             chatAsking={chatAsking[activeView] || false}
             providerLabel={providerLabel}
+            noteText={activeNoteText}
+            onNoteChange={function (value) {
+              if (!activePaperId) return
+              setNotesByPaper(function (previous) {
+                var next = {}
+                for (var key in previous) next[key] = previous[key]
+                next[activePaperId] = value
+                return next
+              })
+            }}
             onChatInputChange={function (v) { setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = v; return n }) }}
             onChatSubmit={async function (q) {
               if (!q || !q.trim()) return
-              var msg = chatMessages[activeView] || []
-              msg = msg.concat([{ role: 'user', text: q }])
-              setChatMessages(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = msg; return n })
-              setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = ''; return n })
-              setChatAsking(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = true; return n })
+              var chatView = activeView
+              var baseMessages = chatMessages[chatView] || []
+              var streamingAi = { role: 'ai', text: '' }
+              var msg = baseMessages.concat([{ role: 'user', text: q }, streamingAi])
+              setChatMessages(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[chatView] = msg; return n })
+              setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[chatView] = ''; return n })
+              setChatAsking(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[chatView] = true; return n })
               try {
-                var resp = await fetch('/api/ask', {
+                var resp = await fetch('/api/ask-stream', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (getStoredAuthToken() || '') },
                   body: JSON.stringify({ question: q, selected_text: selectionCard.text || '', paper_title: metadata.title || fileName || '', summary: activePaperSummary || '', provider_id: null })
                 })
-                var d = await resp.json()
-                var ans = d.answer || ''
-                setChatMessages(function (p) {
-                  var n = {}; for (var k in p) n[k] = p[k]
-                  n[activeView] = msg.concat([{ role: 'ai', text: ans }])
-                  return n
-                })
+                if (resp.ok && resp.body) {
+                  var reader = resp.body.getReader()
+                  var decoder = new TextDecoder()
+                  var buffer = ''
+                  var aiText = ''
+                  while (true) {
+                    var chunk = await reader.read()
+                    if (chunk.done) break
+                    buffer += decoder.decode(chunk.value, { stream: true })
+                    var parts = buffer.split('\n')
+                    buffer = parts.pop() || ''
+                    for (var i = 0; i < parts.length; i += 1) {
+                      var line = parts[i]
+                      if (!line.startsWith('data: ')) continue
+                      aiText += line.slice(6)
+                      setChatMessages(function (p) {
+                        var n = {}; for (var k in p) n[k] = p[k]
+                        n[chatView] = (n[chatView] || []).map(function (entry, idx, arr) {
+                          if (idx === arr.length - 1 && entry.role === 'ai') return { role: 'ai', text: aiText }
+                          return entry
+                        })
+                        return n
+                      })
+                      await new Promise(function (resolve) { setTimeout(resolve, 0) })
+                    }
+                  }
+                  if (!aiText.trim()) {
+                    setChatMessages(function (p) {
+                      var n = {}; for (var k in p) n[k] = p[k]
+                      n[chatView] = (n[chatView] || []).map(function (entry, idx, arr) {
+                        if (idx === arr.length - 1 && entry.role === 'ai') return { role: 'ai', text: 'AI 暂时没有返回内容。' }
+                        return entry
+                      })
+                      return n
+                    })
+                  }
+                } else {
+                  throw new Error('stream failed')
+                }
               } catch (_) {}
-              setChatAsking(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = false; return n })
+              setChatAsking(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[chatView] = false; return n })
             }}
             onAskFromSelection={function (text) {
               setActiveWorkspacePanel('ask')

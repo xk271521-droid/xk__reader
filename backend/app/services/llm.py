@@ -192,3 +192,22 @@ def ask_question(*, base_url, api_key, model, question, selected_text="", summar
     ])
     c = response.choices[0].message.content
     return c.strip() if c else ""
+
+
+def ask_question_stream(*, base_url, api_key, model, question, selected_text="", summary=""):
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+    user_msg = ASK_USER_TEMPLATE.format(summary=summary or "(鏃?", selected_text=selected_text or "(鏃?", question=question)
+    response = client.chat.completions.create(
+        model=model,
+        temperature=0.7,
+        max_tokens=600,
+        stream=True,
+        messages=[
+            {"role": "system", "content": ASK_SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+    )
+    for chunk in response:
+        delta = chunk.choices[0].delta
+        if delta.content:
+            yield delta.content

@@ -14,17 +14,25 @@ export function PaperReader({
   onSelect,
   onThumbnailPageClick,
   onWheelZoom,
+  matches,
+  onSearchExecute,
   searchTerm,
   onSearchChange,
   matchIndex,
   totalMatches,
   onSearchPrev,
   onSearchNext,
+  canUndoAnnotation,
+  onUndoAnnotation,
   currentPaperId,
   annotations,
   onCreateAnnotation,
   onDeleteAnnotation,
+  onEraseAnnotationRange,
   onAskAI,
+  onScreenshotTranslate,
+  onScreenshotAskAI,
+  onScreenshotInsertNote,
 }) {
   return (
     <section className="reader-frame">
@@ -45,6 +53,8 @@ export function PaperReader({
         totalMatches={totalMatches}
         onSearchPrev={onSearchPrev}
         onSearchNext={onSearchNext}
+        canUndo={canUndoAnnotation}
+        onUndo={onUndoAnnotation}
       />
 
       <div className={`reader-body${isThumbnailsOpen ? ' has-thumbnails' : ''}`}>
@@ -71,6 +81,7 @@ export function PaperReader({
           activeTool={activeTool}
           error={pdfReader.error}
           isLoading={pdfReader.isLoading}
+          matches={matches}
           pageMetrics={pdfReader.pageMetrics}
           pageNumbers={pdfReader.pageNumbers}
           pageNumber={pdfReader.pageNumber}
@@ -79,12 +90,18 @@ export function PaperReader({
           scale={pdfReader.scale}
           onFitToWidth={pdfReader.fitToWidth}
           onSelect={onSelect}
+          onSearchExecute={onSearchExecute}
           onVisiblePageChange={pdfReader.setCurrentPage}
           onWheelZoom={onWheelZoom}
           currentPaperId={currentPaperId}
           annotations={annotations}
           onCreateAnnotation={onCreateAnnotation}
           onDeleteAnnotation={onDeleteAnnotation}
+          onEraseAnnotationRange={onEraseAnnotationRange}
+          onAskAI={onAskAI}
+          onScreenshotTranslate={onScreenshotTranslate}
+          onScreenshotAskAI={onScreenshotAskAI}
+          onScreenshotInsertNote={onScreenshotInsertNote}
         />
       </div>
     </section>

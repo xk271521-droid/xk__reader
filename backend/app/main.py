@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
 
 from app.api.router import api_router
 from app.core.config import settings
@@ -57,6 +57,27 @@ def _ensure_system_providers() -> None:
         db.close()
 
 
+def _ensure_annotation_geometry_version_column() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("annotations_v2")}
+    except Exception:
+        return
+
+    if "geometry_version" in columns:
+        return
+
+    with engine.begin() as connection:
+        if engine.dialect.name == "sqlite":
+            connection.execute(
+                text("ALTER TABLE annotations_v2 ADD COLUMN geometry_version VARCHAR(12) DEFAULT 'v1'")
+            )
+        else:
+            connection.execute(
+                text("ALTER TABLE annotations_v2 ADD COLUMN geometry_version VARCHAR(12) NOT NULL DEFAULT 'v1'")
+            )
+
+
 def create_app() -> FastAPI:
     application = FastAPI(title=settings.app_name)
     application.add_middleware(
@@ -76,6 +97,7 @@ def create_app() -> FastAPI:
     @application.on_event("startup")
     def create_tables() -> None:
         Base.metadata.create_all(bind=engine)
+        _ensure_annotation_geometry_version_column()
         _ensure_system_providers()
 
     return application

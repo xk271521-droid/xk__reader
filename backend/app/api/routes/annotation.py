@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -11,24 +12,74 @@ from app.db.session import get_db
 from app.models import Annotation, Paper, User
 from app.schemas.annotation import (
     AnnotationCreate,
+    AnnotationEraseRequest,
     AnnotationListResponse,
     AnnotationResponse,
+    AnnotationRestoreRequest,
 )
 
 router = APIRouter(prefix="/papers/{paper_id}/annotations", tags=["annotations"])
 
 
-def _build_response(a: Annotation) -> AnnotationResponse:
-    return AnnotationResponse(
-        id=a.id,
-        page_number=a.page_number,
-        start_offset=a.start_offset,
-        end_offset=a.end_offset,
-        selected_text=a.selected_text,
-        type=a.type,
-        color=a.color,
-        created_at=a.created_at.isoformat() if a.created_at else None,
+def _ensure_owned_paper(paper_id: int, user: User, db: Session) -> Paper:
+    paper = db.scalar(
+        select(Paper).where(Paper.id == paper_id, Paper.user_id == user.id)
     )
+    if not paper:
+        raise HTTPException(status_code=404, detail="论文不存在或无权访问")
+    return paper
+
+
+def _parse_rects(raw: str | None) -> list[dict[str, float]]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _build_response(annotation: Annotation) -> AnnotationResponse:
+    return AnnotationResponse(
+        id=annotation.id,
+        page_number=annotation.page_number,
+        start_char=annotation.start_char,
+        end_char=annotation.end_char,
+        quote_text=annotation.quote_text,
+        rects=_parse_rects(annotation.rects_json),
+        type=annotation.type,
+        color=annotation.color,
+        source=annotation.source,
+        geometry_version=annotation.geometry_version or "v1",
+        created_at=annotation.created_at.isoformat() if annotation.created_at else None,
+    )
+
+
+def _list_paper_annotations(paper_id: int, db: Session) -> list[Annotation]:
+    return db.scalars(
+        select(Annotation)
+        .where(Annotation.paper_id == paper_id)
+        .order_by(Annotation.page_number, Annotation.start_char, Annotation.id)
+    ).all()
+
+
+def _dedupe_paper_annotations(paper_id: int, db: Session) -> None:
+    annotations = _list_paper_annotations(paper_id, db)
+    seen: dict[tuple[int, int, int, str, str | None], Annotation] = {}
+    for annotation in annotations:
+        key = (
+            annotation.page_number,
+            annotation.start_char,
+            annotation.end_char,
+            annotation.type,
+            annotation.color,
+        )
+        previous = seen.get(key)
+        if previous:
+            db.delete(annotation)
+            continue
+        seen[key] = annotation
 
 
 @router.get("", response_model=AnnotationListResponse)
@@ -37,19 +88,12 @@ def list_annotations(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> AnnotationListResponse:
-    paper = db.scalar(
-        select(Paper).where(Paper.id == paper_id, Paper.user_id == user.id)
-    )
-    if not paper:
-        raise HTTPException(status_code=404, detail="论文不存在")
-
-    annotations = db.scalars(
-        select(Annotation)
-        .where(Annotation.paper_id == paper_id)
-        .order_by(Annotation.page_number, Annotation.start_offset)
-    ).all()
+    _ensure_owned_paper(paper_id, user, db)
+    _dedupe_paper_annotations(paper_id, db)
+    db.commit()
+    annotations = _list_paper_annotations(paper_id, db)
     return AnnotationListResponse(
-        annotations=[_build_response(a) for a in annotations]
+        annotations=[_build_response(annotation) for annotation in annotations]
     )
 
 
@@ -60,26 +104,128 @@ def create_annotation(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> AnnotationResponse:
-    paper = db.scalar(
-        select(Paper).where(Paper.id == paper_id, Paper.user_id == user.id)
-    )
-    if not paper:
-        raise HTTPException(status_code=404, detail="论文不存在")
+    _ensure_owned_paper(paper_id, user, db)
 
     annotation = Annotation(
         user_id=user.id,
         paper_id=paper_id,
         page_number=payload.page_number,
-        start_offset=payload.start_offset,
-        end_offset=payload.end_offset,
-        selected_text=payload.selected_text,
+        start_char=payload.start_char,
+        end_char=payload.end_char,
+        quote_text=payload.quote_text,
+        rects_json=json.dumps([rect.model_dump() for rect in payload.rects], ensure_ascii=False),
         type=payload.type,
         color=payload.color,
+        source=payload.source,
+        geometry_version=payload.geometry_version,
     )
     db.add(annotation)
     db.commit()
     db.refresh(annotation)
     return _build_response(annotation)
+
+
+@router.post("/erase", response_model=AnnotationListResponse)
+def erase_annotations(
+    paper_id: int,
+    payload: AnnotationEraseRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AnnotationListResponse:
+    _ensure_owned_paper(paper_id, user, db)
+
+    if payload.end_char <= payload.start_char:
+        raise HTTPException(status_code=400, detail="擦除范围无效")
+
+    annotations = db.scalars(
+        select(Annotation)
+        .where(
+            Annotation.paper_id == paper_id,
+            Annotation.page_number == payload.page_number,
+            Annotation.end_char > payload.start_char,
+            Annotation.start_char < payload.end_char,
+        )
+        .order_by(Annotation.start_char, Annotation.id)
+    ).all()
+
+    for annotation in annotations:
+        if payload.start_char <= annotation.start_char and payload.end_char >= annotation.end_char:
+            db.delete(annotation)
+            continue
+
+        if payload.start_char <= annotation.start_char:
+            annotation.start_char = payload.end_char
+        elif payload.end_char >= annotation.end_char:
+            annotation.end_char = payload.start_char
+        else:
+            right_piece = Annotation(
+                user_id=annotation.user_id,
+                paper_id=annotation.paper_id,
+                page_number=annotation.page_number,
+                start_char=payload.end_char,
+                end_char=annotation.end_char,
+                quote_text=annotation.quote_text,
+                rects_json=annotation.rects_json,
+                type=annotation.type,
+                color=annotation.color,
+                source=annotation.source,
+                geometry_version="v2",
+            )
+            annotation.end_char = payload.start_char
+            db.add(right_piece)
+
+        annotation.geometry_version = "v2"
+        db.add(annotation)
+
+    db.commit()
+    _dedupe_paper_annotations(paper_id, db)
+    db.commit()
+
+    updated = _list_paper_annotations(paper_id, db)
+    return AnnotationListResponse(annotations=[_build_response(annotation) for annotation in updated])
+
+
+@router.post("/restore", response_model=AnnotationListResponse)
+def restore_annotations(
+    paper_id: int,
+    payload: AnnotationRestoreRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AnnotationListResponse:
+    _ensure_owned_paper(paper_id, user, db)
+
+    current_annotations = db.scalars(
+        select(Annotation).where(
+            Annotation.paper_id == paper_id,
+            Annotation.user_id == user.id,
+        )
+    ).all()
+    for annotation in current_annotations:
+        db.delete(annotation)
+
+    for item in payload.annotations:
+        if item.end_char <= item.start_char:
+            continue
+        db.add(
+            Annotation(
+                user_id=user.id,
+                paper_id=paper_id,
+                page_number=item.page_number,
+                start_char=item.start_char,
+                end_char=item.end_char,
+                quote_text=item.quote_text,
+                rects_json=json.dumps([rect.model_dump() for rect in item.rects], ensure_ascii=False),
+                type=item.type,
+                color=item.color,
+                source=item.source,
+                geometry_version=item.geometry_version,
+            )
+        )
+
+    db.commit()
+
+    restored = _list_paper_annotations(paper_id, db)
+    return AnnotationListResponse(annotations=[_build_response(annotation) for annotation in restored])
 
 
 @router.delete("/{annotation_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
@@ -89,13 +235,17 @@ def delete_annotation(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> None:
+    _ensure_owned_paper(paper_id, user, db)
+
     annotation = db.scalar(
         select(Annotation).where(
             Annotation.id == annotation_id,
+            Annotation.paper_id == paper_id,
             Annotation.user_id == user.id,
         )
     )
     if not annotation:
         raise HTTPException(status_code=404, detail="标注不存在或无权删除")
+
     db.delete(annotation)
     db.commit()

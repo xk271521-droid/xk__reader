@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Bot } from 'lucide-react'
 import { getStoredAuthToken } from '../../services/authApi'
 
 function buildPaperTitle(fileName) {
@@ -18,49 +19,58 @@ function displayValue(value) {
 
 async function fetchReferences(doi) {
   const token = getStoredAuthToken()
-  const resp = await fetch(`/api/papers/references?doi=${encodeURIComponent(doi)}`, {
+  const response = await fetch(`/api/papers/references?doi=${encodeURIComponent(doi)}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   })
-  return resp.json()
+  return response.json()
 }
 
 async function fetchCitations(doi) {
   const token = getStoredAuthToken()
-  const resp = await fetch(`/api/papers/citations?doi=${encodeURIComponent(doi)}`, {
+  const response = await fetch(`/api/papers/citations?doi=${encodeURIComponent(doi)}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   })
-  return resp.json()
+  return response.json()
 }
 
 function InfoPanel({ fileName, metadata }) {
   const [activeTab, setActiveTab] = useState('basic')
   const [cache, setCache] = useState({})
   const doi = metadata.doi || ''
-  const refs = cache[doi + ':refs']
-  const cites = cache[doi + ':cites']
+  const refs = cache[`${doi}:refs`]
+  const cites = cache[`${doi}:cites`]
   const paperTitle = useMemo(() => metadata.title || buildPaperTitle(fileName), [fileName, metadata.title])
 
-  const updateCache = (suffix, val) => setCache(prev => ({ ...prev, [doi + suffix]: val }))
+  const updateCache = (suffix, value) => setCache((previous) => ({ ...previous, [`${doi}${suffix}`]: value }))
 
   useEffect(() => {
     if (activeTab !== 'references' || !doi || refs) return
     updateCache(':refs', { loading: true })
-    fetchReferences(doi).then(data => updateCache(':refs', { loading: false, data: data?.references || [], source: data?.source || '' }))
+    fetchReferences(doi)
+      .then((data) => updateCache(':refs', { loading: false, data: data?.references || [], source: data?.source || '' }))
       .catch(() => updateCache(':refs', { loading: false, data: [], source: '加载失败' }))
-  }, [activeTab, doi])
+  }, [activeTab, doi, refs])
 
   useEffect(() => {
     if (activeTab !== 'citations' || !doi || cites) return
     updateCache(':cites', { loading: true })
-    fetchCitations(doi).then(data => updateCache(':cites', { loading: false, data: data?.citations || [], source: data?.source || '' }))
+    fetchCitations(doi)
+      .then((data) => updateCache(':cites', { loading: false, data: data?.citations || [], source: data?.source || '' }))
       .catch(() => updateCache(':cites', { loading: false, data: [], source: '加载失败' }))
-  }, [activeTab, doi])
+  }, [activeTab, cites, doi])
 
   return (
     <div className="workspace-panel__content">
       <div className="workspace-tabs">
         {infoTabs.map((tab) => (
-          <button type="button" className={`workspace-tab${activeTab === tab.id ? ' is-active' : ''}`} key={tab.id} onClick={() => setActiveTab(tab.id)}>{tab.label}</button>
+          <button
+            key={tab.id}
+            type="button"
+            className={`workspace-tab${activeTab === tab.id ? ' is-active' : ''}`}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            {tab.label}
+          </button>
         ))}
       </div>
 
@@ -85,11 +95,20 @@ function InfoPanel({ fileName, metadata }) {
         <div className="workspace-card-list">
           <div className="workspace-list-card workspace-ref-list">
             <h3>参考文献</h3>
-            {!doi ? <p className="muted">该论文没有 DOI 信息。</p>
-            : refs?.loading ? <p className="muted">正在获取...</p>
-            : refs?.data?.length > 0 ? refs.data.map((r, i) => (
-                <p key={i}>[{i + 1}] {r.doi ? <a href={`https://doi.org/${r.doi}`} target="_blank" rel="noopener" className="ref-link">{r.title}</a> : r.title}{r.authors ? ` — ${r.authors}` : ''}{r.year ? ` (${r.year})` : ''}</p>
-            )) : <p className="muted">暂无参考文献数据。</p>}
+            {!doi ? <p className="muted">该论文没有 DOI 信息。</p> : null}
+            {doi && refs?.loading ? <p className="muted">正在获取...</p> : null}
+            {doi && !refs?.loading && refs?.data?.length > 0 ? refs.data.map((reference, index) => (
+              <p key={`${reference.title || 'ref'}:${index}`}>
+                [{index + 1}] {reference.doi ? (
+                  <a href={`https://doi.org/${reference.doi}`} target="_blank" rel="noopener" className="ref-link">
+                    {reference.title}
+                  </a>
+                ) : reference.title}
+                {reference.authors ? ` — ${reference.authors}` : ''}
+                {reference.year ? ` (${reference.year})` : ''}
+              </p>
+            )) : null}
+            {doi && !refs?.loading && (!refs?.data || refs.data.length === 0) ? <p className="muted">暂无参考文献数据。</p> : null}
             {refs?.source ? <p className="card-footnote">来源：{refs.source}</p> : null}
           </div>
         </div>
@@ -99,11 +118,20 @@ function InfoPanel({ fileName, metadata }) {
         <div className="workspace-card-list">
           <div className="workspace-list-card workspace-ref-list">
             <h3>引用线索</h3>
-            {!doi ? <p className="muted">该论文没有 DOI 信息。</p>
-            : cites?.loading ? <p className="muted">正在获取...</p>
-            : cites?.data?.length > 0 ? cites.data.map((r, i) => (
-                <p key={i}>[{i + 1}] {r.doi ? <a href={`https://doi.org/${r.doi}`} target="_blank" rel="noopener" className="ref-link">{r.title}</a> : r.title}{r.authors ? ` — ${r.authors}` : ''}{r.year ? ` (${r.year})` : ''}</p>
-            )) : <p className="muted">暂无引用数据。</p>}
+            {!doi ? <p className="muted">该论文没有 DOI 信息。</p> : null}
+            {doi && cites?.loading ? <p className="muted">正在获取...</p> : null}
+            {doi && !cites?.loading && cites?.data?.length > 0 ? cites.data.map((citation, index) => (
+              <p key={`${citation.title || 'cite'}:${index}`}>
+                [{index + 1}] {citation.doi ? (
+                  <a href={`https://doi.org/${citation.doi}`} target="_blank" rel="noopener" className="ref-link">
+                    {citation.title}
+                  </a>
+                ) : citation.title}
+                {citation.authors ? ` — ${citation.authors}` : ''}
+                {citation.year ? ` (${citation.year})` : ''}
+              </p>
+            )) : null}
+            {doi && !cites?.loading && (!cites?.data || cites.data.length === 0) ? <p className="muted">暂无引用数据。</p> : null}
             {cites?.source ? <p className="card-footnote">来源：{cites.source}</p> : null}
           </div>
         </div>
@@ -112,39 +140,74 @@ function InfoPanel({ fileName, metadata }) {
   )
 }
 
-function NotesPanel() {
+function NotesPanel({ noteText, onNoteChange }) {
   return (
     <div className="workspace-panel__content">
-      <div className="workspace-title-card"><h3>阅读笔记</h3><p>这里可以沉淀高亮片段、批注内容和你的理解。</p></div>
-      <textarea className="workspace-textarea" placeholder="记录你的理解、方法拆解或实验疑问..." />
+      <div className="workspace-title-card">
+        <h3>阅读笔记</h3>
+        <p>这里可以沉淀高亮片段、截图片段、批注内容和你的理解。</p>
+      </div>
+      <textarea
+        className="workspace-textarea"
+        placeholder="记录你的理解、方法拆解或实验疑问..."
+        value={noteText || ''}
+        onChange={(event) => onNoteChange?.(event.target.value)}
+      />
     </div>
   )
 }
 
-function AskPanel({ selectionCard, fileName, providerLabel, onAsk, asking, messages, inputText, onInputChange, onSubmit }) {
-  var listRef = useRef(null)
-  useEffect(function () { if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight }, [messages])
-  var ctx = selectionCard.text || ''
+function AskPanel({ currentUser, providerLabel, asking, messages, inputText, onInputChange, onSubmit }) {
+  const listRef = useRef(null)
+  const userInitials = (currentUser?.nickname || '我').slice(0, 2).toUpperCase()
+
+  useEffect(() => {
+    if (listRef.current) {
+      listRef.current.scrollTop = listRef.current.scrollHeight
+    }
+  }, [messages])
 
   return (
     <div className="workspace-panel__content ask-panel">
       <div className="ask-messages" ref={listRef}>
         {messages.length === 0 ? <p className="muted" style={{ textAlign: 'center', padding: 20 }}>向 AI 提问这篇论文的任何问题</p> : null}
-        {messages.map(function (m, i) {
-          return <div key={i} className={'ask-msg ' + (m.role === 'user' ? 'ask-msg-user' : 'ask-msg-ai')}>
-            <div className="ask-bubble">{m.text}</div>
+        {messages.map((message, index) => (
+          <div key={index} className={`ask-msg ${message.role === 'user' ? 'ask-msg-user' : 'ask-msg-ai'}`}>
+            <div className="ask-avatar">
+              {message.role === 'user'
+                ? (currentUser?.avatar_url
+                  ? <img src={currentUser.avatar_url} alt={currentUser.nickname || '用户'} />
+                  : <span>{userInitials}</span>)
+                : <Bot size={16} />}
+            </div>
+            <div className="ask-bubble">{message.text || (asking && message.role === 'ai' ? <span className="ask-typing">...</span> : '')}</div>
           </div>
-        })}
-        {asking ? <div className="ask-msg ask-msg-ai"><div className="ask-bubble"><span className="ask-typing">...</span></div></div> : null}
+        ))}
+        {asking && !messages.some((message) => message.role === 'ai' && !message.text) ? <div className="ask-msg ask-msg-ai"><div className="ask-avatar"><Bot size={16} /></div><div className="ask-bubble"><span className="ask-typing">...</span></div></div> : null}
       </div>
       <div className="ask-input-row">
-        <textarea className="ask-input" placeholder="输入问题，Enter 发送" value={inputText || ''} onChange={function (e) { onInputChange(e.target.value) }} onKeyDown={function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit() } }} rows={1} />
-        <button className="ask-send-btn" onClick={onSubmit} disabled={asking || !(inputText || '').trim()}>发送</button>
+        <textarea
+          className="ask-input"
+          placeholder="输入问题，Enter 发送"
+          value={inputText || ''}
+          onChange={(event) => onInputChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault()
+              onSubmit()
+            }
+          }}
+          rows={1}
+        />
+        <button className="ask-send-btn" onClick={onSubmit} disabled={asking || !(inputText || '').trim()}>
+          发送
+        </button>
       </div>
       {providerLabel ? <div className="ask-provider">AI: {providerLabel}</div> : null}
     </div>
   )
 }
+
 function FullTranslatePanel() {
   return (
     <div className="workspace-panel__content">
@@ -154,13 +217,40 @@ function FullTranslatePanel() {
   )
 }
 
-export function SideWorkspacePanel({ activePanel, fileName, metadata, selectionCard, width, chatMessages, chatInput, chatAsking, providerLabel, onChatInputChange, onChatSubmit, onAskFromSelection }) {
+export function SideWorkspacePanel({
+  activePanel,
+  fileName,
+  metadata,
+  currentUser,
+  selectionCard,
+  width,
+  chatMessages,
+  chatInput,
+  chatAsking,
+  providerLabel,
+  noteText,
+  onNoteChange,
+  onChatInputChange,
+  onChatSubmit,
+}) {
   if (!activePanel) return null
+
   return (
     <aside className="workspace-panel" style={{ width }}>
       {activePanel === 'info' ? <InfoPanel fileName={fileName} metadata={metadata} /> : null}
-      {activePanel === 'notes' ? <NotesPanel /> : null}
-      {activePanel === 'ask' ? <AskPanel selectionCard={selectionCard} fileName={fileName} providerLabel={providerLabel} messages={chatMessages || []} inputText={chatInput || ''} asking={chatAsking || false} onInputChange={onChatInputChange} onSubmit={function () { onChatSubmit(chatInput) }} /> : null}
+      {activePanel === 'notes' ? <NotesPanel noteText={noteText} onNoteChange={onNoteChange} /> : null}
+      {activePanel === 'ask' ? (
+        <AskPanel
+          currentUser={currentUser}
+          selectionCard={selectionCard}
+          providerLabel={providerLabel}
+          messages={chatMessages || []}
+          inputText={chatInput || ''}
+          asking={chatAsking || false}
+          onInputChange={onChatInputChange}
+          onSubmit={() => onChatSubmit(chatInput)}
+        />
+      ) : null}
       {activePanel === 'words' ? <FullTranslatePanel /> : null}
     </aside>
   )

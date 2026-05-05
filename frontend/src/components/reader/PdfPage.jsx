@@ -1,8 +1,23 @@
 import { memo, useEffect, useRef } from 'react'
 import { loadPdfJs } from '../../services/pdfjsClient'
+import { buildRenderedPageIndex } from './pdfSelectionModel'
 
 function getRenderScale() {
   return Math.min(window.devicePixelRatio || 1, 1.5)
+}
+
+function toRgba(color, alpha) {
+  if (!color) return `rgba(244, 180, 0, ${alpha})`
+  const hex = color.replace('#', '')
+  const normalized = hex.length === 3
+    ? hex.split('').map((char) => char + char).join('')
+    : hex
+  const int = Number.parseInt(normalized, 16)
+  if (Number.isNaN(int)) return color
+  const r = (int >> 16) & 255
+  const g = (int >> 8) & 255
+  const b = int & 255
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
 }
 
 // Cache textContent per page — text parsing is expensive and text doesn't change with scale
@@ -90,6 +105,12 @@ function cacheKey(pdfDocument, pageNumber) {
 }
 
 function PdfPageComponent({
+  annotations = [],
+  currentSelection = null,
+  eraserPreview = null,
+  screenshotSelection = null,
+  selectionTool = 'select',
+  onPageIndexReady,
   pageMetric,
   pageNumber,
   pdfDocument,
@@ -201,6 +222,17 @@ function PdfPageComponent({
       }
 
       pageFrameRef.current.__lineRects = collectLineRects(textLayerRef.current)
+      onPageIndexReady?.(
+        pageNumber,
+        buildRenderedPageIndex({
+          pageNumber,
+          textDivs: textLayer.textDivs,
+          textStrings: textLayer.textContentItemsStr,
+          textLayerElement: textLayerRef.current,
+          viewportWidth: viewport.width,
+          viewportHeight: viewport.height,
+        }),
+      )
     }
 
     renderPage().catch((renderError) => {
@@ -225,6 +257,79 @@ function PdfPageComponent({
         <>
           <canvas ref={canvasRef} />
           <div className="textLayer" ref={textLayerRef} />
+          <div className="pdf-annotation-overlay">
+            {annotations.map((annotation) => {
+              const renderRects =
+                annotation.type === 'underline' || annotation.type === 'wavy_underline'
+                  ? (annotation.decorationRects?.length ? annotation.decorationRects : annotation.rects || [])
+                  : (annotation.rects || [])
+
+              return renderRects.map((rect, rectIndex) => (
+                <div
+                  key={`${annotation.id}:${rectIndex}`}
+                  className={`pdf-annotation pdf-annotation--${annotation.type}`}
+                  data-annotation-id={annotation.id}
+                  style={{
+                    left: `${rect.left * 100}%`,
+                    top: `${rect.top * 100}%`,
+                    width: `${rect.width * 100}%`,
+                    height: `${rect.height * 100}%`,
+                    backgroundColor: annotation.type === 'highlight'
+                      ? toRgba(annotation.color || '#F4B400', 0.42)
+                      : 'transparent',
+                    borderBottomColor: annotation.color || '#2563EB',
+                    color: annotation.color || '#2563EB',
+                  }}
+                />
+              ))
+            })}
+
+            {currentSelection?.rects?.map((rect, rectIndex) => (
+              <div
+                key={`selection:${rectIndex}`}
+                className={`pdf-selection-overlay pdf-selection-overlay--${selectionTool}`}
+                style={{
+                  left: `${rect.left * 100}%`,
+                  top: `${rect.top * 100}%`,
+                  width: `${rect.width * 100}%`,
+                  height: `${rect.height * 100}%`,
+                }}
+              />
+            ))}
+
+            {eraserPreview?.rects?.map((rect, rectIndex) => (
+              <div
+                key={`eraser-preview:${rectIndex}`}
+                className="pdf-eraser-preview"
+                style={{
+                  left: `${rect.left * 100}%`,
+                  top: `${rect.top * 100}%`,
+                  width: `${rect.width * 100}%`,
+                  height: `${rect.height * 100}%`,
+                }}
+              />
+            ))}
+
+            {screenshotSelection?.rect ? (
+              <div
+                className="pdf-screenshot-selection"
+                style={{
+                  left: `${screenshotSelection.rect.left * 100}%`,
+                  top: `${screenshotSelection.rect.top * 100}%`,
+                  width: `${screenshotSelection.rect.width * 100}%`,
+                  height: `${screenshotSelection.rect.height * 100}%`,
+                }}
+              >
+                {['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((position) => (
+                  <span
+                    key={position}
+                    className={`pdf-screenshot-selection__handle pdf-screenshot-selection__handle--${position}`}
+                  />
+                ))}
+                <span className="pdf-screenshot-selection__spin" />
+              </div>
+            ) : null}
+          </div>
         </>
       ) : (
         <div className="pdf-page-placeholder" />

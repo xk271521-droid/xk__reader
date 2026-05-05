@@ -1,17 +1,13 @@
 import {
   ArrowDown,
   ArrowUp,
+  Camera,
   Columns,
-  Crop,
   Download,
   Eraser,
-  Highlighter,
-  MessageSquareText,
   MousePointer2,
-  Paintbrush,
-  Pencil,
   Search,
-  Sparkles,
+  Undo2,
   X,
   ZoomIn,
   ZoomOut,
@@ -19,14 +15,12 @@ import {
 
 const toolItems = [
   { id: 'select', label: '选择', icon: MousePointer2 },
-  { id: 'highlight', label: '高亮', icon: Highlighter },
-  { id: 'underline', label: '下划线', icon: Pencil },
+  { id: 'screenshot', label: '截图', icon: Camera },
   { id: 'eraser', label: '橡皮擦', icon: Eraser },
-  { id: 'search', label: '查找', icon: Search },
   { id: 'download', label: '下载', icon: Download },
 ]
 
-function ToolbarIconButton({ children, label, onClick, active = false }) {
+function ToolbarIconButton({ children, label, onClick, active = false, disabled = false }) {
   return (
     <button
       type="button"
@@ -34,6 +28,7 @@ function ToolbarIconButton({ children, label, onClick, active = false }) {
       onClick={onClick}
       title={label}
       aria-label={label}
+      disabled={disabled}
     >
       {children}
     </button>
@@ -56,18 +51,21 @@ export function PdfToolbar({
   totalMatches,
   onSearchPrev,
   onSearchNext,
+  canUndo = false,
+  onUndo,
 }) {
-  function handleSearchInput(e) {
-    onSearchChange?.(e.target.value)
+  function handleSearchInput(event) {
+    onSearchChange?.(event.target.value)
   }
 
-  function handleSearchKeyDown(e) {
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      if (e.shiftKey) onSearchPrev?.()
+  function handleSearchKeyDown(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      if (event.shiftKey) onSearchPrev?.()
       else onSearchNext?.()
     }
   }
+
   return (
     <div className="reader-toolbar">
       <div className="toolbar-group toolbar-group--file">
@@ -100,6 +98,14 @@ export function PdfToolbar({
       </div>
 
       <div className="toolbar-group toolbar-group--compact">
+        <ToolbarIconButton
+          label="撤销本次标注操作"
+          onClick={onUndo}
+          disabled={!canUndo}
+        >
+          <Undo2 />
+        </ToolbarIconButton>
+
         <div className="toolbar-search">
           <Search className="toolbar-search__icon" />
           <input
@@ -115,10 +121,10 @@ export function PdfToolbar({
               <span className="toolbar-search__count">
                 {totalMatches > 0 ? `${(matchIndex || 0) + 1}/${totalMatches}` : '0/0'}
               </span>
-              <button type="button" className="toolbar-search__btn" title="上一个 (Shift+Enter)" onClick={onSearchPrev}>
+              <button type="button" className="toolbar-search__btn" title="上一个（Shift+Enter）" onClick={onSearchPrev}>
                 <ArrowUp />
               </button>
-              <button type="button" className="toolbar-search__btn" title="下一个 (Enter)" onClick={onSearchNext}>
+              <button type="button" className="toolbar-search__btn" title="下一个（Enter）" onClick={onSearchNext}>
                 <ArrowDown />
               </button>
               <button type="button" className="toolbar-search__btn" title="清除" onClick={() => onSearchChange?.('')}>

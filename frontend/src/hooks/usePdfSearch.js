@@ -1,80 +1,59 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { normalizeSearchText } from '../components/reader/pdfSelectionModel'
 
-function highlightMatches(container, searchTerm) {
-  clearHighlights(container)
-  if (!searchTerm || !container) return []
+function buildMatchRanges(pageIndex, searchTerm) {
+  if (!pageIndex || !searchTerm) return []
+  const pageNormalized = normalizeSearchText(pageIndex.fullText)
+  const termNormalized = normalizeSearchText(searchTerm)
+  if (!termNormalized.text) return []
 
-  const marks = []
-  const lower = searchTerm.toLowerCase()
+  const matches = []
+  let fromIndex = 0
 
-  container.querySelectorAll('.textLayer span').forEach((span) => {
-    const text = span.textContent.toLowerCase()
-    if (text.includes(lower)) {
-      span.style.backgroundColor = '#FDE68A'
-      span.style.borderRadius = '2px'
-      span.style.padding = '0 1px'
-      marks.push(span)
-    }
-  })
+  while (fromIndex < pageNormalized.text.length) {
+    const hit = pageNormalized.text.indexOf(termNormalized.text, fromIndex)
+    if (hit === -1) break
 
-  return marks
-}
+    const startChar = pageNormalized.charMap[hit]
+    const endMapIndex = hit + termNormalized.text.length - 1
+    const endChar = (pageNormalized.charMap[endMapIndex] ?? startChar) + 1
+    matches.push({
+      pageNumber: pageIndex.pageNumber,
+      startChar,
+      endChar,
+    })
+    fromIndex = hit + Math.max(1, termNormalized.text.length)
+  }
 
-function clearHighlights(container) {
-  if (!container) return
-  container.querySelectorAll('.textLayer span').forEach((span) => {
-    span.style.backgroundColor = ''
-    span.style.borderRadius = ''
-    span.style.padding = ''
-  })
+  return matches
 }
 
 export function usePdfSearch(readerRef) {
   const [searchTerm, setSearchTerm] = useState('')
   const [matches, setMatches] = useState([])
   const [matchIndex, setMatchIndex] = useState(-1)
-  const rafRef = useRef(null)
 
-  const performSearch = useCallback((term) => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current)
-    if (!readerRef.current) return
-
-    rafRef.current = requestAnimationFrame(() => {
-      const container = readerRef.current
-      const newMatches = highlightMatches(container, term)
-      setMatches(newMatches)
-      if (newMatches.length > 0) {
-        setMatchIndex(0)
-        const el = newMatches[0]
-        el.scrollIntoView({ block: 'center', behavior: 'smooth' })
-        el.style.backgroundColor = '#F59E0B'
-        setTimeout(() => { el.style.backgroundColor = '#FDE68A' }, 300)
-        setTimeout(() => { el.style.backgroundColor = '#F59E0B' }, 600)
-        setTimeout(() => { el.style.backgroundColor = '#FDE68A' }, 900)
-      } else {
-        setMatchIndex(-1)
-      }
-    })
-  }, [readerRef])
-
-  useEffect(() => {
-    if (!searchTerm) {
-      clearHighlights(readerRef.current)
+  const performSearch = useCallback((term, pageIndexes) => {
+    if (!term || !pageIndexes?.length) {
       setMatches([])
       setMatchIndex(-1)
       return
     }
-    performSearch(searchTerm)
-  }, [searchTerm, performSearch, readerRef])
+
+    const nextMatches = pageIndexes.flatMap((pageIndex) => buildMatchRanges(pageIndex, term))
+    setMatches(nextMatches)
+    setMatchIndex(nextMatches.length > 0 ? 0 : -1)
+  }, [readerRef])
+
+  useEffect(() => {
+    if (!searchTerm) {
+      setMatches([])
+      setMatchIndex(-1)
+    }
+  }, [searchTerm])
 
   function goToMatch(idx) {
     if (idx < 0 || idx >= matches.length) return
-    const el = matches[idx]
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
-    el.style.backgroundColor = '#F59E0B'
-    setTimeout(() => { el.style.backgroundColor = '#FDE68A' }, 300)
-    setTimeout(() => { el.style.backgroundColor = '#F59E0B' }, 600)
-    setTimeout(() => { el.style.backgroundColor = '#FDE68A' }, 900)
     setMatchIndex(idx)
   }
 
@@ -95,6 +74,8 @@ export function usePdfSearch(readerRef) {
   }, [])
 
   return {
+    matches,
+    performSearch,
     searchTerm,
     onSearchChange: handleSearchChange,
     matchIndex,
