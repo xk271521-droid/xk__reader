@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"C:\\\\Users\\\\xk\\\\Desktop\\\\codexwork\" log --oneline -5)",
+      "Bash(git -C \"C:\\\\Users\\\\xk\\\\Desktop\\\\codexwork\" status --short)",
+      "Read(//c/Users/xk/Desktop/codexwork/frontend/**)",
+      "Bash(npx vite *)",
+      "Bash(curl -s \"http://127.0.0.1:5173/src/components/reader/PdfViewport.jsx\")",
+      "Bash(git -C \"C:\\\\Users\\\\xk\\\\Desktop\\\\codexwork\" add -A)",
+      "Bash(git -C 'C:\\\\Users\\\\xk\\\\Desktop\\\\codexwork' commit -m ' *)"
+    ]
+  }
+}

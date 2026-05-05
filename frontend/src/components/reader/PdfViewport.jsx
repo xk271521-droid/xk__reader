@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Download, X } from 'lucide-react'
+import { Download, ZoomIn, ZoomOut, X } from 'lucide-react'
 import { PdfPage } from './PdfPage'
 import { ScreenshotFloatingMenu } from './ScreenshotFloatingMenu'
 import { SelectionFloatingMenu } from './SelectionFloatingMenu'
@@ -295,11 +295,13 @@ export function PdfViewport({
     if (!pageIndex) return createEmptySelection()
 
     const targetRect = selection.rect
-    const touchedChars = pageIndex.chars.filter((char) =>
-      char?.rect &&
-      !/\s/.test(char.char) &&
-      rectsIntersect(char.rect, targetRect, 0.0008),
-    )
+    const touchedChars = pageIndex.chars.filter((char) => {
+      if (!char?.rect || /\s/.test(char.char)) return false
+      const cx = char.rect.left + char.rect.width / 2
+      const cy = char.rect.top + char.rect.height / 2
+      return cx >= targetRect.left && cx <= targetRect.left + targetRect.width &&
+             cy >= targetRect.top && cy <= targetRect.top + targetRect.height
+    })
 
     if (touchedChars.length === 0) {
       return createEmptySelection()
@@ -403,15 +405,14 @@ export function PdfViewport({
     const payload = buildScreenshotPayload(screenshotSelection)
     if (!capture) return
 
-    const readerRect = readerRef.current?.getBoundingClientRect()
     const menuX = screenshotMenu.x
     const menuY = screenshotMenu.y
-    const maxWidth = Math.min(260, Math.max(140, capture.width * 0.38))
+    const maxWidth = Math.min(480, capture.width)
     const scaleRatio = maxWidth / Math.max(1, capture.width)
     const previewWidth = maxWidth
     const previewHeight = Math.max(80, capture.height * scaleRatio)
-    const left = readerRect ? Math.max(12, menuX - readerRect.left - previewWidth / 2) : 18
-    const top = readerRect ? Math.max(12, menuY - readerRect.top + 18) : 18
+    const left = Math.max(12, menuX - previewWidth / 2)
+    const top = Math.max(12, menuY + 18)
 
     setPinnedScreenshots((current) => [
       ...current,
@@ -1170,25 +1171,36 @@ export function PdfViewport({
   useEffect(() => {
     function handlePointerMove(event) {
       const dragging = pinnedDragRef.current
-      const readerRect = readerRef.current?.getBoundingClientRect()
-      if (!dragging || !readerRect) return
+      if (!dragging) return
+      // Handle edge resize
+      if (dragging.mode === 'edge') {
+        const target = event.target.closest('.pdf-pinned-shot')
+        if (target) {
+          const rect = target.getBoundingClientRect()
+          const x = event.clientX - rect.left, y = event.clientY - rect.top
+          const near = 12
+          const mode = []
+          if (x > rect.width - near) mode.push('e')
+          if (x < near) mode.push('w')
+          if (y > rect.height - near) mode.push('s')
+          if (y < near) mode.push('n')
+          if (mode.length) {
+            pinnedDragRef.current = { ...dragging, mode: 'resize-' + mode.join(''), startX: event.clientX, startY: event.clientY, startWidth: dragging.width, startHeight: dragging.height, aspectRatio: dragging.width / Math.max(1, dragging.height) }
+            event.preventDefault()
+            return
+          }
+        }
+      }
 
-      if (dragging.mode === 'resize') {
-        const deltaX = event.clientX - dragging.startX
-        const deltaY = event.clientY - dragging.startY
-        const widthDelta = Math.max(deltaX, deltaY * dragging.aspectRatio)
-        const nextWidth = Math.max(120, Math.min(readerRect.width * 0.72, dragging.startWidth + widthDelta))
-        const nextHeight = nextWidth / dragging.aspectRatio
-        setPinnedScreenshots((current) => current.map((item) =>
-          item.id === dragging.id
-            ? { ...item, width: nextWidth, height: nextHeight }
-            : item,
-        ))
+      if (dragging.mode === "resize") {
+        var ratio = dragging.startW / Math.max(1, dragging.startH); var nw = Math.max(80, Math.min(window.innerWidth * 0.85, dragging.startW + event.clientX - dragging.startX)); var nh = Math.round(nw / ratio)
+        
+        setPinnedScreenshots(function(c) { return c.map(function(s) { return s.id === dragging.id ? { ...s, width: nw, height: nh } : s }) })
         return
       }
 
-      const nextLeft = Math.max(8, Math.min(readerRect.width - dragging.width - 8, event.clientX - readerRect.left - dragging.offsetX))
-      const nextTop = Math.max(8, Math.min(readerRect.height - dragging.height - 8, event.clientY - readerRect.top - dragging.offsetY))
+      const nextLeft = Math.max(8, Math.min(window.innerWidth - dragging.width - 8, event.clientX - dragging.offsetX))
+      const nextTop = Math.max(8, Math.min(window.innerHeight - dragging.height - 8, event.clientY - dragging.offsetY))
 
       setPinnedScreenshots((current) => current.map((item) =>
         item.id === dragging.id
@@ -1320,72 +1332,22 @@ export function PdfViewport({
             <div
               key={item.id}
               className="pdf-pinned-shot"
-              style={{
-                left: item.left,
-                top: item.top,
-                width: item.width,
-                height: item.height,
-              }}
+              style={{ left: item.left, top: item.top, width: item.width, height: item.height }}
               onPointerDown={(event) => {
-                const cardRect = event.currentTarget.getBoundingClientRect()
-                pinnedDragRef.current = {
-                  id: item.id,
-                  mode: 'drag',
-                  width: item.width,
-                  height: item.height,
-                  offsetX: event.clientX - cardRect.left,
-                  offsetY: event.clientY - cardRect.top,
-                }
+                if (event.target.closest('button')) return
+                const r = event.currentTarget.getBoundingClientRect()
+                pinnedDragRef.current = { id: item.id, mode: 'drag', width: item.width, height: item.height, offsetX: event.clientX - r.left, offsetY: event.clientY - r.top }
               }}
             >
+              <img src={item.imageUrl} alt="截图" className="pdf-pinned-shot__image" />
               <div
-                className="pdf-pinned-shot__header"
-                onPointerDown={(event) => {
-                  const cardRect = event.currentTarget.parentElement?.getBoundingClientRect()
-                  if (!cardRect) return
-                  pinnedDragRef.current = {
-                    id: item.id,
-                    mode: 'drag',
-                    width: item.width,
-                    height: item.height,
-                    offsetX: event.clientX - cardRect.left,
-                    offsetY: event.clientY - cardRect.top,
-                  }
-                }}
-              >
-                <span>截图</span>
-                <div className="pdf-pinned-shot__actions">
-                  <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => {
-                    const link = document.createElement('a')
-                    link.href = item.imageUrl
-                    link.download = `paper-screenshot-p${item.pageNumber}-${Date.now()}.png`
-                    link.click()
-                  }}>
-                    <Download size={14} />
-                  </button>
-                  <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => closePinnedScreenshot(item.id)}>
-                    <X size={14} />
-                  </button>
-                </div>
-              </div>
-              <img src={item.imageUrl} alt="截图预览" className="pdf-pinned-shot__image" />
-              <button
-                type="button"
-                className="pdf-pinned-shot__resize"
-                aria-label="调整截图大小"
-                onPointerDown={(event) => {
-                  event.stopPropagation()
-                  pinnedDragRef.current = {
-                    id: item.id,
-                    mode: 'resize',
-                    startX: event.clientX,
-                    startY: event.clientY,
-                    startWidth: item.width,
-                    startHeight: item.height,
-                    aspectRatio: item.aspectRatio || (item.width / Math.max(1, item.height)),
-                  }
-                }}
+                className="pdf-pinned-shot__resizer"
+                onPointerDown={(e) => { e.stopPropagation(); pinnedDragRef.current = { id: item.id, mode: 'resize', startX: e.clientX, startY: e.clientY, startW: item.width, startH: item.height } }}
               />
+              <div className="pdf-pinned-shot__overlay">
+                <button className="pinned-btn" onPointerDown={(e) => e.stopPropagation()} onClick={() => { var a = document.createElement('a'); a.href = item.imageUrl; a.download = 'shot-' + Date.now() + '.png'; a.click() }}><Download size={14} /></button>
+                <button className="pinned-btn" onPointerDown={(e) => e.stopPropagation()} onClick={() => closePinnedScreenshot(item.id)}><X size={14} /></button>
+              </div>
             </div>
           ))}
         </div>

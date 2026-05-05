@@ -265,6 +265,7 @@ export function usePdfReader({ currentUser } = {}) {
   const shouldActivateImportedPaperRef = useRef(true)
   const paperResourcesRef = useRef(new Map())
   const summaryMapRef = useRef(new Map())
+  const fullTextMapRef = useRef(new Map())
   const uncategorizedFolderIdRef = useRef('')
   const lastSyncUserRef = useRef(null)
   const [activeView, setActiveView] = useState('home')
@@ -553,6 +554,7 @@ export function usePdfReader({ currentUser } = {}) {
     try {
       const fullText = await extractFullText(documentProxy)
       if (!fullText || fullText.length < 100) return
+      fullTextMapRef.current.set(paperId, fullText)
       const truncated = fullText.slice(0, 40000)
       const activeId = activeView
       const { providers } = await fetchAiProviders()
@@ -635,6 +637,7 @@ export function usePdfReader({ currentUser } = {}) {
 
   function closePaper(paperId) {
     summaryMapRef.current.delete(paperId)
+    fullTextMapRef.current.delete(paperId)
     setOpenTabIds((currentIds) => {
       const closingIndex = currentIds.indexOf(paperId)
       const nextIds = currentIds.filter((id) => id !== paperId)
@@ -658,6 +661,7 @@ export function usePdfReader({ currentUser } = {}) {
 
   function deletePaper(paperId) {
     summaryMapRef.current.delete(paperId)
+    fullTextMapRef.current.delete(paperId)
     // Call API first
     if (getStoredAuthToken()) {
       const serverId = Number(paperId)

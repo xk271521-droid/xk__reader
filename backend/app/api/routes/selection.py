@@ -194,3 +194,12 @@ def ask_question_stream(payload: AskRequest):
             yield f"data: AI回答失败：{str(exc)[:100]}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/suggest-questions")
+def suggest_questions(payload: dict):
+    qs = ["这篇论文的核心创新点是什么？", "作者用了什么方法解决这个问题？", "实验结果相比之前的工作提升了多少？"]
+    title = (payload or {}).get("title", "")
+    if title:
+        qs[0] = f"{title[:30]} 的核心创新点是什么？" if len(title) > 30 else f"{title} 的核心创新点是什么？"
+    return {"questions": qs}

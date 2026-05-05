@@ -97,6 +97,7 @@ function App() {
     zoomOut,
     zoomBy,
     activePaperSummary,
+    activePaperFullText,
   } = usePdfReader({ currentUser })
   const activePaperId = activeView !== 'home' ? Number(activeView) : null
   const {
@@ -139,6 +140,7 @@ function App() {
     readerRef,
     paperTitle: metadata.title || fileName,
     paperSummary: activePaperSummary,
+    activePaperFullText,
   })
 
   useEffect(() => {

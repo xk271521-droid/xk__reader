@@ -157,8 +157,16 @@ function NotesPanel({ noteText, onNoteChange }) {
   )
 }
 
-function AskPanel({ currentUser, providerLabel, asking, messages, inputText, onInputChange, onSubmit }) {
+function AskPanel({ currentUser, providerLabel, asking, messages, inputText, onInputChange, onSubmit, fileName }) {
   const listRef = useRef(null)
+  const [suggestions, setSuggestions] = useState([])
+  useEffect(function () {
+    if (messages.length > 0) return
+    fetch("/api/suggest-questions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: fileName || "" }) })
+      .then(function(r) { return r.json() })
+      .then(function(d) { if (d && d.questions) setSuggestions(d.questions) })
+      .catch(function() {})
+  }, [messages.length, fileName])
   const userInitials = (currentUser?.nickname || '我').slice(0, 2).toUpperCase()
 
   useEffect(() => {
@@ -170,6 +178,13 @@ function AskPanel({ currentUser, providerLabel, asking, messages, inputText, onI
   return (
     <div className="workspace-panel__content ask-panel">
       <div className="ask-messages" ref={listRef}>
+        {suggestions.length > 0 ? (
+          <div className="ask-suggestions">
+            {suggestions.map(function(q, idx) {
+              return <button key={idx} className="ask-suggestion-chip" onClick={function() { onInputChange(q); setTimeout(function() { onSubmit(q) }, 50) }}>{q}</button>
+            })}
+          </div>
+        ) : null}
         {messages.length === 0 ? <p className="muted" style={{ textAlign: 'center', padding: 20 }}>向 AI 提问这篇论文的任何问题</p> : null}
         {messages.map((message, index) => (
           <div key={index} className={`ask-msg ${message.role === 'user' ? 'ask-msg-user' : 'ask-msg-ai'}`}>
