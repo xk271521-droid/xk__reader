@@ -275,7 +275,7 @@ function PdfPageComponent({
                     width: `${rect.width * 100}%`,
                     height: `${rect.height * 100}%`,
                     backgroundColor: annotation.type === 'highlight'
-                      ? toRgba(annotation.color || '#F4B400', 0.42)
+                      ? toRgba(annotation.color || '#F2B800', 0.58)
                       : 'transparent',
                     borderBottomColor: annotation.color || '#2563EB',
                     color: annotation.color || '#2563EB',

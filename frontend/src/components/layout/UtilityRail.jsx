@@ -1,8 +1,11 @@
 import {
   BookOpenText,
+  ChevronLeft,
+  ChevronRight,
   Languages,
   MessageCircleQuestion,
   NotebookPen,
+  Sparkles,
 } from 'lucide-react'
 
 const railItems = [
@@ -10,25 +13,40 @@ const railItems = [
   { id: 'notes', label: '阅读笔记', icon: NotebookPen },
   { id: 'ask', label: '边读边问', icon: MessageCircleQuestion },
   { id: 'words', label: '全文翻译', icon: Languages },
+  { id: 'summary', label: '文献总结', icon: Sparkles },
 ]
 
-export function UtilityRail({ activeItem, onSelect }) {
+export function UtilityRail({ activeItem, collapsed = false, onSelect, onToggleCollapsed }) {
   return (
-    <aside className="utility-rail">
-      {railItems.map((item) => {
-        const Icon = item.icon
-        return (
-          <button
-            type="button"
-            className={`utility-rail__item${activeItem === item.id ? ' is-active' : ''}`}
-            key={item.id}
-            onClick={() => onSelect((current) => (current === item.id ? '' : item.id))}
-          >
-            <Icon />
-            <span>{item.label}</span>
-          </button>
-        )
-      })}
+    <aside className={`utility-rail${collapsed ? ' is-collapsed' : ''}`}>
+      <div className="utility-rail__items">
+        {railItems.map((item) => {
+          const Icon = item.icon
+          return (
+            <button
+              type="button"
+              className={`utility-rail__item${activeItem === item.id ? ' is-active' : ''}`}
+              key={item.id}
+              title={item.label}
+              aria-label={item.label}
+              onClick={() => onSelect((current) => (current === item.id ? '' : item.id))}
+            >
+              <Icon />
+              <span>{item.label}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      <button
+        type="button"
+        className="utility-rail__toggle"
+        title={collapsed ? '展开工具栏' : '收起工具栏'}
+        aria-label={collapsed ? '展开工具栏' : '收起工具栏'}
+        onClick={onToggleCollapsed}
+      >
+        {collapsed ? <ChevronLeft /> : <ChevronRight />}
+      </button>
     </aside>
   )
 }

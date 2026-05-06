@@ -15,6 +15,7 @@ export function PaperReader({
   onThumbnailPageClick,
   onWheelZoom,
   matches,
+  noteFocus,
   onSearchExecute,
   searchTerm,
   onSearchChange,
@@ -29,6 +30,7 @@ export function PaperReader({
   onCreateAnnotation,
   onDeleteAnnotation,
   onEraseAnnotationRange,
+  onInsertSelectionNote,
   onAskAI,
   onScreenshotTranslate,
   onScreenshotAskAI,
@@ -82,6 +84,7 @@ export function PaperReader({
           error={pdfReader.error}
           isLoading={pdfReader.isLoading}
           matches={matches}
+          noteFocus={noteFocus}
           pageMetrics={pdfReader.pageMetrics}
           pageNumbers={pdfReader.pageNumbers}
           pageNumber={pdfReader.pageNumber}
@@ -98,6 +101,7 @@ export function PaperReader({
           onCreateAnnotation={onCreateAnnotation}
           onDeleteAnnotation={onDeleteAnnotation}
           onEraseAnnotationRange={onEraseAnnotationRange}
+          onInsertSelectionNote={onInsertSelectionNote}
           onAskAI={onAskAI}
           onScreenshotTranslate={onScreenshotTranslate}
           onScreenshotAskAI={onScreenshotAskAI}

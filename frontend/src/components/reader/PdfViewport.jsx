@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Download, ZoomIn, ZoomOut, X } from 'lucide-react'
 import { PdfPage } from './PdfPage'
 import { ScreenshotFloatingMenu } from './ScreenshotFloatingMenu'
@@ -21,7 +22,7 @@ import {
 
 const PAGE_OVERSCAN = 2
 const DRAG_START_DISTANCE = 2
-const DEFAULT_ANNOTATION_COLOR = '#F4B400'
+const DEFAULT_ANNOTATION_COLOR = '#F2B800'
 
 function getPageFrameFromElement(element) {
   return element instanceof HTMLElement
@@ -75,6 +76,36 @@ function buildSelectionFromChars(pageIndex, pageNumber, startChar, endChar) {
     anchorRect: rects[0] || null,
     contextBefore: pageIndex.fullText.slice(Math.max(0, orderedStart - 120), orderedStart),
     contextAfter: pageIndex.fullText.slice(orderedEnd, Math.min(pageIndex.length, orderedEnd + 120)),
+  }
+}
+
+function getRangeFromBoxSelection(pageIndex, pageNumber, rect, pageAnnotations = []) {
+  if (!pageIndex || !rect) return null
+  const touchedChars = pageIndex.chars.filter((char) => {
+    if (!char?.rect || /\s/.test(char.char)) return false
+    const center = {
+      x: char.rect.left + char.rect.width / 2,
+      y: char.rect.top + char.rect.height / 2,
+    }
+    if (
+      center.x < rect.left ||
+      center.x > rect.left + rect.width ||
+      center.y < rect.top ||
+      center.y > rect.top + rect.height
+    ) {
+      return false
+    }
+    if (pageAnnotations.length === 0) return true
+    return pageAnnotations.some((annotation) =>
+      annotation.start_char <= char.index && annotation.end_char > char.index,
+    )
+  })
+
+  if (touchedChars.length === 0) return null
+  return {
+    pageNumber,
+    startChar: Math.min(...touchedChars.map((char) => char.index)),
+    endChar: Math.max(...touchedChars.map((char) => char.index)) + 1,
   }
 }
 
@@ -154,6 +185,7 @@ export function PdfViewport({
   error,
   isLoading,
   matches = [],
+  noteFocus = null,
   pageMetrics,
   pageNumbers,
   pageNumber,
@@ -170,6 +202,7 @@ export function PdfViewport({
   onCreateAnnotation,
   onDeleteAnnotation,
   onEraseAnnotationRange,
+  onInsertSelectionNote,
   onAskAI,
   onScreenshotTranslate,
   onScreenshotAskAI,
@@ -178,6 +211,7 @@ export function PdfViewport({
   const pageListRef = useRef(null)
   const fittedDocumentRef = useRef(null)
   const pageIndexesRef = useRef(new Map())
+  const lastScrolledNoteFocusRef = useRef(null)
   const pointerSelectionRef = useRef(null)
   const eraserStrokeRef = useRef(null)
   const screenshotDragRef = useRef(null)
@@ -242,7 +276,20 @@ export function PdfViewport({
       color: null,
     }))
 
-    return [...renderedAnnotations, ...renderedSearchMatches]
+    const renderedNoteFocus = pageIndex && noteFocus?.pageNumber === pageNum
+      ? [{
+        id: `note-focus:${noteFocus.nonce}`,
+        page_number: pageNum,
+        start_char: noteFocus.startChar,
+        end_char: noteFocus.endChar,
+        quote_text: '',
+        rects: getLineRectsForRange(pageIndex, noteFocus.startChar, noteFocus.endChar),
+        type: 'note_focus',
+        color: null,
+      }]
+      : []
+
+    return [...renderedAnnotations, ...renderedSearchMatches, ...renderedNoteFocus]
   }
 
   const visiblePages = useMemo(() => {
@@ -356,19 +403,22 @@ export function PdfViewport({
     link.click()
   }
 
-  function buildScreenshotPayload(selection) {
+  function buildScreenshotPayload(selection, options = {}) {
     if (!selection) return null
     const extractedSelection = buildSelectionFromScreenshotRect(selection)
-    if (!extractedSelection.visible) return null
+    const capture = captureScreenshotData(selection)
+    if (!extractedSelection.visible && !options.allowImageOnly) return null
+    if (!extractedSelection.visible && !capture?.dataUrl) return null
     return {
-      text: extractedSelection.text,
-      pageNumber: extractedSelection.pageNumber,
-      startChar: extractedSelection.startChar,
-      endChar: extractedSelection.endChar,
-      rects: extractedSelection.rects,
-      anchorRect: extractedSelection.anchorRect,
-      contextBefore: extractedSelection.contextBefore,
-      contextAfter: extractedSelection.contextAfter,
+      text: extractedSelection.visible ? extractedSelection.text : '',
+      imageUrl: capture?.dataUrl || null,
+      pageNumber: extractedSelection.visible ? extractedSelection.pageNumber : selection.pageNumber,
+      startChar: extractedSelection.visible ? extractedSelection.startChar : null,
+      endChar: extractedSelection.visible ? extractedSelection.endChar : null,
+      rects: extractedSelection.visible ? extractedSelection.rects : [],
+      anchorRect: extractedSelection.visible ? extractedSelection.anchorRect : selection.rect,
+      contextBefore: extractedSelection.visible ? extractedSelection.contextBefore : '',
+      contextAfter: extractedSelection.visible ? extractedSelection.contextAfter : '',
     }
   }
 
@@ -388,7 +438,7 @@ export function PdfViewport({
   }
 
   function handleScreenshotInsertNoteAction() {
-    const payload = buildScreenshotPayload(screenshotSelection)
+    const payload = buildScreenshotPayload(screenshotSelection, { allowImageOnly: true })
     if (!payload) return
     onScreenshotInsertNote?.(payload)
     clearScreenshotSelection()
@@ -453,10 +503,42 @@ export function PdfViewport({
 
   function handlePageIndexReady(pageNum, pageIndex) {
     pageIndexesRef.current.set(pageNum, pageIndex)
+    if (
+      noteFocus?.pageNumber === pageNum &&
+      noteFocus?.nonce &&
+      lastScrolledNoteFocusRef.current !== noteFocus.nonce
+    ) {
+      window.setTimeout(() => {
+        if (lastScrolledNoteFocusRef.current === noteFocus.nonce) return
+        if (scrollToNoteFocus(noteFocus)) {
+          lastScrolledNoteFocusRef.current = noteFocus.nonce
+        }
+      }, 0)
+    }
     if (onSearchExecute) {
       const indexes = Array.from(pageIndexesRef.current.values()).sort((left, right) => left.pageNumber - right.pageNumber)
       onSearchExecute(undefined, indexes)
     }
+  }
+
+  function scrollToNoteFocus(focus) {
+    const container = readerRef.current
+    if (!container || !focus?.pageNumber || focus.startChar == null || focus.endChar == null) return false
+
+    const pageFrame = container.querySelector(`[data-page-number="${focus.pageNumber}"]`)
+    const pageIndex = pageIndexesRef.current.get(focus.pageNumber)
+    if (!pageFrame || !pageIndex) return false
+
+    const rects = getLineRectsForRange(pageIndex, focus.startChar, focus.endChar)
+    const firstRect = rects[0]
+    if (!firstRect) return false
+
+    const containerRect = container.getBoundingClientRect()
+    const pageRect = pageFrame.getBoundingClientRect()
+    const topInContainer = container.scrollTop + (pageRect.top - containerRect.top) + firstRect.top * pageRect.height
+    const targetTop = Math.max(0, topInContainer - Math.min(180, container.clientHeight * 0.22))
+    container.scrollTo({ top: targetTop, behavior: 'smooth' })
+    return true
   }
 
   function resolvePointerWord(event) {
@@ -755,6 +837,29 @@ export function PdfViewport({
     }
   }
 
+  async function commitBoxEraserSelection(selection) {
+    if (!selection?.rect) {
+      clearScreenshotSelection()
+      return
+    }
+
+    const pageIndex = pageIndexesRef.current.get(selection.pageNumber)
+    const pageAnnotations = (annotationsByPage.get(selection.pageNumber) || [])
+      .filter((annotation) => annotation.type === 'highlight' || annotation.type === 'underline' || annotation.type === 'wavy_underline')
+    const range = getRangeFromBoxSelection(pageIndex, selection.pageNumber, selection.rect, pageAnnotations)
+    clearScreenshotSelection()
+    if (!range || !pageAnnotations.some((annotation) => annotationIntersectsRange(annotation, range, pageIndex))) {
+      return
+    }
+
+    await onEraseAnnotationRange?.({
+      pageNumber: range.pageNumber,
+      startChar: range.startChar,
+      endChar: range.endChar,
+      eraseSessionId: `box:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    })
+  }
+
   function handleMouseDown(event) {
     if (event.detail === 3) {
       handleTripleClick(event)
@@ -774,7 +879,7 @@ export function PdfViewport({
       return
     }
 
-    if (activeTool === 'screenshot') {
+    if (activeTool === 'screenshot' || activeTool === 'erase_box') {
       const resolved = resolvePointerPage(event)
       if (!resolved) {
         clearScreenshotSelection()
@@ -783,6 +888,7 @@ export function PdfViewport({
 
       event.preventDefault()
       clearSelection()
+      clearEraserPreview()
       const selection = {
         pageNumber: resolved.pageNum,
         rect: normalizeDragRect(resolved.point, resolved.point),
@@ -835,7 +941,7 @@ export function PdfViewport({
       return
     }
 
-    if (activeTool === 'screenshot' && screenshotDragRef.current?.active) {
+    if ((activeTool === 'screenshot' || activeTool === 'erase_box') && screenshotDragRef.current?.active) {
       event.preventDefault()
       const current = screenshotDragRef.current
       const point = normalizePointer(event, current.pageFrame)
@@ -848,6 +954,21 @@ export function PdfViewport({
       current.lastSelection = nextSelection
       screenshotDragRef.current = current
       setScreenshotSelection(nextSelection)
+      if (activeTool === 'erase_box') {
+        const pageAnnotations = (annotationsByPage.get(current.pageNum) || [])
+          .filter((annotation) => annotation.type === 'highlight' || annotation.type === 'underline' || annotation.type === 'wavy_underline')
+        const range = getRangeFromBoxSelection(pageIndexesRef.current.get(current.pageNum), current.pageNum, rect, pageAnnotations)
+        const previewRects = range
+          ? getLineRectsForRange(pageIndexesRef.current.get(current.pageNum), range.startChar, range.endChar)
+          : []
+        setEraserPreview({
+          visible: previewRects.length > 0,
+          pageNumber: current.pageNum,
+          startChar: range?.startChar || 0,
+          endChar: range?.endChar || 0,
+          rects: previewRects,
+        })
+      }
       return
     }
 
@@ -912,11 +1033,17 @@ export function PdfViewport({
       return
     }
 
-    if (activeTool === 'screenshot') {
+    if (activeTool === 'screenshot' || activeTool === 'erase_box') {
       const current = screenshotDragRef.current
       screenshotDragRef.current = null
       if (!current?.hasDragged || !current.lastSelection?.rect) {
         clearScreenshotSelection()
+        clearEraserPreview()
+        return
+      }
+      if (activeTool === 'erase_box') {
+        await commitBoxEraserSelection(current.lastSelection)
+        clearEraserPreview()
         return
       }
       setScreenshotSelection(current.lastSelection)
@@ -1035,7 +1162,21 @@ export function PdfViewport({
   }
 
   function handleNote() {
+    const selection = currentSelectionRef.current
+    if (selection.visible && selection.text.trim()) {
+      onInsertSelectionNote?.({
+        text: selection.text,
+        pageNumber: selection.pageNumber,
+        startChar: selection.startChar,
+        endChar: selection.endChar,
+        rects: selection.rects,
+        anchorRect: selection.anchorRect,
+        contextBefore: selection.contextBefore,
+        contextAfter: selection.contextAfter,
+      })
+    }
     setFloatingMenu({ visible: false, x: 0, y: 0 })
+    clearSelection()
   }
 
   useEffect(() => {
@@ -1048,7 +1189,7 @@ export function PdfViewport({
   }, [pdfDocument])
 
   useEffect(() => {
-    if (activeTool !== 'screenshot') {
+    if (activeTool !== 'screenshot' && activeTool !== 'erase_box') {
       clearScreenshotSelection()
     }
   }, [activeTool])
@@ -1059,6 +1200,20 @@ export function PdfViewport({
       clearEraserPreview()
     }
   }, [activeTool])
+
+  useEffect(() => {
+    if (!noteFocus?.nonce || lastScrolledNoteFocusRef.current === noteFocus.nonce) return undefined
+
+    const attempts = [0, 120, 360, 720]
+    const timers = attempts.map((delay) => window.setTimeout(() => {
+      if (lastScrolledNoteFocusRef.current === noteFocus.nonce) return
+      if (scrollToNoteFocus(noteFocus)) {
+        lastScrolledNoteFocusRef.current = noteFocus.nonce
+      }
+    }, delay))
+
+    return () => timers.forEach((timer) => window.clearTimeout(timer))
+  }, [noteFocus, pageNumber, readerRef, scale])
 
   useEffect(() => {
     const container = readerRef.current
@@ -1222,16 +1377,46 @@ export function PdfViewport({
   }, [readerRef])
 
   useEffect(() => {
+    function handlePinnedWheel(event) {
+      const target = event.target.closest('.pdf-pinned-shot')
+      if (!target) return
+      const targetId = target.dataset.pinnedId
+      if (!targetId) return
+
+      event.preventDefault()
+      const direction = event.deltaY < 0 ? 1 : -1
+      setPinnedScreenshots((current) => current.map((item) => {
+        if (item.id !== targetId) return item
+        const scaleStep = direction > 0 ? 1.08 : 0.92
+        const nextWidth = Math.max(120, Math.min(window.innerWidth * 0.88, item.width * scaleStep))
+        const nextHeight = Math.max(80, nextWidth / (item.aspectRatio || (item.width / Math.max(1, item.height))))
+        const centerX = item.left + item.width / 2
+        const centerY = item.top + item.height / 2
+        return {
+          ...item,
+          width: nextWidth,
+          height: nextHeight,
+          left: Math.max(8, Math.min(window.innerWidth - nextWidth - 8, centerX - nextWidth / 2)),
+          top: Math.max(8, Math.min(window.innerHeight - nextHeight - 8, centerY - nextHeight / 2)),
+        }
+      }))
+    }
+
+    window.addEventListener('wheel', handlePinnedWheel, { passive: false })
+    return () => window.removeEventListener('wheel', handlePinnedWheel)
+  }, [])
+
+  useEffect(() => {
     function handleWindowMouseUp() {
       if (activeTool === 'eraser') {
         handleMouseUp()
         return
       }
 
-      if (activeTool === 'screenshot' && screenshotDragRef.current) {
-        handleMouseUp()
-        return
-      }
+        if ((activeTool === 'screenshot' || activeTool === 'erase_box') && screenshotDragRef.current) {
+          handleMouseUp()
+          return
+        }
 
       if (pointerSelectionRef.current) {
         handleMouseUp()
@@ -1326,11 +1511,12 @@ export function PdfViewport({
         ))}
       </div>
 
-      {pinnedScreenshots.length > 0 ? (
+      {typeof document !== 'undefined' && pinnedScreenshots.length > 0 ? createPortal(
         <div className="pdf-pinned-layer">
           {pinnedScreenshots.map((item) => (
             <div
               key={item.id}
+              data-pinned-id={item.id}
               className="pdf-pinned-shot"
               style={{ left: item.left, top: item.top, width: item.width, height: item.height }}
               onPointerDown={(event) => {
@@ -1350,7 +1536,8 @@ export function PdfViewport({
               </div>
             </div>
           ))}
-        </div>
+        </div>,
+        document.body,
       ) : null}
 
       <SelectionFloatingMenu

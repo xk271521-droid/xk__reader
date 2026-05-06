@@ -6,6 +6,7 @@ import {
   Download,
   Eraser,
   MousePointer2,
+  ScanLine,
   Search,
   Undo2,
   X,
@@ -16,7 +17,8 @@ import {
 const toolItems = [
   { id: 'select', label: '选择', icon: MousePointer2 },
   { id: 'screenshot', label: '截图', icon: Camera },
-  { id: 'eraser', label: '橡皮擦', icon: Eraser },
+  { id: 'eraser', label: '涂抹擦除', icon: Eraser },
+  { id: 'erase_box', label: '框选擦除', icon: ScanLine },
   { id: 'download', label: '下载', icon: Download },
 ]
 
@@ -88,6 +90,8 @@ export function PdfToolbar({
                 activeTool === item.id ? ' is-active' : ''
               }`}
               key={item.id}
+              title={item.label}
+              aria-label={item.label}
               onClick={() => onToolChange(item.id)}
             >
               <Icon />
@@ -111,7 +115,7 @@ export function PdfToolbar({
           <input
             className="toolbar-search__input"
             type="text"
-            placeholder="查找"
+            placeholder="查找（不区分大小写）"
             value={searchTerm || ''}
             onChange={handleSearchInput}
             onKeyDown={handleSearchKeyDown}

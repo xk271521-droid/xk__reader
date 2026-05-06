@@ -607,8 +607,8 @@ export function getLineRectsForRange(pageIndex, startChar, endChar) {
 export function getHighlightRectsForRange(pageIndex, startChar, endChar) {
   return getLineRectsForRange(pageIndex, startChar, endChar)
     .map((rect) => {
-      const topInset = rect.height * 0.18
-      const bottomInset = rect.height * 0.08
+      const topInset = rect.height * 0.28
+      const bottomInset = rect.height * 0.02
       return {
         left: rect.left,
         top: rect.top + topInset,

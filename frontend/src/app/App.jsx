@@ -12,9 +12,16 @@ import Login from '../log/Login.jsx'
 import { useBackendStatus } from '../hooks/useBackendStatus'
 import { usePdfReader } from '../hooks/usePdfReader'
 import { useAnnotations } from '../hooks/useAnnotations'
+import { usePaperNotes } from '../hooks/usePaperNotes'
 import { usePdfSearch } from '../hooks/usePdfSearch'
 import { useResizableWidth } from '../hooks/useResizableWidth'
 import { useSelectionInsight } from '../hooks/useSelectionInsight'
+import {
+  createImageBlockDraft,
+  createQuoteBlockDraft,
+  ensureInsertTarget,
+  insertBlockIntoNotebooks,
+} from '../components/reader/noteTree'
 import {
   clearStoredAuthToken,
   fetchCurrentUser,
@@ -33,6 +40,7 @@ function App() {
   const [activeWorkspacePanel, setActiveWorkspacePanel] = useState('')
   const [activeTool, setActiveTool] = useState('select')
   const [isThumbnailsOpen, setIsThumbnailsOpen] = useState(false)
+  const [isUtilityRailCollapsed, setIsUtilityRailCollapsed] = useState(false)
   const [authMode, setAuthMode] = useState('login')
   const [isAuthViewOpen, setIsAuthViewOpen] = useState(false)
   const [currentUser, setCurrentUser] = useState(null)
@@ -41,7 +49,6 @@ function App() {
   const [chatMessages, setChatMessages] = useState({})
   const [chatInput, setChatInput] = useState({})
   const [chatAsking, setChatAsking] = useState({})
-  const [notesByPaper, setNotesByPaper] = useState({})
   const [providerLabel, setProviderLabel] = useState('')
   const serverStatus = useBackendStatus()
 
@@ -108,6 +115,16 @@ function App() {
     eraseAnnotationRange,
     restoreAnnotations,
   } = useAnnotations(activePaperId)
+  const {
+    notebooks,
+    loading: notesLoading,
+    saving: notesSaving,
+    setNotebooks,
+    saveNotebooks,
+    createNotebookDraft,
+  } = usePaperNotes(activePaperId)
+  const [activeNoteTarget, setActiveNoteTarget] = useState(null)
+  const [noteFocus, setNoteFocus] = useState(null)
   const [annotationUndoStacks, setAnnotationUndoStacks] = useState({})
   const eraseUndoSessionsRef = useRef(new Set())
   const activeFileUrl = activePaperId ? getPaperFileUrl(activePaperId) : null
@@ -234,7 +251,6 @@ function App() {
   const canUndoAnnotation = activePaperId
     ? (annotationUndoStacks[activePaperId]?.length || 0) > 0
     : false
-  const activeNoteText = activePaperId ? (notesByPaper[activePaperId] || '') : ''
 
   function snapshotAnnotations(items) {
     return (items || []).map((annotation) => ({
@@ -275,18 +291,6 @@ function App() {
     }
   }
 
-  function appendNoteBlock(blockText) {
-    if (!activePaperId || !blockText) return
-    setNotesByPaper((previous) => {
-      const current = previous[activePaperId] || ''
-      const separator = current.trim() ? '\n\n' : ''
-      return {
-        ...previous,
-        [activePaperId]: `${current}${separator}${blockText}`.trim(),
-      }
-    })
-  }
-
   function handleScreenshotTranslate(selectionPayload) {
     if (!selectionPayload?.text) return
     handleSelection(selectionPayload)
@@ -303,12 +307,58 @@ function App() {
     })
   }
 
-  function handleInsertScreenshotNote(payload) {
-    if (!activePaperId || !payload?.text) return
+  function applyNoteInsert(block) {
+    if (!activePaperId || !block) return
     setActiveWorkspacePanel('notes')
-    const pageLabel = payload.pageNumber ? `p.${payload.pageNumber}` : 'p.?'
-    appendNoteBlock(`[截图笔记 ${pageLabel}]\n原文片段：\n${payload.text}`)
+    setNotebooks((previous) => {
+      const inserted = insertBlockIntoNotebooks(previous, activeNoteTarget, block)
+      setActiveNoteTarget(inserted.target)
+      return inserted.notebooks
+    })
   }
+
+  async function handleInsertScreenshotNote(payload) {
+    if (!activePaperId || !payload?.imageUrl) return
+    applyNoteInsert(createImageBlockDraft(payload))
+  }
+
+  async function handleInsertSelectionNote(payload) {
+    if (!activePaperId || !payload?.text) return
+    applyNoteInsert(createQuoteBlockDraft(payload))
+  }
+
+  function handleCreateNotebook(kind) {
+    if (!activePaperId) return
+    setActiveWorkspacePanel('notes')
+    createNotebookDraft(kind || 'blank')
+  }
+
+  async function handleSaveAllNotebooks(nextNotebooks) {
+    if (!activePaperId) return null
+    const saved = await saveNotebooks(nextNotebooks || notebooks)
+    if (saved) {
+      const prepared = ensureInsertTarget(saved, activeNoteTarget)
+      setActiveNoteTarget(prepared.target)
+    }
+    return saved
+  }
+
+  function handleJumpToNoteAnchor(note) {
+    if (!note?.page_number || note.start_char == null || note.end_char == null) return
+    setCurrentPage(note.page_number)
+    setNoteFocus({
+      pageNumber: note.page_number,
+      startChar: note.start_char,
+      endChar: note.end_char,
+      nonce: Date.now(),
+    })
+  }
+
+  useEffect(() => {
+    if (!noteFocus) return undefined
+    const timer = window.setTimeout(() => setNoteFocus(null), 2800)
+    return () => window.clearTimeout(timer)
+  }, [noteFocus])
 
   async function handleCreateAnnotation(payload) {
     if (!activePaperId) return null
@@ -620,6 +670,7 @@ function App() {
             onSearchChange={pdfSearch.onSearchChange}
             matchIndex={pdfSearch.matchIndex}
             matches={pdfSearch.matches}
+            noteFocus={noteFocus}
             onSearchExecute={pdfSearch.performSearch}
             totalMatches={pdfSearch.totalMatches}
             onSearchPrev={pdfSearch.onSearchPrev}
@@ -631,6 +682,7 @@ function App() {
             onCreateAnnotation={handleCreateAnnotation}
             onDeleteAnnotation={handleDeleteAnnotation}
             onEraseAnnotationRange={handleEraseAnnotationRange}
+            onInsertSelectionNote={handleInsertSelectionNote}
             onAskAI={function () { if (selectionCard.text) { setActiveWorkspacePanel("ask"); setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = selectionCard.text; return n }) } }}
             onScreenshotTranslate={handleScreenshotTranslate}
             onScreenshotAskAI={handleAskAIText}
@@ -669,22 +721,20 @@ function App() {
             fileName={fileName}
             metadata={metadata}
             currentUser={currentUser}
-            selectionCard={selectionCard}
             width={workspacePanel.width}
+            notebooks={notebooks}
+            notesLoading={notesLoading}
+            notesSaving={notesSaving}
+            activeNoteTarget={activeNoteTarget}
+            onCreateNotebook={handleCreateNotebook}
+            onDraftChange={setNotebooks}
+            onSaveNotebooks={handleSaveAllNotebooks}
+            onSetActiveNoteTarget={setActiveNoteTarget}
+            onJumpToNote={handleJumpToNoteAnchor}
             chatMessages={chatMessages[activeView] || []}
             chatInput={chatInput[activeView] || ''}
             chatAsking={chatAsking[activeView] || false}
             providerLabel={providerLabel}
-            noteText={activeNoteText}
-            onNoteChange={function (value) {
-              if (!activePaperId) return
-              setNotesByPaper(function (previous) {
-                var next = {}
-                for (var key in previous) next[key] = previous[key]
-                next[activePaperId] = value
-                return next
-              })
-            }}
             onChatInputChange={function (v) { setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = v; return n }) }}
             onChatSubmit={async function (q) {
               if (!q || !q.trim()) return
@@ -749,7 +799,12 @@ function App() {
             }}
           />
 
-          <UtilityRail activeItem={activeWorkspacePanel} onSelect={setActiveWorkspacePanel} />
+          <UtilityRail
+            activeItem={activeWorkspacePanel}
+            collapsed={isUtilityRailCollapsed}
+            onSelect={setActiveWorkspacePanel}
+            onToggleCollapsed={() => setIsUtilityRailCollapsed((value) => !value)}
+          />
         </div>
 
         <div

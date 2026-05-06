@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { normalizeSearchText } from '../components/reader/pdfSelectionModel'
 
 function buildMatchRanges(pageIndex, searchTerm) {
@@ -29,28 +29,34 @@ function buildMatchRanges(pageIndex, searchTerm) {
 }
 
 export function usePdfSearch(readerRef) {
+  const pageIndexesRef = useRef([])
   const [searchTerm, setSearchTerm] = useState('')
   const [matches, setMatches] = useState([])
   const [matchIndex, setMatchIndex] = useState(-1)
 
-  const performSearch = useCallback((term, pageIndexes) => {
-    if (!term || !pageIndexes?.length) {
+  const runSearch = useCallback((term, pageIndexes = pageIndexesRef.current) => {
+    const trimmedTerm = (term || '').trim()
+    if (!trimmedTerm || !pageIndexes?.length) {
       setMatches([])
       setMatchIndex(-1)
       return
     }
 
-    const nextMatches = pageIndexes.flatMap((pageIndex) => buildMatchRanges(pageIndex, term))
+    const nextMatches = pageIndexes.flatMap((pageIndex) => buildMatchRanges(pageIndex, trimmedTerm))
     setMatches(nextMatches)
     setMatchIndex(nextMatches.length > 0 ? 0 : -1)
-  }, [readerRef])
+  }, [])
+
+  const performSearch = useCallback((term, pageIndexes) => {
+    if (pageIndexes?.length) {
+      pageIndexesRef.current = pageIndexes
+    }
+    runSearch(term ?? searchTerm, pageIndexesRef.current)
+  }, [runSearch, searchTerm])
 
   useEffect(() => {
-    if (!searchTerm) {
-      setMatches([])
-      setMatchIndex(-1)
-    }
-  }, [searchTerm])
+    runSearch(searchTerm, pageIndexesRef.current)
+  }, [runSearch, searchTerm])
 
   function goToMatch(idx) {
     if (idx < 0 || idx >= matches.length) return
