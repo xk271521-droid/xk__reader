@@ -75,6 +75,11 @@ class Paper(Base):
         back_populates="paper",
         cascade="all, delete-orphan",
     )
+    full_translation: Mapped["PaperFullTranslation | None"] = relationship(
+        back_populates="paper",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
     __table_args__ = (
         # 同一用户下，文件名+大小联合唯一，防止重复导入
         # {"name": "uq_user_file"},

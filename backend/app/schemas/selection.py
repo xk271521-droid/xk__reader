@@ -41,3 +41,31 @@ class AskRequest(BaseModel):
 
 class AskResponse(BaseModel):
     answer: str
+
+
+class SuggestQuestionMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class SuggestQuestionGroup(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
+    rationale: str = Field(min_length=1, max_length=200)
+    questions: List[str] = Field(default_factory=list, max_length=3)
+
+
+class SuggestQuestionsRequest(BaseModel):
+    mode: Literal["initial", "followup"] = "initial"
+    paper_title: str | None = Field(default=None, max_length=300)
+    summary: str | None = Field(default=None, max_length=4000)
+    selected_text: str = Field(default="", max_length=2000)
+    last_user_question: str = Field(default="", max_length=2000)
+    last_assistant_answer: str = Field(default="", max_length=4000)
+    recent_messages: List[SuggestQuestionMessage] = Field(default_factory=list, max_length=6)
+    provider_id: int | None = Field(default=None, ge=1)
+
+
+class SuggestQuestionsResponse(BaseModel):
+    questions: List[str] = Field(default_factory=list, max_length=3)
+    groups: List[SuggestQuestionGroup] = Field(default_factory=list, max_length=3)
+    source: str = Field(default="fallback", max_length=120)

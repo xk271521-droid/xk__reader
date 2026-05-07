@@ -7,7 +7,10 @@
       "Bash(npx vite *)",
       "Bash(curl -s \"http://127.0.0.1:5173/src/components/reader/PdfViewport.jsx\")",
       "Bash(git -C \"C:\\\\Users\\\\xk\\\\Desktop\\\\codexwork\" add -A)",
-      "Bash(git -C 'C:\\\\Users\\\\xk\\\\Desktop\\\\codexwork' commit -m ' *)"
+      "Bash(git -C 'C:\\\\Users\\\\xk\\\\Desktop\\\\codexwork' commit -m ' *)",
+      "Bash(echo \"backend-dev.log\")",
+      "Bash(echo \"backend-dev.err.log\")",
+      "Bash(echo \"translate_debug.log\")"
     ]
   }
 }

@@ -4,6 +4,9 @@ from fastapi.responses import StreamingResponse
 from app.schemas.selection import (
     AskRequest,
     AskResponse,
+    SuggestQuestionGroup,
+    SuggestQuestionsRequest,
+    SuggestQuestionsResponse,
     SelectionInsightExplainResponse,
     SelectionInsightRequest,
     SelectionInsightResponse,
@@ -12,6 +15,159 @@ from app.services.selection_insight import _ai_explanation_or_fallback  # type: 
 from app.services.selection_insight import build_selection_insight
 
 router = APIRouter()
+
+
+def _trim_text(value: str | None, limit: int = 120) -> str:
+    text = " ".join((value or "").split()).strip()
+    if not text:
+        return ""
+    return text if len(text) <= limit else f"{text[:limit].rstrip()}…"
+
+
+def _paper_subject(payload: SuggestQuestionsRequest) -> str:
+    if payload.selected_text.strip():
+        return _trim_text(payload.selected_text, 80)
+    if payload.paper_title:
+        return _trim_text(payload.paper_title, 48)
+    return "这篇论文"
+
+
+def _fallback_initial_questions(payload: SuggestQuestionsRequest) -> list[str]:
+    subject = _paper_subject(payload) or "这篇论文"
+    title = _trim_text(payload.paper_title, 30) or "这篇论文"
+
+    return [
+        f"{title} 的核心创新点到底是什么？",
+        f"作者是怎么用 {subject} 解决问题的？",
+        f"这篇论文的实验结果最值得关注哪几点？",
+    ]
+
+
+def _fallback_followup_groups(payload: SuggestQuestionsRequest) -> list[SuggestQuestionGroup]:
+    subject = _paper_subject(payload) or "这篇论文"
+    last_question = _trim_text(payload.last_user_question, 60) or "刚才那个问题"
+    answer_focus = _trim_text(payload.last_assistant_answer, 90) or _trim_text(payload.summary, 90) or "当前回答"
+
+    return [
+        SuggestQuestionGroup(
+            title="深入理解",
+            rationale=f"围绕 {subject} 继续拆方法逻辑，帮助把刚才的解释真正吃透。",
+            questions=[
+                f"{subject} 在整篇论文里具体承担什么角色？",
+                f"作者为什么会这样设计 {subject}？",
+                f"如果只保留最关键一步，{subject} 的核心逻辑是什么？",
+            ],
+        ),
+        SuggestQuestionGroup(
+            title="结果追问",
+            rationale=f"顺着刚才关于“{answer_focus}”的回答，继续追实验结果、对比和局限。",
+            questions=[
+                f"{last_question} 对应的实验结果是怎么证明的？",
+                "这篇论文和已有方法相比，提升最明显的是哪一项？",
+                "作者有没有提到这个方法的局限或失败场景？",
+            ],
+        ),
+        SuggestQuestionGroup(
+            title="迁移应用",
+            rationale=f"把 {subject} 从论文结论延伸到应用和扩展，更适合继续阅读时发散提问。",
+            questions=[
+                f"{subject} 能迁移到别的任务或数据集上吗？",
+                "如果我想复现这篇论文，最先应该准备什么？",
+                f"{subject} 对我现在在读的这一部分有什么启发？",
+            ],
+        ),
+    ]
+
+
+def _merge_questions(primary: list[str], fallback: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    for question in [*(primary or []), *(fallback or [])]:
+        text = " ".join((question or "").split()).strip()
+        if not text or text in seen:
+            continue
+        merged.append(text)
+        seen.add(text)
+        if len(merged) == 3:
+            break
+
+    return merged
+
+
+def _merge_groups(
+    primary: list[dict] | list[SuggestQuestionGroup],
+    fallback: list[SuggestQuestionGroup],
+) -> list[SuggestQuestionGroup]:
+    normalized: list[SuggestQuestionGroup] = []
+
+    for item in primary or []:
+        if isinstance(item, SuggestQuestionGroup):
+            normalized.append(item)
+        elif isinstance(item, dict):
+            try:
+                normalized.append(SuggestQuestionGroup(**item))
+            except Exception:
+                continue
+        if len(normalized) == 3:
+            break
+
+    if len(normalized) >= 3:
+        return normalized[:3]
+
+    for index, fallback_group in enumerate(fallback):
+        if index < len(normalized):
+            current = normalized[index]
+            normalized[index] = SuggestQuestionGroup(
+                title=current.title or fallback_group.title,
+                rationale=current.rationale or fallback_group.rationale,
+                questions=_merge_questions(current.questions, fallback_group.questions),
+            )
+        else:
+            normalized.append(fallback_group)
+
+        if len(normalized) == 3:
+            break
+
+    return normalized[:3]
+
+
+def _build_recent_messages(payload: SuggestQuestionsRequest) -> list[dict[str, str]]:
+    return [
+        {"role": message.role, "text": message.text}
+        for message in payload.recent_messages
+        if message.text.strip()
+    ]
+
+
+def _load_active_provider(provider_id: int | None):
+    from app.db.session import SessionLocal
+    from app.models.ai_provider import AiProvider
+    from app.services.crypto import decrypt_api_key
+    from sqlalchemy import select
+
+    db = SessionLocal()
+    try:
+        provider = None
+        if provider_id:
+            provider = db.scalar(
+                select(AiProvider).where(
+                    AiProvider.id == provider_id,
+                    AiProvider.is_active.is_(True),
+                )
+            )
+        if not provider:
+            provider = db.scalar(
+                select(AiProvider)
+                .where(AiProvider.is_active.is_(True))
+                .order_by(AiProvider.sort_order)
+                .limit(1)
+            )
+        if not provider:
+            return None, None
+        return provider, decrypt_api_key(provider.encrypted_api_key)
+    finally:
+        db.close()
 
 
 @router.post("/selection-insight", response_model=SelectionInsightResponse)
@@ -196,10 +352,58 @@ def ask_question_stream(payload: AskRequest):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
-@router.post("/suggest-questions")
-def suggest_questions(payload: dict):
-    qs = ["这篇论文的核心创新点是什么？", "作者用了什么方法解决这个问题？", "实验结果相比之前的工作提升了多少？"]
-    title = (payload or {}).get("title", "")
-    if title:
-        qs[0] = f"{title[:30]} 的核心创新点是什么？" if len(title) > 30 else f"{title} 的核心创新点是什么？"
-    return {"questions": qs}
+@router.post("/suggest-questions", response_model=SuggestQuestionsResponse)
+def suggest_questions(payload: SuggestQuestionsRequest) -> SuggestQuestionsResponse:
+    fallback_questions = _fallback_initial_questions(payload)
+    fallback_groups = _fallback_followup_groups(payload)
+
+    try:
+        provider, api_key = _load_active_provider(payload.provider_id)
+        if provider and api_key:
+            from app.services.llm import (
+                suggest_followup_groups as llm_suggest_followup_groups,
+                suggest_initial_questions as llm_suggest_initial_questions,
+            )
+
+            if payload.mode == "initial":
+                questions = llm_suggest_initial_questions(
+                    base_url=provider.base_url,
+                    api_key=api_key,
+                    model=provider.model,
+                    paper_title=payload.paper_title or "",
+                    summary=payload.summary or "",
+                    selected_text=payload.selected_text or "",
+                )
+                return SuggestQuestionsResponse(
+                    questions=_merge_questions(questions, fallback_questions),
+                    source=f"llm:{provider.label}",
+                )
+
+            groups = llm_suggest_followup_groups(
+                base_url=provider.base_url,
+                api_key=api_key,
+                model=provider.model,
+                paper_title=payload.paper_title or "",
+                summary=payload.summary or "",
+                selected_text=payload.selected_text or "",
+                last_user_question=payload.last_user_question or "",
+                last_assistant_answer=payload.last_assistant_answer or "",
+                recent_messages=_build_recent_messages(payload),
+            )
+            return SuggestQuestionsResponse(
+                groups=_merge_groups(groups, fallback_groups),
+                source=f"llm:{provider.label}",
+            )
+    except Exception:
+        pass
+
+    if payload.mode == "initial":
+        return SuggestQuestionsResponse(
+            questions=fallback_questions,
+            source="fallback:contextual",
+        )
+
+    return SuggestQuestionsResponse(
+        groups=fallback_groups,
+        source="fallback:contextual",
+    )

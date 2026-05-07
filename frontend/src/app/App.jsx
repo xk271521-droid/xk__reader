@@ -34,6 +34,93 @@ import { getPaperFileUrl } from '../services/paperReaderApi'
 import 'pdfjs-dist/web/pdf_viewer.css'
 import '../styles/app.css'
 
+function sanitizeDownloadName(value, fallback = 'paper') {
+  const text = String(value || fallback)
+    .replace(/\.pdf$/i, '')
+    .replace(/[\\/:*?"<>|]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return text || fallback
+}
+
+function splitAuthors(authorText) {
+  return String(authorText || '')
+    .split(/;|；|, and | and /i)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function getCitationYear(metadata) {
+  const values = [
+    metadata?.year,
+    metadata?.published,
+    metadata?.publicationDate,
+    metadata?.creationDate,
+    metadata?.modificationDate,
+  ]
+  for (const value of values) {
+    const year = String(value || '').match(/\b(19|20)\d{2}\b/)?.[0]
+    if (year) return year
+  }
+  return ''
+}
+
+function normalizeCitationSource(metadata) {
+  return {
+    title: String(metadata?.title || '').trim() || '未命名论文',
+    authors: splitAuthors(metadata?.author),
+    journal: String(metadata?.subject || metadata?.journal || '').trim(),
+    year: getCitationYear(metadata),
+    doi: String(metadata?.doi || '').trim(),
+  }
+}
+
+function joinChineseAuthors(authors) {
+  if (!authors.length) return '佚名'
+  return authors.join(', ')
+}
+
+function joinMlaAuthors(authors) {
+  if (!authors.length) return 'Unknown Author'
+  if (authors.length === 1) return authors[0]
+  if (authors.length === 2) return `${authors[0]}, and ${authors[1]}`
+  return `${authors[0]}, et al.`
+}
+
+function buildCitationText(format, metadata, fileName) {
+  const source = normalizeCitationSource({
+    ...metadata,
+    title: metadata?.title || sanitizeDownloadName(fileName),
+  })
+  const title = source.title
+  const journal = source.journal || '期刊信息缺失'
+  const year = source.year || '出版年不详'
+  const doiPart = source.doi ? ` DOI: ${source.doi}.` : ''
+
+  if (format === 'mla') {
+    const mlaYear = source.year || 'n.d.'
+    const mlaJournal = source.journal ? ` ${source.journal},` : ''
+    const mlaDoi = source.doi ? ` doi:${source.doi}.` : ''
+    return `${joinMlaAuthors(source.authors)}. "${title}."${mlaJournal} ${mlaYear}.${mlaDoi}`.replace(/\s+/g, ' ').trim()
+  }
+
+  if (format === 'cajcd') {
+    return `${joinChineseAuthors(source.authors)}. ${title}[J/OL]. ${journal}, ${year}.${doiPart}`.trim()
+  }
+
+  return `${joinChineseAuthors(source.authors)}. ${title}[J]. ${journal}, ${year}.${doiPart}`.trim()
+}
+
+function triggerTextDownload(content, fileName) {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 function App() {
   const readerRef = useRef(null)
   const userMenuRef = useRef(null)
@@ -49,7 +136,16 @@ function App() {
   const [chatMessages, setChatMessages] = useState({})
   const [chatInput, setChatInput] = useState({})
   const [chatAsking, setChatAsking] = useState({})
+  const [chatInitialSuggestions, setChatInitialSuggestions] = useState({})
+  const [chatInitialSuggestionsLoading, setChatInitialSuggestionsLoading] = useState({})
+  const [chatFollowupLoadingMessageId, setChatFollowupLoadingMessageId] = useState({})
   const [providerLabel, setProviderLabel] = useState('')
+  const [activeProviderId, setActiveProviderId] = useState(null)
+  const chatMessageCounterRef = useRef(0)
+  const chatRequestCounterRef = useRef(0)
+  const initialSuggestionRequestRef = useRef({})
+  const initialSuggestionBatchRef = useRef({})
+  const followupSuggestionRequestRef = useRef({})
   const serverStatus = useBackendStatus()
 
   // Get active AI provider name
@@ -58,12 +154,16 @@ function App() {
       .then(function (r) { return r.json() })
       .then(function (d) {
         var a = (d && d.providers || []).find(function (p) { return p.is_active })
-        if (a) setProviderLabel(a.label + ' / ' + a.model)
+        if (a) {
+          setProviderLabel(a.label + ' / ' + a.model)
+          setActiveProviderId(a.id)
+        } else {
+          setProviderLabel('')
+          setActiveProviderId(null)
+        }
       })
       .catch(function () {})
   }, [currentUser])
-
-  const pdfSearch = usePdfSearch(readerRef)
 
   const {
     activeView,
@@ -106,6 +206,7 @@ function App() {
     activePaperSummary,
     activePaperFullText,
   } = usePdfReader({ currentUser })
+  const pdfSearch = usePdfSearch(readerRef, { pdfDocument, pageNumbers })
   const activePaperId = activeView !== 'home' ? Number(activeView) : null
   const {
     annotations,
@@ -128,14 +229,6 @@ function App() {
   const [annotationUndoStacks, setAnnotationUndoStacks] = useState({})
   const eraseUndoSessionsRef = useRef(new Set())
   const activeFileUrl = activePaperId ? getPaperFileUrl(activePaperId) : null
-  useEffect(() => {
-    if (activeTool !== 'download' || !activeFileUrl) return
-    const a = document.createElement('a')
-    a.href = activeFileUrl
-    a.download = fileName || 'paper.pdf'
-    a.click()
-    setActiveTool('select')
-  }, [activeTool, activeFileUrl, fileName])
 
   const thumbnailPanel = useResizableWidth({
     initialWidth: 300,
@@ -232,6 +325,12 @@ function App() {
   const isReaderView = activeView !== 'home'
   const isAccountView = Boolean(accountSection)
   const userInitials = (currentUser?.nickname || 'xk').slice(0, 2).toLowerCase()
+  const activeChatMessages = chatMessages[activeView] || []
+  const activeChatInput = chatInput[activeView] || ''
+  const activeChatAsking = chatAsking[activeView] || false
+  const activeInitialSuggestions = chatInitialSuggestions[activeView] || []
+  const activeInitialSuggestionsLoading = chatInitialSuggestionsLoading[activeView] || false
+  const activeFollowupLoadingMessageId = chatFollowupLoadingMessageId[activeView] || ''
   const paperReaderState = {
     error,
     fileName,
@@ -296,16 +395,562 @@ function App() {
     handleSelection(selectionPayload)
   }
 
+  function createChatMessageId(prefix) {
+    chatMessageCounterRef.current += 1
+    return `${prefix}-${Date.now()}-${chatMessageCounterRef.current}`
+  }
+
+  function nextChatRequestToken() {
+    chatRequestCounterRef.current += 1
+    return chatRequestCounterRef.current
+  }
+
+  function normalizeSuggestionQuestions(value) {
+    if (!Array.isArray(value)) return []
+    const questions = []
+    const seen = new Set()
+
+    value.forEach(function (item) {
+      const text = String(item || '').trim()
+      if (!text || seen.has(text)) return
+      seen.add(text)
+      questions.push(text)
+    })
+
+    return questions.slice(0, 3)
+  }
+
+  function sameQuestionSet(left, right) {
+    const leftText = normalizeSuggestionQuestions(left).join('\n')
+    const rightText = normalizeSuggestionQuestions(right).join('\n')
+    return Boolean(leftText) && leftText === rightText
+  }
+
+  function normalizeFollowupTitle(title, index) {
+    const fallbackTitles = ['深入理解', '结果追问', '延伸应用']
+    const text = String(title || '').trim()
+    if (!text) return fallbackTitles[index] || `推荐问题 ${index + 1}`
+    if (text.includes('迁移')) return '延伸应用'
+    return text
+  }
+
+  function compactQuestionSubject(value, limit) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim()
+    if (!text) return ''
+    return text.length <= limit ? text : `${text.slice(0, limit).trim()}...`
+  }
+
+  function buildInitialSuggestionQuestions(chatContext, batchIndex = 0) {
+    const subject = compactQuestionSubject(chatContext?.selected_text || chatContext?.paper_title, 36) || '这篇论文'
+    const title = compactQuestionSubject(chatContext?.paper_title, 28) || '这篇论文'
+    const batches = [
+      [
+        `${title} 的核心创新点是什么？`,
+        `作者用了什么方法解决 ${subject} 相关问题？`,
+        '实验结果最值得关注的是哪几项？',
+      ],
+      [
+        `这篇论文主要想解决什么问题？`,
+        `${subject} 在方法流程里起什么作用？`,
+        '作者的结论有没有明显局限？',
+      ],
+      [
+        `读这篇论文时应该先抓住哪条主线？`,
+        '论文里的关键术语分别是什么意思？',
+        '如果要复现这篇论文，第一步该看哪里？',
+      ],
+      [
+        `这篇论文和已有方法最大的差别是什么？`,
+        '哪些实验能证明作者的方法有效？',
+        `${subject} 对后续研究有什么启发？`,
+      ],
+    ]
+
+    return normalizeSuggestionQuestions(batches[Math.abs(batchIndex) % batches.length])
+  }
+
+  function normalizeFollowupGroups(value) {
+    if (!Array.isArray(value)) return []
+
+    return value
+      .map(function (item, index) {
+        const questions = normalizeSuggestionQuestions(item?.questions || [])
+        if (!questions.length) return null
+
+        return {
+          title: normalizeFollowupTitle(item?.title, index),
+          rationale: String(item?.rationale || '').trim(),
+          questions,
+        }
+      })
+      .filter(Boolean)
+      .slice(0, 3)
+  }
+
+  function mergeQuestionPool(primary, fallback) {
+    return normalizeSuggestionQuestions([...(primary || []), ...(fallback || [])])
+  }
+
+  function buildFallbackFollowupGroups(payload) {
+    const subject = compactQuestionSubject(payload?.selectedText || payload?.paperTitle, 36) || '这篇论文'
+    const lastQuestion = compactQuestionSubject(payload?.lastUserQuestion, 42) || '刚才这个问题'
+    const legacyQuestions = normalizeSuggestionQuestions(payload?.legacyQuestions || [])
+
+    return [
+      {
+        title: '深入理解',
+        rationale: `围绕 ${subject} 继续拆方法、术语和设计逻辑。`,
+        questions: mergeQuestionPool(
+          legacyQuestions.slice(0, 1),
+          [
+            `${subject} 在整篇论文的方法里具体承担什么作用？`,
+            `作者为什么这样设计 ${subject}？`,
+            `如果只保留最关键的一步，这部分的核心逻辑是什么？`,
+          ],
+        ),
+      },
+      {
+        title: '结果追问',
+        rationale: `顺着“${lastQuestion}”继续追实验结果、对比和局限。`,
+        questions: mergeQuestionPool(
+          legacyQuestions.slice(1, 2),
+          [
+            `${lastQuestion} 对应的实验结果是怎么证明的？`,
+            '和之前的方法相比，这篇论文提升最明显的是哪一项？',
+            '作者有没有提到这个方法的局限或失效场景？',
+          ],
+        ),
+      },
+      {
+        title: '延伸应用',
+        rationale: '把当前论文结论延伸到复现、应用和阅读启发。',
+        questions: mergeQuestionPool(
+          legacyQuestions.slice(2, 3),
+          [
+            `${subject} 能迁移到别的任务或数据集上吗？`,
+            '如果我想复现这篇论文，最先该准备什么？',
+            '这部分结论对我继续读后文有什么帮助？',
+          ],
+        ),
+      },
+    ]
+  }
+
+  function buildPaperChatContext() {
+    return {
+      paper_title: metadata.title || fileName || '',
+      summary: activePaperSummary || '',
+      selected_text: selectionCard.text || '',
+      provider_id: activeProviderId,
+    }
+  }
+
+  function buildRecentChatMessages(messages) {
+    return (messages || [])
+      .filter(function (message) {
+        return (message.role === 'user' || message.role === 'assistant') && (message.text || '').trim()
+      })
+      .slice(-6)
+      .map(function (message) {
+        return {
+          role: message.role === 'assistant' ? 'assistant' : 'user',
+          text: (message.text || '').trim(),
+        }
+      })
+  }
+
+  function clearMessageFollowups(messages) {
+    return (messages || []).map(function (message) {
+      if (!message?.followupGroups?.length) return message
+      return { ...message, followupGroups: [] }
+    })
+  }
+
+  function updateChatMessagesForView(viewKey, updater) {
+    setChatMessages(function (previous) {
+      return {
+        ...previous,
+        [viewKey]: updater(previous[viewKey] || []),
+      }
+    })
+  }
+
   function handleAskAIText(text) {
     if (!text) return
     setActiveWorkspacePanel('ask')
     setChatInput(function (previous) {
-      var next = {}
-      for (var key in previous) next[key] = previous[key]
-      next[activeView] = text
-      return next
+      return {
+        ...previous,
+        [activeView]: text,
+      }
     })
   }
+
+  function handleDownloadOption(format) {
+    const baseName = sanitizeDownloadName(metadata.title || fileName)
+
+    if (format === 'pdf') {
+      if (!activeFileUrl) {
+        window.alert('当前 PDF 暂时没有可下载地址')
+        return
+      }
+      const link = document.createElement('a')
+      link.href = activeFileUrl
+      link.download = fileName || `${baseName}.pdf`
+      link.click()
+      return
+    }
+
+    const citationText = buildCitationText(format, metadata, fileName)
+    const suffixMap = {
+      gbt7714: 'GB-T-7714-2015',
+      cajcd: 'CAJ-CD',
+      mla: 'MLA',
+    }
+    triggerTextDownload(citationText, `${baseName}-${suffixMap[format] || 'citation'}.txt`)
+  }
+
+  async function fetchInitialSuggestions(force = false) {
+    const viewKey = activeView
+    if (!viewKey || viewKey === 'home') return
+
+    const existingMessages = chatMessages[viewKey] || []
+    const existingSuggestions = chatInitialSuggestions[viewKey] || []
+    const isLoading = chatInitialSuggestionsLoading[viewKey] || false
+
+    if (!force) {
+      if (existingMessages.length > 0 || existingSuggestions.length > 0 || isLoading) {
+        return
+      }
+    }
+
+    const chatContext = buildPaperChatContext()
+    const previousBatch = initialSuggestionBatchRef.current[viewKey] || 0
+    const batchIndex = force ? previousBatch + 1 : previousBatch
+    initialSuggestionBatchRef.current[viewKey] = batchIndex
+    const fallbackQuestions = buildInitialSuggestionQuestions(chatContext, batchIndex)
+    const requestToken = nextChatRequestToken()
+    initialSuggestionRequestRef.current[viewKey] = requestToken
+    setChatInitialSuggestionsLoading(function (previous) {
+      return {
+        ...previous,
+        [viewKey]: true,
+      }
+    })
+
+    try {
+      const token = getStoredAuthToken()
+      const headers = { 'Content-Type': 'application/json' }
+      if (token) headers.Authorization = `Bearer ${token}`
+
+      const response = await fetch('/api/suggest-questions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          mode: 'initial',
+          ...chatContext,
+          recent_messages: [],
+        }),
+      })
+      const data = await response.json().catch(function () { return null })
+
+      if (initialSuggestionRequestRef.current[viewKey] !== requestToken) {
+        return
+      }
+
+      const aiQuestions = normalizeSuggestionQuestions(data?.questions || [])
+      const questions = (!aiQuestions.length || (force && sameQuestionSet(aiQuestions, existingSuggestions)))
+        ? fallbackQuestions
+        : aiQuestions
+      setChatInitialSuggestions(function (previous) {
+        return {
+          ...previous,
+          [viewKey]: questions,
+        }
+      })
+    } catch (_) {
+      if (initialSuggestionRequestRef.current[viewKey] !== requestToken) {
+        return
+      }
+      setChatInitialSuggestions(function (previous) {
+        return {
+          ...previous,
+          [viewKey]: fallbackQuestions,
+        }
+      })
+    } finally {
+      if (initialSuggestionRequestRef.current[viewKey] === requestToken) {
+        setChatInitialSuggestionsLoading(function (previous) {
+          return {
+            ...previous,
+            [viewKey]: false,
+          }
+        })
+      }
+    }
+  }
+
+  async function fetchFollowupSuggestions({
+    viewKey,
+    assistantMessageId,
+    lastUserQuestion,
+    lastAssistantAnswer,
+    messages,
+    chatContext,
+  }) {
+    if (!viewKey || !assistantMessageId || !lastAssistantAnswer.trim()) return
+
+    const fallbackGroups = buildFallbackFollowupGroups({
+      paperTitle: chatContext?.paper_title,
+      selectedText: chatContext?.selected_text,
+      lastUserQuestion,
+      lastAssistantAnswer,
+      legacyQuestions: [],
+    })
+
+    const requestToken = nextChatRequestToken()
+    followupSuggestionRequestRef.current[viewKey] = requestToken
+    setChatFollowupLoadingMessageId(function (previous) {
+      return {
+        ...previous,
+        [viewKey]: assistantMessageId,
+      }
+    })
+
+    try {
+      const token = getStoredAuthToken()
+      const headers = { 'Content-Type': 'application/json' }
+      if (token) headers.Authorization = `Bearer ${token}`
+
+      const response = await fetch('/api/suggest-questions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          mode: 'followup',
+          ...chatContext,
+          last_user_question: lastUserQuestion,
+          last_assistant_answer: lastAssistantAnswer,
+          recent_messages: buildRecentChatMessages(messages),
+        }),
+      })
+      const data = await response.json().catch(function () { return null })
+
+      if (followupSuggestionRequestRef.current[viewKey] !== requestToken) {
+        return
+      }
+
+      const legacyQuestions = normalizeSuggestionQuestions(data?.questions || [])
+      const groups = normalizeFollowupGroups(data?.groups || [])
+      const resolvedGroups = groups.length
+        ? groups
+        : buildFallbackFollowupGroups({
+            paperTitle: chatContext?.paper_title,
+            selectedText: chatContext?.selected_text,
+            lastUserQuestion,
+            lastAssistantAnswer,
+            legacyQuestions,
+          })
+      updateChatMessagesForView(viewKey, function (entries) {
+        return entries.map(function (message) {
+          if (message.id === assistantMessageId) {
+            return { ...message, followupGroups: resolvedGroups }
+          }
+          if (message.followupGroups?.length) {
+            return { ...message, followupGroups: [] }
+          }
+          return message
+        })
+      })
+    } catch (_) {
+      if (followupSuggestionRequestRef.current[viewKey] !== requestToken) {
+        return
+      }
+
+      updateChatMessagesForView(viewKey, function (entries) {
+        return entries.map(function (message) {
+          if (message.id === assistantMessageId) {
+            return { ...message, followupGroups: fallbackGroups }
+          }
+          if (message.followupGroups?.length) {
+            return { ...message, followupGroups: [] }
+          }
+          return message
+        })
+      })
+    } finally {
+      if (followupSuggestionRequestRef.current[viewKey] === requestToken) {
+        setChatFollowupLoadingMessageId(function (previous) {
+          return {
+            ...previous,
+            [viewKey]: '',
+          }
+        })
+      }
+    }
+  }
+
+  async function handleChatSubmit(rawQuestion) {
+    const chatView = activeView
+    const question = String(rawQuestion || chatInput[chatView] || '').trim()
+    if (!question || !chatView || chatView === 'home') return
+
+    const chatContext = buildPaperChatContext()
+    const baseMessages = clearMessageFollowups(chatMessages[chatView] || [])
+    const userMessage = {
+      id: createChatMessageId('user'),
+      role: 'user',
+      text: question,
+      status: 'done',
+    }
+    const assistantMessageId = createChatMessageId('assistant')
+    const assistantMessage = {
+      id: assistantMessageId,
+      role: 'assistant',
+      text: '',
+      status: 'streaming',
+      followupGroups: [],
+    }
+
+    followupSuggestionRequestRef.current[chatView] = null
+    setChatFollowupLoadingMessageId(function (previous) {
+      return {
+        ...previous,
+        [chatView]: '',
+      }
+    })
+    setChatMessages(function (previous) {
+      return {
+        ...previous,
+        [chatView]: baseMessages.concat([userMessage, assistantMessage]),
+      }
+    })
+    setChatInput(function (previous) {
+      return {
+        ...previous,
+        [chatView]: '',
+      }
+    })
+    setChatAsking(function (previous) {
+      return {
+        ...previous,
+        [chatView]: true,
+      }
+    })
+
+    let aiText = ''
+    let streamFailed = false
+
+    try {
+      const token = getStoredAuthToken()
+      const headers = { 'Content-Type': 'application/json' }
+      if (token) headers.Authorization = `Bearer ${token}`
+
+      const response = await fetch('/api/ask-stream', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          question,
+          selected_text: chatContext.selected_text,
+          paper_title: chatContext.paper_title,
+          summary: chatContext.summary,
+          provider_id: chatContext.provider_id,
+        }),
+      })
+
+      if (!response.ok || !response.body) {
+        throw new Error('stream failed')
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+
+        buffer += decoder.decode(chunk.value, { stream: true })
+        const parts = buffer.split('\n')
+        buffer = parts.pop() || ''
+
+        for (let i = 0; i < parts.length; i += 1) {
+          const line = parts[i]
+          if (!line.startsWith('data: ')) continue
+          aiText += line.slice(6)
+
+          updateChatMessagesForView(chatView, function (entries) {
+            return entries.map(function (entry) {
+              if (entry.id === assistantMessageId) {
+                return {
+                  ...entry,
+                  text: aiText,
+                  status: 'streaming',
+                }
+              }
+              return entry
+            })
+          })
+          await new Promise(function (resolve) { setTimeout(resolve, 0) })
+        }
+      }
+    } catch (_) {
+      streamFailed = true
+    }
+
+    const finalAssistantText = streamFailed
+      ? 'AI 回答失败，请稍后再试。'
+      : (aiText.trim() || 'AI 暂时没有返回内容。')
+    const finalAssistantStatus = streamFailed ? 'error' : 'done'
+    const finalMessages = baseMessages.concat([
+      userMessage,
+      {
+        ...assistantMessage,
+        text: finalAssistantText,
+        status: finalAssistantStatus,
+      },
+    ])
+
+    setChatMessages(function (previous) {
+      return {
+        ...previous,
+        [chatView]: finalMessages,
+      }
+    })
+    setChatAsking(function (previous) {
+      return {
+        ...previous,
+        [chatView]: false,
+      }
+    })
+
+    if (!streamFailed && aiText.trim()) {
+      await fetchFollowupSuggestions({
+        viewKey: chatView,
+        assistantMessageId,
+        lastUserQuestion: question,
+        lastAssistantAnswer: finalAssistantText,
+        messages: finalMessages,
+        chatContext,
+      })
+    }
+  }
+
+  useEffect(() => {
+    if (activeWorkspacePanel !== 'ask' || activeView === 'home') return
+    if (activeChatMessages.length > 0) return
+    if (activeInitialSuggestions.length > 0 || activeInitialSuggestionsLoading) return
+    fetchInitialSuggestions(false)
+  }, [
+    activeWorkspacePanel,
+    activeView,
+    activeChatMessages.length,
+    activeInitialSuggestions.length,
+    activeInitialSuggestionsLoading,
+    metadata.title,
+    fileName,
+    activePaperSummary,
+    selectionCard.text,
+  ])
 
   function applyNoteInsert(block) {
     if (!activePaperId || !block) return
@@ -416,6 +1061,15 @@ function App() {
     clearStoredAuthToken()
     localStorage.removeItem('xk_read_recent')
     setAnnotationUndoStacks({})
+    setChatMessages({})
+    setChatInput({})
+    setChatAsking({})
+    setChatInitialSuggestions({})
+    setChatInitialSuggestionsLoading({})
+    setChatFollowupLoadingMessageId({})
+    initialSuggestionRequestRef.current = {}
+    initialSuggestionBatchRef.current = {}
+    followupSuggestionRequestRef.current = {}
     eraseUndoSessionsRef.current.clear()
     setCurrentUser(null)
     setIsUserMenuOpen(false)
@@ -467,7 +1121,7 @@ function App() {
         <header className="topbar">
           <div className="brand-tabs">
             <div className="brand-mark">xk</div>
-            <strong>xk阅读</strong>
+            <strong>xk 阅读</strong>
             <div className="topbar-tabs">
               <button
                 type="button"
@@ -683,10 +1337,15 @@ function App() {
             onDeleteAnnotation={handleDeleteAnnotation}
             onEraseAnnotationRange={handleEraseAnnotationRange}
             onInsertSelectionNote={handleInsertSelectionNote}
-            onAskAI={function () { if (selectionCard.text) { setActiveWorkspacePanel("ask"); setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = selectionCard.text; return n }) } }}
+            onAskAI={function () { if (selectionCard.text) handleAskAIText(selectionCard.text) }}
             onScreenshotTranslate={handleScreenshotTranslate}
             onScreenshotAskAI={handleAskAIText}
             onScreenshotInsertNote={handleInsertScreenshotNote}
+            onDownload={handleDownloadOption}
+            fullTranslateActive={activeWorkspacePanel === 'words'}
+            onFullTranslate={function () {
+              setActiveWorkspacePanel((current) => (current === 'words' ? '' : 'words'))
+            }}
           />
 
           <div
@@ -718,6 +1377,7 @@ function App() {
 
           <SideWorkspacePanel
             activePanel={activeWorkspacePanel}
+            paperId={activePaperId}
             fileName={fileName}
             metadata={metadata}
             currentUser={currentUser}
@@ -731,72 +1391,23 @@ function App() {
             onSaveNotebooks={handleSaveAllNotebooks}
             onSetActiveNoteTarget={setActiveNoteTarget}
             onJumpToNote={handleJumpToNoteAnchor}
-            chatMessages={chatMessages[activeView] || []}
-            chatInput={chatInput[activeView] || ''}
-            chatAsking={chatAsking[activeView] || false}
+            chatMessages={activeChatMessages}
+            chatInput={activeChatInput}
+            chatAsking={activeChatAsking}
+            chatInitialSuggestions={activeInitialSuggestions}
+            chatInitialSuggestionsLoading={activeInitialSuggestionsLoading}
+            chatFollowupLoadingMessageId={activeFollowupLoadingMessageId}
             providerLabel={providerLabel}
-            onChatInputChange={function (v) { setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = v; return n }) }}
-            onChatSubmit={async function (q) {
-              if (!q || !q.trim()) return
-              var chatView = activeView
-              var baseMessages = chatMessages[chatView] || []
-              var streamingAi = { role: 'ai', text: '' }
-              var msg = baseMessages.concat([{ role: 'user', text: q }, streamingAi])
-              setChatMessages(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[chatView] = msg; return n })
-              setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[chatView] = ''; return n })
-              setChatAsking(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[chatView] = true; return n })
-              try {
-                var resp = await fetch('/api/ask-stream', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (getStoredAuthToken() || '') },
-                  body: JSON.stringify({ question: q, selected_text: selectionCard.text || '', paper_title: metadata.title || fileName || '', summary: activePaperSummary || '', provider_id: null })
-                })
-                if (resp.ok && resp.body) {
-                  var reader = resp.body.getReader()
-                  var decoder = new TextDecoder()
-                  var buffer = ''
-                  var aiText = ''
-                  while (true) {
-                    var chunk = await reader.read()
-                    if (chunk.done) break
-                    buffer += decoder.decode(chunk.value, { stream: true })
-                    var parts = buffer.split('\n')
-                    buffer = parts.pop() || ''
-                    for (var i = 0; i < parts.length; i += 1) {
-                      var line = parts[i]
-                      if (!line.startsWith('data: ')) continue
-                      aiText += line.slice(6)
-                      setChatMessages(function (p) {
-                        var n = {}; for (var k in p) n[k] = p[k]
-                        n[chatView] = (n[chatView] || []).map(function (entry, idx, arr) {
-                          if (idx === arr.length - 1 && entry.role === 'ai') return { role: 'ai', text: aiText }
-                          return entry
-                        })
-                        return n
-                      })
-                      await new Promise(function (resolve) { setTimeout(resolve, 0) })
-                    }
-                  }
-                  if (!aiText.trim()) {
-                    setChatMessages(function (p) {
-                      var n = {}; for (var k in p) n[k] = p[k]
-                      n[chatView] = (n[chatView] || []).map(function (entry, idx, arr) {
-                        if (idx === arr.length - 1 && entry.role === 'ai') return { role: 'ai', text: 'AI 暂时没有返回内容。' }
-                        return entry
-                      })
-                      return n
-                    })
-                  }
-                } else {
-                  throw new Error('stream failed')
+            onChatInputChange={function (value) {
+              setChatInput(function (previous) {
+                return {
+                  ...previous,
+                  [activeView]: value,
                 }
-              } catch (_) {}
-              setChatAsking(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[chatView] = false; return n })
+              })
             }}
-            onAskFromSelection={function (text) {
-              setActiveWorkspacePanel('ask')
-              setChatInput(function (p) { var n = {}; for (var k in p) n[k] = p[k]; n[activeView] = text; return n })
-            }}
+            onChatSubmit={handleChatSubmit}
+            onRefreshInitialSuggestions={function () { fetchInitialSuggestions(true) }}
           />
 
           <UtilityRail

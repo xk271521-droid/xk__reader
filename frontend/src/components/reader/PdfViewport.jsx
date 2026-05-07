@@ -185,6 +185,7 @@ export function PdfViewport({
   error,
   isLoading,
   matches = [],
+  matchIndex = -1,
   noteFocus = null,
   pageMetrics,
   pageNumbers,
@@ -212,6 +213,8 @@ export function PdfViewport({
   const fittedDocumentRef = useRef(null)
   const pageIndexesRef = useRef(new Map())
   const lastScrolledNoteFocusRef = useRef(null)
+  const lastScrolledSearchRef = useRef(null)
+  const onVisiblePageChangeRef = useRef(onVisiblePageChange)
   const pointerSelectionRef = useRef(null)
   const eraserStrokeRef = useRef(null)
   const screenshotDragRef = useRef(null)
@@ -224,6 +227,11 @@ export function PdfViewport({
   const [pinnedScreenshots, setPinnedScreenshots] = useState([])
   const [eraserPreview, setEraserPreview] = useState(createEmptyEraserPreview())
   const [selectionState, setSelectionState] = useState(createEmptySelection())
+  const [searchFlashNonce, setSearchFlashNonce] = useState(0)
+  const activeSearchMatch = matchIndex >= 0 ? matches[matchIndex] : null
+  const activeSearchKey = activeSearchMatch
+    ? `${matchIndex}:${activeSearchMatch.pageNumber}:${activeSearchMatch.startChar}:${activeSearchMatch.endChar}`
+    : ''
 
   const annotationsByPage = useMemo(() => {
     const map = new Map()
@@ -247,6 +255,10 @@ export function PdfViewport({
     return map
   }, [matches])
 
+  useEffect(() => {
+    onVisiblePageChangeRef.current = onVisiblePageChange
+  }, [onVisiblePageChange])
+
   function getRenderableAnnotations(pageNum) {
     const pageIndex = pageIndexesRef.current.get(pageNum)
     const pageAnnotations = annotationsByPage.get(pageNum) || []
@@ -265,16 +277,25 @@ export function PdfViewport({
         : [],
     }))
 
-    const renderedSearchMatches = (searchMatchesByPage.get(pageNum) || []).map((match, index) => ({
-      id: `search:${pageNum}:${index}:${match.startChar}:${match.endChar}`,
-      page_number: pageNum,
-      start_char: match.startChar,
-      end_char: match.endChar,
-      quote_text: '',
-      rects: getLineRectsForRange(pageIndex, match.startChar, match.endChar),
-      type: 'search',
-      color: null,
-    }))
+    const renderedSearchMatches = (searchMatchesByPage.get(pageNum) || []).map((match, index) => {
+      const isCurrent =
+        activeSearchMatch?.pageNumber === pageNum &&
+        activeSearchMatch?.startChar === match.startChar &&
+        activeSearchMatch?.endChar === match.endChar
+
+      return {
+        id: isCurrent
+          ? `search-current:${searchFlashNonce}:${pageNum}:${match.startChar}:${match.endChar}`
+          : `search:${pageNum}:${index}:${match.startChar}:${match.endChar}`,
+        page_number: pageNum,
+        start_char: match.startChar,
+        end_char: match.endChar,
+        quote_text: '',
+        rects: getLineRectsForRange(pageIndex, match.startChar, match.endChar),
+        type: isCurrent ? 'search_current' : 'search',
+        color: null,
+      }
+    })
 
     const renderedNoteFocus = pageIndex && noteFocus?.pageNumber === pageNum
       ? [{
@@ -515,13 +536,25 @@ export function PdfViewport({
         }
       }, 0)
     }
-    if (onSearchExecute) {
+    if (
+      activeSearchMatch?.pageNumber === pageNum &&
+      activeSearchKey &&
+      lastScrolledSearchRef.current !== activeSearchKey
+    ) {
+      window.setTimeout(() => {
+        if (lastScrolledSearchRef.current === activeSearchKey) return
+        if (scrollToNoteFocus(activeSearchMatch, 'auto')) {
+          lastScrolledSearchRef.current = activeSearchKey
+        }
+      }, 0)
+    }
+    if (onSearchExecute && !pdfDocument) {
       const indexes = Array.from(pageIndexesRef.current.values()).sort((left, right) => left.pageNumber - right.pageNumber)
       onSearchExecute(undefined, indexes)
     }
   }
 
-  function scrollToNoteFocus(focus) {
+  function scrollToNoteFocus(focus, behavior = 'smooth') {
     const container = readerRef.current
     if (!container || !focus?.pageNumber || focus.startChar == null || focus.endChar == null) return false
 
@@ -537,7 +570,24 @@ export function PdfViewport({
     const pageRect = pageFrame.getBoundingClientRect()
     const topInContainer = container.scrollTop + (pageRect.top - containerRect.top) + firstRect.top * pageRect.height
     const targetTop = Math.max(0, topInContainer - Math.min(180, container.clientHeight * 0.22))
-    container.scrollTo({ top: targetTop, behavior: 'smooth' })
+    container.scrollTo({ top: targetTop, behavior })
+    return true
+  }
+
+  function scrollToPageFrame(pageNum, behavior = 'auto') {
+    const container = readerRef.current
+    if (!container || !pageNum) return false
+
+    const pageFrame = container.querySelector(`[data-page-number="${pageNum}"]`)
+    if (!pageFrame) return false
+
+    const containerRect = container.getBoundingClientRect()
+    const pageRect = pageFrame.getBoundingClientRect()
+    const targetTop = Math.max(
+      0,
+      container.scrollTop + (pageRect.top - containerRect.top) - Math.min(90, container.clientHeight * 0.14),
+    )
+    container.scrollTo({ top: targetTop, behavior })
     return true
   }
 
@@ -1214,6 +1264,25 @@ export function PdfViewport({
 
     return () => timers.forEach((timer) => window.clearTimeout(timer))
   }, [noteFocus, pageNumber, readerRef, scale])
+
+  useEffect(() => {
+    if (!activeSearchMatch || !activeSearchKey) return undefined
+
+    lastScrolledSearchRef.current = null
+    setSearchFlashNonce((current) => current + 1)
+    onVisiblePageChangeRef.current?.(activeSearchMatch.pageNumber)
+    scrollToPageFrame(activeSearchMatch.pageNumber, 'auto')
+
+    const attempts = [0, 120, 360, 720]
+    const timers = attempts.map((delay) => window.setTimeout(() => {
+      if (lastScrolledSearchRef.current === activeSearchKey) return
+      if (scrollToNoteFocus(activeSearchMatch, 'auto')) {
+        lastScrolledSearchRef.current = activeSearchKey
+      }
+    }, delay))
+
+    return () => timers.forEach((timer) => window.clearTimeout(timer))
+  }, [activeSearchKey, readerRef])
 
   useEffect(() => {
     const container = readerRef.current

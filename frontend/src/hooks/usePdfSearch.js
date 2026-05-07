@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { normalizeSearchText } from '../components/reader/pdfSelectionModel'
+import { buildPageTextIndex, normalizeSearchText } from '../components/reader/pdfSelectionModel'
 
 function buildMatchRanges(pageIndex, searchTerm) {
   if (!pageIndex || !searchTerm) return []
@@ -28,38 +28,132 @@ function buildMatchRanges(pageIndex, searchTerm) {
   return matches
 }
 
-export function usePdfSearch(readerRef) {
+function buildTextOnlyPageIndex(pageNumber, textContent) {
+  const strings = (textContent?.items || []).map((item) => item?.str || '')
+  const base = buildPageTextIndex(strings)
+  return {
+    ...base,
+    pageNumber,
+    viewportWidth: 0,
+    viewportHeight: 0,
+    lines: [],
+    lineMap: new Map(),
+    words: [],
+    blocks: [],
+  }
+}
+
+function yieldToBrowser() {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0)
+  })
+}
+
+export function usePdfSearch(readerRef, { pdfDocument = null, pageNumbers = [] } = {}) {
   const pageIndexesRef = useRef([])
+  const renderedPageIndexesRef = useRef([])
+  const searchTermRef = useRef('')
+  const matchesRef = useRef([])
+  const matchIndexRef = useRef(-1)
+  const pageNumbersKey = pageNumbers.join(',')
   const [searchTerm, setSearchTerm] = useState('')
   const [matches, setMatches] = useState([])
   const [matchIndex, setMatchIndex] = useState(-1)
 
-  const runSearch = useCallback((term, pageIndexes = pageIndexesRef.current) => {
+  const getSearchIndexes = useCallback(() => {
+    return pageIndexesRef.current.length ? pageIndexesRef.current : renderedPageIndexesRef.current
+  }, [])
+
+  const runSearch = useCallback((term, pageIndexes = pageIndexesRef.current, options = {}) => {
     const trimmedTerm = (term || '').trim()
     if (!trimmedTerm || !pageIndexes?.length) {
       setMatches([])
       setMatchIndex(-1)
+      matchesRef.current = []
+      matchIndexRef.current = -1
       return
     }
 
     const nextMatches = pageIndexes.flatMap((pageIndex) => buildMatchRanges(pageIndex, trimmedTerm))
+    const previousMatch = matchesRef.current[matchIndexRef.current]
+    let nextIndex = nextMatches.length > 0 ? 0 : -1
+
+    if (options.preserveIndex && nextMatches.length > 0) {
+      const sameMatchIndex = previousMatch
+        ? nextMatches.findIndex((match) =>
+            match.pageNumber === previousMatch.pageNumber &&
+            match.startChar === previousMatch.startChar &&
+            match.endChar === previousMatch.endChar,
+          )
+        : -1
+      nextIndex = sameMatchIndex >= 0
+        ? sameMatchIndex
+        : Math.min(Math.max(matchIndexRef.current, 0), nextMatches.length - 1)
+    }
+
+    matchesRef.current = nextMatches
+    matchIndexRef.current = nextIndex
     setMatches(nextMatches)
-    setMatchIndex(nextMatches.length > 0 ? 0 : -1)
+    setMatchIndex(nextIndex)
   }, [])
 
   const performSearch = useCallback((term, pageIndexes) => {
     if (pageIndexes?.length) {
-      pageIndexesRef.current = pageIndexes
+      renderedPageIndexesRef.current = pageIndexes
     }
-    runSearch(term ?? searchTerm, pageIndexesRef.current)
-  }, [runSearch, searchTerm])
+    runSearch(term ?? searchTerm, getSearchIndexes(), { preserveIndex: true })
+  }, [getSearchIndexes, runSearch, searchTerm])
 
   useEffect(() => {
-    runSearch(searchTerm, pageIndexesRef.current)
-  }, [runSearch, searchTerm])
+    searchTermRef.current = searchTerm
+    runSearch(searchTerm, getSearchIndexes())
+  }, [getSearchIndexes, runSearch, searchTerm])
+
+  useEffect(() => {
+    let cancelled = false
+    pageIndexesRef.current = []
+    renderedPageIndexesRef.current = []
+    setMatches([])
+    setMatchIndex(-1)
+
+    if (!pdfDocument || !pageNumbers.length) {
+      return undefined
+    }
+
+    async function buildDocumentSearchIndex() {
+      const nextIndexes = []
+      for (const pageNum of pageNumbers) {
+        if (cancelled) return
+        const page = await pdfDocument.getPage(pageNum)
+        if (cancelled) return
+        const textContent = await page.getTextContent()
+        if (cancelled) return
+        nextIndexes.push(buildTextOnlyPageIndex(pageNum, textContent))
+        if (nextIndexes.length % 2 === 0) {
+          await yieldToBrowser()
+        }
+      }
+
+      if (cancelled) return
+      pageIndexesRef.current = nextIndexes
+      runSearch(searchTermRef.current, nextIndexes, { preserveIndex: true })
+    }
+
+    buildDocumentSearchIndex().catch(() => {
+      if (!cancelled) {
+        pageIndexesRef.current = []
+        runSearch(searchTermRef.current, renderedPageIndexesRef.current)
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [pdfDocument, pageNumbersKey, runSearch])
 
   function goToMatch(idx) {
     if (idx < 0 || idx >= matches.length) return
+    matchIndexRef.current = idx
     setMatchIndex(idx)
   }
 

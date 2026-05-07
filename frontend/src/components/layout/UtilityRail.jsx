@@ -2,7 +2,6 @@ import {
   BookOpenText,
   ChevronLeft,
   ChevronRight,
-  Languages,
   MessageCircleQuestion,
   NotebookPen,
   Sparkles,
@@ -12,7 +11,6 @@ const railItems = [
   { id: 'info', label: '文献信息', icon: BookOpenText },
   { id: 'notes', label: '阅读笔记', icon: NotebookPen },
   { id: 'ask', label: '边读边问', icon: MessageCircleQuestion },
-  { id: 'words', label: '全文翻译', icon: Languages },
   { id: 'summary', label: '文献总结', icon: Sparkles },
 ]
 

@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Bold,
   Bot,
   ChevronDown,
   ChevronUp,
-  FileDown,
   Image as ImageIcon,
   LocateFixed,
+  Minus,
   NotebookPen,
+  Palette,
   Plus,
   Save,
   Trash2,
@@ -28,10 +30,30 @@ import {
   updateNotebookById,
   toggleNodeCollapsed,
 } from './noteTree'
+import {
+  DEFAULT_NOTE_TEXT_COLOR,
+  NOTE_TEXT_COLORS,
+  applyColorToRichText,
+  buildRichTextSegments,
+  inferRichTextEdit,
+  normalizeNoteColor,
+  parseRichNoteContent,
+  serializeRichNoteContent,
+} from './richNoteContent'
 
 function buildPaperTitle(fileName) {
   if (!fileName) return 'Untitled paper'
   return fileName.replace(/\.pdf$/i, '')
+}
+
+function buildCompactModelLabel(providerLabel) {
+  if (!providerLabel) return '模型准备中'
+  const parts = String(providerLabel)
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean)
+  const rawLabel = parts[1] || parts[0] || ''
+  return rawLabel.replace(/^智谱\s*/i, '').replace(/\s*\(官方\)\s*/g, '').trim() || '模型已连接'
 }
 
 const infoTabs = [
@@ -131,7 +153,7 @@ function InfoPanel({ fileName, metadata }) {
                     {reference.title}
                   </a>
                 ) : reference.title}
-                {reference.authors ? ` — ${reference.authors}` : ''}
+                {reference.authors ? ` 鈥?${reference.authors}` : ''}
                 {reference.year ? ` (${reference.year})` : ''}
               </p>
             )) : null}
@@ -144,7 +166,7 @@ function InfoPanel({ fileName, metadata }) {
       {activeTab === 'citations' ? (
         <div className="workspace-card-list">
           <div className="workspace-list-card workspace-ref-list">
-            <h3>被引文献</h3>
+            <h3>琚紩鏂囩尞</h3>
             {!doi ? <p className="muted">这篇文献暂未识别 DOI。</p> : null}
             {doi && cites?.loading ? <p className="muted">加载中...</p> : null}
             {doi && !cites?.loading && cites?.data?.length > 0 ? cites.data.map((citation, index) => (
@@ -154,7 +176,7 @@ function InfoPanel({ fileName, metadata }) {
                     {citation.title}
                   </a>
                 ) : citation.title}
-                {citation.authors ? ` — ${citation.authors}` : ''}
+                {citation.authors ? ` 鈥?${citation.authors}` : ''}
                 {citation.year ? ` (${citation.year})` : ''}
               </p>
             )) : null}
@@ -167,7 +189,297 @@ function InfoPanel({ fileName, metadata }) {
   )
 }
 
-function AutoGrowTextarea({ className, value, placeholder, onChange, onFocus }) {
+const NOTE_FONT_SIZES = {
+  '-2': 12.5,
+  '-1': 13.25,
+  0: 14,
+  1: 15.25,
+  2: 16.5,
+  3: 18,
+  4: 19.5,
+}
+
+const NOTE_WEIGHT_STEPS = {
+  '-1': {
+    body: 390,
+    subheading: 450,
+    heading: 640,
+    notebook: 660,
+  },
+  0: {
+    body: 430,
+    subheading: 500,
+    heading: 700,
+    notebook: 720,
+  },
+  1: {
+    body: 540,
+    subheading: 600,
+    heading: 800,
+    notebook: 820,
+  },
+}
+
+function clampNoteStep(value, min, max) {
+  return Math.max(min, Math.min(max, Number(value) || 0))
+}
+
+function buildNotePrefsKey(paperId) {
+  return `xk_note_style:${paperId || 'global'}`
+}
+
+function readNotePrefs(paperId) {
+  const fallback = {
+    color: DEFAULT_NOTE_TEXT_COLOR,
+    fontScale: 0,
+    weightLevel: 1,
+  }
+  try {
+    const raw = window.localStorage.getItem(buildNotePrefsKey(paperId))
+    if (!raw) return fallback
+    const parsed = JSON.parse(raw)
+    return {
+      color: normalizeNoteColor(parsed?.color),
+      fontScale: clampNoteStep(parsed?.fontScale, -2, 4),
+      weightLevel: Number(parsed?.weightLevel) === -1 ? -1 : 1,
+    }
+  } catch (_) {
+    return fallback
+  }
+}
+
+function writeNotePrefs(paperId, prefs) {
+  try {
+    window.localStorage.setItem(buildNotePrefsKey(paperId), JSON.stringify({
+      color: normalizeNoteColor(prefs?.color),
+      fontScale: clampNoteStep(prefs?.fontScale, -2, 4),
+      weightLevel: Number(prefs?.weightLevel) === -1 ? -1 : 1,
+    }))
+  } catch (_) {}
+}
+
+function buildNotesStyle(prefs) {
+  const fontScale = clampNoteStep(prefs?.fontScale, -2, 4)
+  const weightLevel = Number(prefs?.weightLevel) === -1 ? -1 : 1
+  const weights = NOTE_WEIGHT_STEPS[weightLevel] || NOTE_WEIGHT_STEPS[0]
+  const bodySize = NOTE_FONT_SIZES[fontScale] || NOTE_FONT_SIZES[0]
+
+  return {
+    '--note-body-size': `${bodySize}px`,
+    '--note-small-size': `${Math.max(11.5, bodySize - 1)}px`,
+    '--note-title-size': `${bodySize + 1}px`,
+    '--note-body-weight': weights.body,
+    '--note-subheading-weight': weights.subheading,
+    '--note-heading-weight': weights.heading,
+    '--note-notebook-weight': weights.notebook,
+  }
+}
+
+function getEditorText(editor) {
+  return (editor?.textContent || '').replace(/\u00a0/g, ' ')
+}
+
+function nodeContains(root, node) {
+  return Boolean(root && node && (root === node || root.contains(node)))
+}
+
+function getTextOffset(root, targetNode, targetOffset) {
+  if (!root || !targetNode) return 0
+
+  let offset = 0
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let current = walker.nextNode()
+
+  while (current) {
+    if (current === targetNode) {
+      return offset + Math.min(targetOffset, current.textContent.length)
+    }
+    offset += current.textContent.length
+    current = walker.nextNode()
+  }
+
+  if (targetNode === root) {
+    const children = Array.from(root.childNodes).slice(0, targetOffset)
+    return children.reduce((total, child) => total + (child.textContent || '').length, 0)
+  }
+
+  return offset
+}
+
+function getSelectionOffsets(root) {
+  const selection = window.getSelection()
+  if (!root || !selection || selection.rangeCount === 0) return null
+
+  const range = selection.getRangeAt(0)
+  if (!nodeContains(root, range.startContainer) || !nodeContains(root, range.endContainer)) {
+    return null
+  }
+
+  const start = getTextOffset(root, range.startContainer, range.startOffset)
+  const end = getTextOffset(root, range.endContainer, range.endOffset)
+  return {
+    start: Math.min(start, end),
+    end: Math.max(start, end),
+  }
+}
+
+function findNodeAtTextOffset(root, targetOffset) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let current = walker.nextNode()
+  let offset = 0
+
+  while (current) {
+    const length = current.textContent.length
+    if (targetOffset <= offset + length) {
+      return {
+        node: current,
+        offset: Math.max(0, Math.min(length, targetOffset - offset)),
+      }
+    }
+    offset += length
+    current = walker.nextNode()
+  }
+
+  return {
+    node: root,
+    offset: root.childNodes.length,
+  }
+}
+
+function restoreEditorSelection(root, start, end = start) {
+  if (!root) return
+  const selection = window.getSelection()
+  if (!selection) return
+
+  const startPoint = findNodeAtTextOffset(root, start)
+  const endPoint = findNodeAtTextOffset(root, end)
+  const range = document.createRange()
+  range.setStart(startPoint.node, startPoint.offset)
+  range.setEnd(endPoint.node, endPoint.offset)
+  selection.removeAllRanges()
+  selection.addRange(range)
+  root.focus()
+}
+
+function getTextareaSelection(textarea) {
+  if (!textarea) return null
+  return {
+    start: textarea.selectionStart || 0,
+    end: textarea.selectionEnd || textarea.selectionStart || 0,
+  }
+}
+
+function RichTextBlockEditor({
+  value,
+  active,
+  inputColor,
+  colorCommand,
+  onChange,
+  onFocus,
+}) {
+  const textareaRef = useRef(null)
+  const docRef = useRef(parseRichNoteContent(value))
+  const lastSelectionRef = useRef({ start: 0, end: 0 })
+  const lastColorCommandRef = useRef(0)
+  const [focused, setFocused] = useState(false)
+  const doc = useMemo(() => parseRichNoteContent(value), [value])
+  const segments = useMemo(() => buildRichTextSegments(doc), [doc])
+
+  useEffect(() => {
+    docRef.current = doc
+  }, [doc])
+
+  useEffect(() => {
+    if (!active || !colorCommand?.id || colorCommand.id === lastColorCommandRef.current) return
+    lastColorCommandRef.current = colorCommand.id
+    const selection = getTextareaSelection(textareaRef.current) || lastSelectionRef.current
+    if (!selection || selection.end <= selection.start) return
+
+    const nextDoc = applyColorToRichText(docRef.current, selection.start, selection.end, colorCommand.color)
+    docRef.current = nextDoc
+    lastSelectionRef.current = selection
+    onChange?.(serializeRichNoteContent(nextDoc))
+    requestAnimationFrame(() => {
+      if (!textareaRef.current) return
+      textareaRef.current.selectionStart = selection.start
+      textareaRef.current.selectionEnd = selection.end
+    })
+  }, [active, colorCommand, onChange])
+
+  function rememberSelection() {
+    lastSelectionRef.current = getTextareaSelection(textareaRef.current) || lastSelectionRef.current
+  }
+
+  function handleChange(event) {
+    const textarea = event.currentTarget
+    const nextDoc = inferRichTextEdit(docRef.current, textarea.value, inputColor)
+    docRef.current = nextDoc
+    lastSelectionRef.current = getTextareaSelection(textarea)
+    onChange?.(serializeRichNoteContent(nextDoc))
+  }
+
+  const hasStyledText = doc.ranges.length > 0
+  const showEditor = focused || !hasStyledText
+
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea || !showEditor) return
+    textarea.style.height = 'auto'
+    textarea.style.height = `${Math.max(34, textarea.scrollHeight)}px`
+  }, [doc.text, showEditor])
+
+  return (
+    <div
+      className="note-rich-editor-shell"
+      role="textbox"
+      aria-multiline="true"
+      onMouseDown={() => {
+        if (showEditor) return
+        setFocused(true)
+        onFocus?.()
+        requestAnimationFrame(() => textareaRef.current?.focus())
+      }}
+    >
+      {showEditor ? (
+        <textarea
+          ref={textareaRef}
+          className="note-rich-editor"
+          placeholder="写下你的想法..."
+          rows={1}
+          value={doc.text}
+          spellCheck={false}
+          style={{ color: inputColor }}
+          onFocus={() => {
+            setFocused(true)
+            onFocus?.()
+            rememberSelection()
+          }}
+          onBlur={() => {
+            rememberSelection()
+            setFocused(false)
+          }}
+          onChange={handleChange}
+          onSelect={rememberSelection}
+          onKeyUp={rememberSelection}
+          onMouseUp={rememberSelection}
+        />
+      ) : (
+        <div className="note-rich-preview">
+          {segments.map((segment, index) => (
+            <span
+              key={`${index}:${segment.color}:${segment.text}`}
+              style={segment.color !== DEFAULT_NOTE_TEXT_COLOR ? { color: segment.color } : undefined}
+            >
+              {segment.text}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AutoGrowTextarea({ className, value, placeholder, onChange, onFocus, onKeyDown }) {
   const ref = useRef(null)
 
   useEffect(() => {
@@ -185,11 +497,13 @@ function AutoGrowTextarea({ className, value, placeholder, onChange, onFocus }) 
       value={value || ''}
       onChange={onChange}
       onFocus={onFocus}
+      onKeyDown={onKeyDown}
     />
   )
 }
 
 function NotesPanel({
+  paperId,
   notebooks,
   loading,
   saving,
@@ -200,6 +514,20 @@ function NotesPanel({
   onSetActiveTarget,
   onJumpToNote,
 }) {
+  const [prefs, setPrefs] = useState(() => readNotePrefs(paperId))
+  const [colorMenuOpen, setColorMenuOpen] = useState(false)
+  const [colorCommand, setColorCommand] = useState(null)
+  const notesStyle = useMemo(() => buildNotesStyle(prefs), [prefs])
+
+  useEffect(() => {
+    setPrefs(readNotePrefs(paperId))
+    setColorMenuOpen(false)
+  }, [paperId])
+
+  useEffect(() => {
+    writeNotePrefs(paperId, prefs)
+  }, [paperId, prefs])
+
   function changeDraft(updater) {
     onDraftChange?.(updater(notebooks || []))
   }
@@ -226,6 +554,24 @@ function NotesPanel({
     )
   }
 
+  function updatePrefs(updater) {
+    setPrefs((current) => {
+      const next = updater(current)
+      return {
+        color: normalizeNoteColor(next.color),
+        fontScale: clampNoteStep(next.fontScale, -2, 4),
+        weightLevel: Number(next.weightLevel) === -1 ? -1 : 1,
+      }
+    })
+  }
+
+  function chooseColor(color) {
+    const normalized = normalizeNoteColor(color)
+    updatePrefs((current) => ({ ...current, color: normalized }))
+    setColorCommand({ id: Date.now(), color: normalized })
+    setColorMenuOpen(false)
+  }
+
   function renderBlock(notebookId, nodeId, block) {
     const isActive = activeTarget?.notebookId === notebookId
       && activeTarget?.nodeId === nodeId
@@ -238,13 +584,13 @@ function NotesPanel({
         onClick={() => touchTarget(notebookId, nodeId, block.id)}
       >
         {block.type === 'text' ? (
-          <AutoGrowTextarea
-            className="note-text-tree-textarea"
-            placeholder="写下你的想法..."
+          <RichTextBlockEditor
             value={block.content || ''}
+            active={isActive}
+            inputColor={prefs.color}
+            colorCommand={colorCommand}
             onFocus={() => touchTarget(notebookId, nodeId, block.id)}
-            onChange={(event) => {
-              const value = event.target.value
+            onChange={(value) => {
               changeDraft((current) => updateNotebookById(current, notebookId, (notebook) =>
                 updateBlockContent(notebook, nodeId, block.id, value),
               ))
@@ -258,8 +604,8 @@ function NotesPanel({
               <button
                 type="button"
                 className="note-source-link"
-                title="定位原文"
-                aria-label="定位原文"
+                title="瀹氫綅鍘熸枃"
+                aria-label="瀹氫綅鍘熸枃"
                 onClick={(event) => {
                   event.stopPropagation()
                   onJumpToNote?.(block)
@@ -268,7 +614,7 @@ function NotesPanel({
                 <LocateFixed size={13} />
               </button>
             ) : null}
-            <p>{block.content || '原文引用'}</p>
+            <p>{block.content || '鍘熸枃寮曠敤'}</p>
           </div>
         ) : null}
 
@@ -278,8 +624,8 @@ function NotesPanel({
               <button
                 type="button"
                 className="note-source-link"
-                title="定位原文"
-                aria-label="定位原文"
+                title="瀹氫綅鍘熸枃"
+                aria-label="瀹氫綅鍘熸枃"
                 onClick={(event) => {
                   event.stopPropagation()
                   onJumpToNote?.(block)
@@ -289,15 +635,15 @@ function NotesPanel({
               </button>
             ) : null}
             {block.image_url ? (
-              <img src={block.image_url} alt="笔记截图" />
+              <img src={block.image_url} alt="绗旇鎴浘" />
             ) : (
-              <div className="note-image-placeholder"><ImageIcon size={16} /> 图片</div>
+              <div className="note-image-placeholder"><ImageIcon size={16} /> 鍥剧墖</div>
             )}
           </div>
         ) : null}
 
         <div className="note-text-tree-block__actions">
-          {renderIconButton('删除', <Trash2 size={14} />, () => {
+          {renderIconButton('鍒犻櫎', <Trash2 size={14} />, () => {
             changeDraft((current) => updateNotebookById(current, notebookId, (notebook) =>
               deleteBlock(notebook, nodeId, block.id),
             ))
@@ -322,8 +668,8 @@ function NotesPanel({
             <button
               type="button"
               className="note-tree-toggle"
-              title={node.collapsed ? '展开' : '收起'}
-              aria-label={node.collapsed ? '展开' : '收起'}
+              title={node.collapsed ? '灞曞紑' : '鏀惰捣'}
+              aria-label={node.collapsed ? '灞曞紑' : '鏀惰捣'}
               onClick={(event) => {
                 event.stopPropagation()
                 changeDraft((current) => updateNotebookById(current, notebookId, (notebook) =>
@@ -385,24 +731,87 @@ function NotesPanel({
   }
 
   return (
-    <div className="workspace-panel__content notes-workspace">
+    <div className="workspace-panel__content notes-workspace" style={notesStyle}>
       <div className="notes-topbar">
-        <button type="button" className="notes-command" onClick={() => onCreateNotebook?.('blank')}>
-          <NotebookPen size={15} />
-          <span>新建</span>
-        </button>
-        <button type="button" className="notes-command" onClick={() => onCreateNotebook?.('default')}>
-          <Plus size={15} />
-          <span>模板</span>
-        </button>
-        <button type="button" className="notes-command is-primary" onClick={() => onSaveNotebooks?.(notebooks || [])} disabled={saving}>
-          <Save size={15} />
-          <span>{saving ? '保存中' : '保存'}</span>
-        </button>
-        <button type="button" className="notes-command" disabled title="后续开放">
-          <FileDown size={15} />
-          <span>导出</span>
-        </button>
+        <div className="notes-topbar__main">
+          <button type="button" className="notes-command" onClick={() => onCreateNotebook?.('blank')}>
+            <NotebookPen size={15} />
+            <span>新建</span>
+          </button>
+          <button type="button" className="notes-command" onClick={() => onCreateNotebook?.('default')}>
+            <Plus size={15} />
+            <span>模板</span>
+          </button>
+          <button type="button" className="notes-command is-primary" onClick={() => onSaveNotebooks?.(notebooks || [])} disabled={saving}>
+            <Save size={15} />
+            <span>{saving ? '保存中' : '保存'}</span>
+          </button>
+        </div>
+
+        <div className="notes-format-toolbar" aria-label="笔记排版工具">
+          <div className="notes-color-picker">
+            <button
+              type="button"
+              className="notes-command notes-command--square"
+              title="字体颜色"
+              aria-label="字体颜色"
+              aria-expanded={colorMenuOpen}
+              onClick={() => setColorMenuOpen((current) => !current)}
+            >
+              <Palette size={15} />
+              <span className="notes-color-dot" style={{ background: prefs.color }} />
+            </button>
+
+            {colorMenuOpen ? (
+              <div className="notes-color-popover" role="menu" aria-label="选择字体颜色">
+                {NOTE_TEXT_COLORS.map((color) => (
+                  <button
+                    key={color.id}
+                    type="button"
+                    className={`notes-color-swatch${prefs.color === color.value ? ' is-active' : ''}`}
+                    title={color.label}
+                    aria-label={color.label}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => chooseColor(color.value)}
+                  >
+                    <span style={{ background: color.value }} />
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          <button
+            type="button"
+            className="notes-command notes-command--square"
+            title="缩小字体"
+            aria-label="缩小字体"
+            disabled={prefs.fontScale <= -2}
+            onClick={() => updatePrefs((current) => ({ ...current, fontScale: current.fontScale - 1 }))}
+          >
+            <Minus size={14} />
+          </button>
+          <button
+            type="button"
+            className="notes-command notes-command--square"
+            title="放大字体"
+            aria-label="放大字体"
+            disabled={prefs.fontScale >= 4}
+            onClick={() => updatePrefs((current) => ({ ...current, fontScale: current.fontScale + 1 }))}
+          >
+            <Plus size={14} />
+          </button>
+          <button
+            type="button"
+            className={`notes-command notes-command--square${prefs.weightLevel >= 1 ? ' is-bold' : ''}`}
+            title={prefs.weightLevel >= 1 ? '整体变细' : '整体变粗'}
+            aria-label={prefs.weightLevel >= 1 ? '整体变细' : '整体变粗'}
+            aria-pressed={prefs.weightLevel >= 1}
+            onClick={() => updatePrefs((current) => ({ ...current, weightLevel: current.weightLevel >= 1 ? -1 : 1 }))}
+          >
+            <Bold size={14} strokeWidth={prefs.weightLevel >= 1 ? 2.8 : 1.5} />
+          </button>
+        </div>
       </div>
 
       <div className="notes-text-tree-shell">
@@ -461,80 +870,220 @@ function NotesPanel({
   )
 }
 
-function AskPanel({ currentUser, providerLabel, asking, messages, inputText, onInputChange, onSubmit, fileName }) {
+function AskPanel({
+  currentUser,
+  providerLabel,
+  asking,
+  messages,
+  inputText,
+  onInputChange,
+  onSubmit,
+  initialSuggestions,
+  initialSuggestionsLoading,
+  onRefreshInitialSuggestions,
+  followupLoadingMessageId,
+}) {
   const listRef = useRef(null)
-  const [suggestions, setSuggestions] = useState([])
   const userInitials = (currentUser?.nickname || '我').slice(0, 2).toUpperCase()
-
-  useEffect(() => {
-    if (messages.length > 0) return
-    fetch('/api/suggest-questions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: fileName || '' }),
-    })
-      .then((response) => response.json())
-      .then((data) => {
-        if (data?.questions) setSuggestions(data.questions)
-      })
-      .catch(() => {})
-  }, [fileName, messages.length])
+  const modelLabel = useMemo(() => buildCompactModelLabel(providerLabel), [providerLabel])
+  const [activeFollowupTabs, setActiveFollowupTabs] = useState({})
+  const hasMessages = (messages || []).length > 0
 
   useEffect(() => {
     if (listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight
     }
-  }, [messages])
+  }, [messages, followupLoadingMessageId])
+
+  function renderAvatar(isUser) {
+    if (isUser) {
+      if (currentUser?.avatar_url) {
+        return <img src={currentUser.avatar_url} alt={currentUser.nickname || '用户'} />
+      }
+      return <span>{userInitials}</span>
+    }
+    return <Bot size={16} />
+  }
+
+  function renderFollowups(message) {
+    const groups = Array.isArray(message.followupGroups) ? message.followupGroups : []
+    const isLoading = followupLoadingMessageId && followupLoadingMessageId === message.id
+
+    if (!groups.length && !isLoading) return null
+
+    const activeIndex = Math.min(activeFollowupTabs[message.id] || 0, Math.max(groups.length - 1, 0))
+    const activeGroup = groups[activeIndex] || groups[0]
+
+    return (
+      <div className="ask-followups">
+        <div className="ask-followups__label">猜你接下来会问</div>
+
+        {groups.length ? (
+          <section className="ask-followup-card">
+            <div className="ask-followup-tabs" role="tablist" aria-label="推荐问题分类">
+              {groups.map((group, groupIndex) => (
+                <button
+                  key={`${message.id}:tab:${group.title || groupIndex}`}
+                  type="button"
+                  className={`ask-followup-tab${groupIndex === activeIndex ? ' is-active' : ''}`}
+                  onClick={() => {
+                    setActiveFollowupTabs((current) => ({
+                      ...current,
+                      [message.id]: groupIndex,
+                    }))
+                  }}
+                >
+                  {group.title || `分类 ${groupIndex + 1}`}
+                </button>
+              ))}
+            </div>
+
+            <div className="ask-followup-card__head">
+              <strong>{activeGroup.title || '推荐问题'}</strong>
+              {activeGroup.rationale ? <p>{activeGroup.rationale}</p> : null}
+            </div>
+
+            <div className="ask-followup-card__questions">
+              {(activeGroup.questions || []).map((question, questionIndex) => (
+                <button
+                  key={`${message.id}:question:${activeIndex}:${questionIndex}`}
+                  type="button"
+                  className="ask-followup-question"
+                  onClick={() => onSubmit?.(question)}
+                >
+                  {question}
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {isLoading ? (
+          <div className="ask-followup-loading" role="status" aria-live="polite">
+            正在根据刚才的回答整理下一轮问题...
+          </div>
+        ) : null}
+      </div>
+    )
+  }
 
   return (
     <div className="workspace-panel__content ask-panel">
-      <div className="ask-messages" ref={listRef}>
-        {suggestions.length > 0 ? (
-          <div className="ask-suggestions">
-            {suggestions.map((question, index) => (
-              <button key={index} className="ask-suggestion-chip" onClick={() => { onInputChange(question); setTimeout(() => onSubmit(question), 50) }}>{question}</button>
-            ))}
-          </div>
-        ) : null}
-        {messages.length === 0 ? <p className="muted" style={{ textAlign: 'center', padding: 20 }}>向 AI 提问这篇论文的任何问题</p> : null}
-        {messages.map((message, index) => (
-          <div key={index} className={`ask-msg ${message.role === 'user' ? 'ask-msg-user' : 'ask-msg-ai'}`}>
-            <div className="ask-avatar">
-              {message.role === 'user'
-                ? (currentUser?.avatar_url
-                  ? <img src={currentUser.avatar_url} alt={currentUser.nickname || '用户'} />
-                  : <span>{userInitials}</span>)
-                : <Bot size={16} />}
+      <div className="ask-chat__header">
+        <div className="ask-chat__header-main">
+          <strong className="ask-chat__title">边读边问</strong>
+          <span className="ask-chat__subtitle">
+            {modelLabel}
+          </span>
+        </div>
+      </div>
+
+      <div className="ask-chat__body" ref={listRef}>
+        {!hasMessages ? (
+          <div className="ask-welcome">
+            <div className="ask-welcome__card">
+              <span className="ask-welcome__eyebrow">AI 推荐问题</span>
+              <div className="ask-welcome__topline">
+                <strong>从这几个问题开始读</strong>
+              </div>
+              <p className="ask-welcome__caption">
+                围绕方法、实验和结论，先抓住这篇论文的主线。
+              </p>
+
+              <div className="ask-welcome__questions">
+                {(initialSuggestions || []).map((question, index) => (
+                  <button
+                    key={`${question}:${index}`}
+                    type="button"
+                    className="ask-initial-question"
+                    onClick={() => onSubmit?.(question)}
+                  >
+                    <span>{question}</span>
+                    <span className="ask-initial-question__arrow">›</span>
+                  </button>
+                ))}
+
+                {initialSuggestionsLoading && !(initialSuggestions || []).length ? (
+                  <>
+                    <div className="ask-initial-question is-placeholder" />
+                    <div className="ask-initial-question is-placeholder" />
+                    <div className="ask-initial-question is-placeholder" />
+                  </>
+                ) : null}
+
+                {!initialSuggestionsLoading && !(initialSuggestions || []).length ? (
+                  <div className="ask-welcome__empty">
+                    正在根据论文内容准备问题，你也可以直接在下方输入。
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="ask-welcome__actions">
+                <button
+                  type="button"
+                  className="ask-welcome__refresh"
+                  onClick={() => onRefreshInitialSuggestions?.()}
+                  disabled={initialSuggestionsLoading}
+                >
+                  {initialSuggestionsLoading ? '正在生成下一批' : '换一批问题'}
+                </button>
+              </div>
             </div>
-            <div className="ask-bubble">{message.text || (asking && message.role === 'ai' ? <span className="ask-typing">...</span> : '')}</div>
-          </div>
-        ))}
-        {asking && !messages.some((message) => message.role === 'ai' && !message.text) ? (
-          <div className="ask-msg ask-msg-ai">
-            <div className="ask-avatar"><Bot size={16} /></div>
-            <div className="ask-bubble"><span className="ask-typing">...</span></div>
           </div>
         ) : null}
+
+        {(messages || []).map((message) => {
+          const isUser = message.role === 'user'
+          const bubbleText = message.text || ''
+          return (
+            <div
+              key={message.id || `${message.role}:${bubbleText}`}
+              className={`ask-msg ${isUser ? 'ask-msg-user' : 'ask-msg-ai'}`}
+            >
+              {!isUser ? <div className="ask-avatar">{renderAvatar(false)}</div> : null}
+
+              <div className="ask-msg__content">
+                <div
+                  className={`ask-bubble${
+                    message.status === 'error' ? ' is-error' : ''
+                  }${message.status === 'streaming' ? ' is-streaming' : ''}`}
+                >
+                  {bubbleText || (message.status === 'streaming' ? <span className="ask-typing">...</span> : '')}
+                </div>
+                {!isUser ? renderFollowups(message) : null}
+              </div>
+
+              {isUser ? <div className="ask-avatar">{renderAvatar(true)}</div> : null}
+            </div>
+          )
+        })}
       </div>
-      <div className="ask-input-row">
-        <textarea
-          className="ask-input"
-          placeholder="输入问题，Enter 发送"
-          value={inputText || ''}
-          onChange={(event) => onInputChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault()
-              onSubmit()
-            }
-          }}
-          rows={1}
-        />
-        <button className="ask-send-btn" onClick={onSubmit} disabled={asking || !(inputText || '').trim()}>
-          发送
-        </button>
+
+      <div className="ask-composer">
+        <div className="ask-input-row">
+          <input
+            type="text"
+            className="ask-input"
+            placeholder="问这篇论文..."
+            value={inputText || ''}
+            onChange={(event) => onInputChange?.(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                onSubmit?.()
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="ask-send-btn"
+            onClick={() => onSubmit?.()}
+            disabled={asking || !(inputText || '').trim()}
+          >
+            发送
+          </button>
+        </div>
       </div>
-      {providerLabel ? <div className="ask-provider">AI: {providerLabel}</div> : null}
     </div>
   )
 }
@@ -552,129 +1101,12 @@ function FullTranslatePanel() {
     </div>
   )
 }
-
-function AskPanelV2({ currentUser, providerLabel, asking, messages, inputText, onInputChange, onSubmit, fileName }) {
-  const listRef = useRef(null)
-  const [suggestions, setSuggestions] = useState([])
-  const userInitials = (currentUser?.nickname || '我').slice(0, 2).toUpperCase()
-  const shortTitle = buildPaperTitle(fileName || '')
-
-  useEffect(() => {
-    if (messages.length > 0) return
-    fetch('/api/suggest-questions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: fileName || '' }),
-    })
-      .then((response) => response.json())
-      .then((data) => {
-        if (data?.questions) setSuggestions(data.questions)
-      })
-      .catch(() => {})
-  }, [fileName, messages.length])
-
-  useEffect(() => {
-    if (listRef.current) {
-      listRef.current.scrollTop = listRef.current.scrollHeight
-    }
-  }, [messages])
-
-  return (
-    <div className="workspace-panel__content ask-panel ask-panel--pro">
-      <div className="ask-hero">
-        <div>
-          <span className="ask-hero__eyebrow">AI Research Copilot</span>
-          <h3>边读边问</h3>
-          <p>{shortTitle || '当前文献'}</p>
-        </div>
-        <div className="ask-hero__orb">
-          <Bot size={18} />
-        </div>
-      </div>
-
-      <div className="ask-context">
-        <span className="ask-context__dot" />
-        <span>{providerLabel ? `当前模型：${providerLabel}` : 'AI 模型准备中'}</span>
-      </div>
-
-      <div className="ask-messages" ref={listRef}>
-        {suggestions.length > 0 ? (
-          <div className="ask-suggestions">
-            {suggestions.map((question, index) => (
-              <button
-                key={index}
-                type="button"
-                className="ask-suggestion-chip"
-                onClick={() => {
-                  onInputChange(question)
-                  setTimeout(() => onSubmit(question), 50)
-                }}
-              >
-                {question}
-              </button>
-            ))}
-          </div>
-        ) : null}
-
-        {messages.length === 0 ? (
-          <div className="ask-empty">
-            <Bot size={22} />
-            <strong>可以直接问这篇文献</strong>
-            <span>例如研究问题、方法创新、实验结论、局限性。</span>
-          </div>
-        ) : null}
-
-        {messages.map((message, index) => (
-          <div key={index} className={`ask-msg ${message.role === 'user' ? 'ask-msg-user' : 'ask-msg-ai'}`}>
-            <div className="ask-avatar">
-              {message.role === 'user'
-                ? (currentUser?.avatar_url
-                  ? <img src={currentUser.avatar_url} alt={currentUser.nickname || '用户'} />
-                  : <span>{userInitials}</span>)
-                : <Bot size={16} />}
-            </div>
-            <div className="ask-bubble">
-              {message.text || (asking && message.role === 'ai' ? <span className="ask-typing">...</span> : '')}
-            </div>
-          </div>
-        ))}
-
-        {asking && !messages.some((message) => message.role === 'ai' && !message.text) ? (
-          <div className="ask-msg ask-msg-ai">
-            <div className="ask-avatar"><Bot size={16} /></div>
-            <div className="ask-bubble"><span className="ask-typing">...</span></div>
-          </div>
-        ) : null}
-      </div>
-
-      <div className="ask-input-row">
-        <textarea
-          className="ask-input"
-          placeholder="输入问题，Enter 发送，Shift + Enter 换行"
-          value={inputText || ''}
-          onChange={(event) => onInputChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault()
-              onSubmit()
-            }
-          }}
-          rows={1}
-        />
-        <button className="ask-send-btn" onClick={onSubmit} disabled={asking || !(inputText || '').trim()}>
-          发送
-        </button>
-      </div>
-    </div>
-  )
-}
-
 function FullTranslatePanelV2() {
   return (
     <div className="workspace-panel__content">
       <div className="workspace-title-card">
         <h3>全文翻译</h3>
-        <p>这里后续放整篇论文的连续译文。</p>
+        <p>这里后续可以放整篇论文的连续译文。</p>
       </div>
       <div className="workspace-list-card">
         <p>当前先保留入口和面板结构。</p>
@@ -693,7 +1125,7 @@ function SummaryPanel() {
       </div>
       <div className="workspace-list-card summary-panel__placeholder">
         <h3>总结入口已就绪</h3>
-        <p>本版先展示工作区，下一步可以接入流式总结、保存到阅读笔记、生成脑图。</p>
+        <p>本版先展示工作区，下一步可以接入流式总结、保存到阅读笔记和生成脑图。</p>
       </div>
     </div>
   )
@@ -701,6 +1133,7 @@ function SummaryPanel() {
 
 export function SideWorkspacePanel({
   activePanel,
+  paperId,
   fileName,
   metadata,
   currentUser,
@@ -717,9 +1150,13 @@ export function SideWorkspacePanel({
   chatMessages,
   chatInput,
   chatAsking,
+  chatInitialSuggestions,
+  chatInitialSuggestionsLoading,
+  chatFollowupLoadingMessageId,
   providerLabel,
   onChatInputChange,
   onChatSubmit,
+  onRefreshInitialSuggestions,
 }) {
   if (!activePanel) return null
 
@@ -728,6 +1165,7 @@ export function SideWorkspacePanel({
       {activePanel === 'info' ? <InfoPanel fileName={fileName} metadata={metadata} /> : null}
       {activePanel === 'notes' ? (
         <NotesPanel
+          paperId={paperId}
           notebooks={notebooks || []}
           loading={notesLoading}
           saving={notesSaving}
@@ -740,19 +1178,23 @@ export function SideWorkspacePanel({
         />
       ) : null}
       {activePanel === 'ask' ? (
-        <AskPanelV2
+        <AskPanel
           currentUser={currentUser}
           providerLabel={providerLabel}
           messages={chatMessages || []}
           inputText={chatInput || ''}
           asking={chatAsking || false}
+          initialSuggestions={chatInitialSuggestions || []}
+          initialSuggestionsLoading={chatInitialSuggestionsLoading || false}
+          followupLoadingMessageId={chatFollowupLoadingMessageId || ''}
           onInputChange={onChatInputChange}
-          onSubmit={() => onChatSubmit(chatInput)}
-          fileName={fileName}
+          onSubmit={onChatSubmit}
+          onRefreshInitialSuggestions={onRefreshInitialSuggestions}
         />
       ) : null}
-      {activePanel === 'words' ? <FullTranslatePanelV2 /> : null}
+      {activePanel === 'words' ? <FullTranslatePanel /> : null}
       {activePanel === 'summary' ? <SummaryPanel /> : null}
     </aside>
   )
 }
+

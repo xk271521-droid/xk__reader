@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -75,3 +77,38 @@ class PaperMetadata(BaseModel):
     modification_date: str | None = None
     doi: str | None = None
     page_count: int = 0
+
+
+class FullTranslationBlock(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    kind: str = Field(default="paragraph", max_length=40)
+    source_text: str = Field(default="", max_length=5000)
+    translated_text: str = Field(default="", max_length=8000)
+    bbox: list[float] = Field(default_factory=list, max_length=4)
+    font_size: float = 12
+    font_weight: int = 400
+    align: str = Field(default="left", max_length=20)
+    skip_translate: bool = False
+
+
+class FullTranslationPage(BaseModel):
+    page_number: int = Field(ge=1)
+    width: float = Field(gt=0)
+    height: float = Field(gt=0)
+    blocks: list[FullTranslationBlock] = Field(default_factory=list)
+
+
+class FullTranslationStartRequest(BaseModel):
+    source_hash: str = Field(min_length=8, max_length=64)
+    pages: list[FullTranslationPage] = Field(default_factory=list, min_length=1)
+    provider_id: int | None = Field(default=None, ge=1)
+
+
+class FullTranslationResponse(BaseModel):
+    status: Literal["idle", "running", "completed", "error"] = "idle"
+    source_hash: str = ""
+    pages: list[dict[str, Any]] = Field(default_factory=list)
+    completed_units: int = 0
+    total_units: int = 0
+    error_message: str | None = None
+    provider_id: int | None = None

@@ -21,3 +21,6 @@ backend/uploads/
 .env.*
 .venv/
 venv/
+backend-dev.log
+backend-dev.err.log
+translate_debug.log

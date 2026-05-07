@@ -35,6 +35,11 @@ export function PaperReader({
   onScreenshotTranslate,
   onScreenshotAskAI,
   onScreenshotInsertNote,
+  onDownload,
+  fullTranslateActive,
+  fullTranslateStatus,
+  fullTranslateProgress,
+  onFullTranslate,
 }) {
   return (
     <section className="reader-frame">
@@ -57,6 +62,11 @@ export function PaperReader({
         onSearchNext={onSearchNext}
         canUndo={canUndoAnnotation}
         onUndo={onUndoAnnotation}
+        onDownload={onDownload}
+        fullTranslateActive={fullTranslateActive}
+        fullTranslateStatus={fullTranslateStatus}
+        fullTranslateProgress={fullTranslateProgress}
+        onFullTranslate={onFullTranslate}
       />
 
       <div className={`reader-body${isThumbnailsOpen ? ' has-thumbnails' : ''}`}>
@@ -84,6 +94,7 @@ export function PaperReader({
           error={pdfReader.error}
           isLoading={pdfReader.isLoading}
           matches={matches}
+          matchIndex={matchIndex}
           noteFocus={noteFocus}
           pageMetrics={pdfReader.pageMetrics}
           pageNumbers={pdfReader.pageNumbers}

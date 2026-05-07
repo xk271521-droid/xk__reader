@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
@@ -5,6 +6,7 @@ import {
   Columns,
   Download,
   Eraser,
+  Languages,
   MousePointer2,
   ScanLine,
   Search,
@@ -19,7 +21,13 @@ const toolItems = [
   { id: 'screenshot', label: '截图', icon: Camera },
   { id: 'eraser', label: '涂抹擦除', icon: Eraser },
   { id: 'erase_box', label: '框选擦除', icon: ScanLine },
-  { id: 'download', label: '下载', icon: Download },
+]
+
+const downloadItems = [
+  { id: 'pdf', label: 'PDF 文件' },
+  { id: 'gbt7714', label: 'GB/T 7714-2015 引文' },
+  { id: 'cajcd', label: 'CAJ-CD 引文' },
+  { id: 'mla', label: 'MLA 引文' },
 ]
 
 function ToolbarIconButton({ children, label, onClick, active = false, disabled = false }) {
@@ -55,7 +63,28 @@ export function PdfToolbar({
   onSearchNext,
   canUndo = false,
   onUndo,
+  onDownload,
+  fullTranslateActive = false,
+  fullTranslateStatus = 'idle',
+  fullTranslateProgress = 0,
+  onFullTranslate,
 }) {
+  const downloadWrapRef = useRef(null)
+  const [isDownloadOpen, setIsDownloadOpen] = useState(false)
+
+  useEffect(() => {
+    if (!isDownloadOpen) return undefined
+
+    function handlePointerDown(event) {
+      if (!downloadWrapRef.current?.contains(event.target)) {
+        setIsDownloadOpen(false)
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    return () => document.removeEventListener('pointerdown', handlePointerDown)
+  }, [isDownloadOpen])
+
   function handleSearchInput(event) {
     onSearchChange?.(event.target.value)
   }
@@ -99,6 +128,62 @@ export function PdfToolbar({
             </button>
           )
         })}
+
+        <button
+          type="button"
+          className={`toolbar-tool toolbar-tool--full-translate toolbar-tool--full-translate-${fullTranslateStatus}${
+            fullTranslateActive ? ' is-active' : ''
+          }`}
+          title="全文翻译"
+          aria-label="全文翻译"
+          onClick={onFullTranslate}
+        >
+          {fullTranslateStatus === 'running' ? (
+            <span
+              className="toolbar-progress-ring"
+              style={{ '--progress': `${Math.max(0, Math.min(100, fullTranslateProgress || 0))}%` }}
+            />
+          ) : (
+            <Languages />
+          )}
+          <span>
+            {fullTranslateStatus === 'running'
+              ? `翻译中 ${Math.round(fullTranslateProgress || 0)}%`
+              : '全文·翻译'}
+          </span>
+        </button>
+
+        <div className="toolbar-download" ref={downloadWrapRef}>
+          <button
+            type="button"
+            className="toolbar-tool toolbar-tool--download"
+            title="下载"
+            aria-label="下载"
+            aria-expanded={isDownloadOpen}
+            onClick={() => setIsDownloadOpen((value) => !value)}
+          >
+            <Download />
+            <span>下载</span>
+          </button>
+
+          {isDownloadOpen ? (
+            <div className="toolbar-download-menu">
+              {downloadItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className="toolbar-download-menu__item"
+                  onClick={() => {
+                    setIsDownloadOpen(false)
+                    onDownload?.(item.id)
+                  }}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <div className="toolbar-group toolbar-group--compact">

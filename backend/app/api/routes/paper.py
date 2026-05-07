@@ -1,26 +1,32 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from hashlib import sha256
 from pathlib import Path
 from time import time_ns
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import select, update as sql_update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import Folder, Paper, User
+from app.models import AiProvider, Folder, Paper, PaperFullTranslation, User
 from app.schemas.paper import (
     FolderCreate,
+    FullTranslationResponse,
+    FullTranslationStartRequest,
     FolderResponse,
     FolderUpdate,
     PaperMetadata,
     PaperResponse,
     PaperUpdate,
 )
+from app.services.crypto import decrypt_api_key
 from app.services.translate import translate_title
 
 router = APIRouter(prefix="/papers", tags=["papers"])
@@ -56,6 +62,165 @@ def build_paper_response(paper: Paper) -> PaperResponse:
         last_viewed_at=paper.last_viewed_at.isoformat() if paper.last_viewed_at else None,
         created_at=paper.created_at.isoformat() if paper.created_at else None,
     )
+
+
+def build_full_translation_response(item: PaperFullTranslation | None) -> FullTranslationResponse:
+    if not item:
+        return FullTranslationResponse()
+    return FullTranslationResponse(
+        status=item.status if item.status in {"idle", "running", "completed", "error"} else "idle",
+        source_hash=item.source_hash or "",
+        pages=item.pages_json or [],
+        completed_units=item.completed_units or 0,
+        total_units=item.total_units or 0,
+        error_message=item.error_message,
+        provider_id=item.provider_id,
+    )
+
+
+def normalize_translation_pages(pages: list[dict]) -> list[dict]:
+    normalized = deepcopy(pages or [])
+    for page in normalized:
+        for block in page.get("blocks") or []:
+            if block.get("skip_translate"):
+                block["translated_text"] = block.get("source_text", "")
+            else:
+                block["translated_text"] = block.get("translated_text", "")
+    return normalized
+
+
+def count_translatable_units(pages: list[dict]) -> int:
+    return sum(
+        1
+        for page in pages or []
+        for block in page.get("blocks") or []
+        if not block.get("skip_translate") and str(block.get("source_text") or "").strip()
+    )
+
+
+def get_translation_source_hash(pages: list[dict]) -> str:
+    payload = []
+    for page in pages or []:
+        payload.append({
+            "page_number": page.get("page_number"),
+            "width": page.get("width"),
+            "height": page.get("height"),
+            "blocks": [
+                {
+                    "id": block.get("id"),
+                    "source_text": block.get("source_text"),
+                    "bbox": block.get("bbox"),
+                    "skip_translate": block.get("skip_translate"),
+                }
+                for block in page.get("blocks") or []
+            ],
+        })
+    import json
+    return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def load_active_provider(db: Session, provider_id: int | None = None) -> AiProvider | None:
+    provider = None
+    if provider_id:
+        provider = db.scalar(
+            select(AiProvider).where(
+                AiProvider.id == provider_id,
+                AiProvider.is_active.is_(True),
+            )
+        )
+    if provider:
+        return provider
+    return db.scalar(
+        select(AiProvider)
+        .where(AiProvider.is_active.is_(True))
+        .order_by(AiProvider.sort_order)
+        .limit(1)
+    )
+
+
+def run_full_translation_task(translation_id: int, provider_id: int | None) -> None:
+    from app.db.session import SessionLocal
+    from app.services.llm import translate_full_text_blocks
+
+    db = SessionLocal()
+    try:
+        item = db.get(PaperFullTranslation, translation_id)
+        if not item:
+            return
+
+        provider = load_active_provider(db, provider_id)
+        if not provider:
+            item.status = "error"
+            item.error_message = "没有可用的 AI 厂商，请先在 AI 配置中启用一个。"
+            db.add(item)
+            db.commit()
+            return
+
+        item.provider_id = provider.id
+        item.status = "running"
+        item.error_message = None
+        db.add(item)
+        db.commit()
+
+        api_key = decrypt_api_key(provider.encrypted_api_key)
+        pages = deepcopy(item.pages_json or [])
+        completed = 0
+        batch: list[dict[str, str]] = []
+        block_refs: list[dict] = []
+
+        def flush_batch() -> None:
+            nonlocal completed, batch, block_refs, item, pages
+            if not batch:
+                return
+            translated = translate_full_text_blocks(
+                base_url=provider.base_url,
+                api_key=api_key,
+                model=provider.model,
+                items=batch,
+            )
+            for block in block_refs:
+                block["translated_text"] = translated.get(block.get("id"), block.get("source_text", ""))
+            completed += len(batch)
+            item = db.get(PaperFullTranslation, translation_id)
+            if not item:
+                return
+            item.pages_json = pages
+            item.completed_units = completed
+            item.status = "running"
+            db.add(item)
+            db.commit()
+            batch = []
+            block_refs = []
+
+        for page in pages:
+            for block in page.get("blocks") or []:
+                source_text = str(block.get("source_text") or "").strip()
+                if block.get("skip_translate") or not source_text:
+                    block["translated_text"] = source_text
+                    continue
+                batch.append({"id": block.get("id", ""), "text": source_text})
+                block_refs.append(block)
+                if len(batch) >= 10:
+                    flush_batch()
+        flush_batch()
+
+        item = db.get(PaperFullTranslation, translation_id)
+        if item:
+            item.pages_json = pages
+            item.completed_units = item.total_units
+            item.status = "completed"
+            item.error_message = None
+            db.add(item)
+            db.commit()
+    except Exception as exc:
+        item = db.get(PaperFullTranslation, translation_id)
+        if item:
+            item.status = "error"
+            item.error_message = str(exc)[:500]
+            db.add(item)
+            db.commit()
+    finally:
+        db.close()
 
 
 # ── Folders ──────────────────────────────────────────────
@@ -448,6 +613,117 @@ async def upload_paper(
         db.refresh(paper)
 
     return build_paper_response(paper)
+
+
+@router.get("/{paper_id}/full-translation", response_model=FullTranslationResponse)
+def get_full_translation(
+    paper_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> FullTranslationResponse:
+    paper = db.scalar(select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="论文不存在。")
+    item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
+    return build_full_translation_response(item)
+
+
+@router.post("/{paper_id}/full-translation/start", response_model=FullTranslationResponse)
+def start_full_translation(
+    paper_id: int,
+    payload: FullTranslationStartRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> FullTranslationResponse:
+    paper = db.scalar(select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="论文不存在。")
+
+    pages = normalize_translation_pages([page.model_dump() for page in payload.pages])
+    computed_hash = get_translation_source_hash(pages)
+    source_hash = payload.source_hash or computed_hash
+    total_units = count_translatable_units(pages)
+    if total_units <= 0:
+        raise HTTPException(status_code=400, detail="没有可翻译的正文内容。")
+
+    item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
+    if item and item.status == "completed" and item.source_hash == source_hash:
+        return build_full_translation_response(item)
+    if item and item.status == "running" and item.source_hash == source_hash:
+        return build_full_translation_response(item)
+
+    if not item:
+        item = PaperFullTranslation(paper_id=paper_id)
+
+    item.provider_id = payload.provider_id
+    item.source_hash = source_hash
+    item.status = "running"
+    item.pages_json = pages
+    item.completed_units = 0
+    item.total_units = total_units
+    item.error_message = None
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+
+    background_tasks.add_task(run_full_translation_task, item.id, payload.provider_id)
+    return build_full_translation_response(item)
+
+
+@router.post("/{paper_id}/full-translation/retry", response_model=FullTranslationResponse)
+def retry_full_translation(
+    paper_id: int,
+    payload: FullTranslationStartRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> FullTranslationResponse:
+    item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
+    if item:
+        db.delete(item)
+        db.commit()
+    return start_full_translation(paper_id, payload, background_tasks, current_user, db)
+
+
+@router.get("/{paper_id}/full-translation/stream", response_model=FullTranslationResponse)
+def stream_full_translation(
+    paper_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> FullTranslationResponse:
+    # v1 uses lightweight polling with the stream-shaped endpoint name.
+    paper = db.scalar(select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="论文不存在。")
+    item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
+    return build_full_translation_response(item)
+
+
+@router.get("/{paper_id}/full-translation/download")
+def download_full_translation(
+    paper_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    paper = db.scalar(select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="论文不存在。")
+    item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
+    if not item or item.status != "completed":
+        raise HTTPException(status_code=404, detail="全文翻译尚未完成。")
+
+    chunks: list[str] = []
+    for page in item.pages_json or []:
+        chunks.append(f"\n\n# 第 {page.get('page_number')} 页\n")
+        for block in page.get("blocks") or []:
+            text = str(block.get("translated_text") or block.get("source_text") or "").strip()
+            if text:
+                chunks.append(text)
+    content = "\n\n".join(chunks).strip()
+    filename = (paper.title or paper.file_name or "translation").replace("/", " ").replace("\\", " ").strip()
+    headers = {"Content-Disposition": f'attachment; filename="{filename[:80]}-translation.md"'}
+    return PlainTextResponse(content, media_type="text/markdown; charset=utf-8", headers=headers)
 
 
 @router.get("/{paper_id}", response_model=PaperResponse)

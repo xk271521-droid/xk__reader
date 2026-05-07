@@ -11,24 +11,36 @@ export function useResizableWidth({ initialWidth, minWidth, maxWidth }) {
   const resizeStateRef = useRef(null)
   const handlePointerMoveRef = useRef(null)
   const stopResizeRef = useRef(null)
+  const frameRef = useRef(0)
+  const latestClientXRef = useRef(0)
 
   const handlePointerMove = useCallback((event) => {
     if (!resizeStateRef.current) return
 
-    const { startX, startWidth, direction } = resizeStateRef.current
-    requestAnimationFrame(() => {
-      const delta = event.clientX - startX
+    latestClientXRef.current = event.clientX
+    if (frameRef.current) return
+
+    frameRef.current = requestAnimationFrame(() => {
+      frameRef.current = 0
+      if (!resizeStateRef.current) return
+
+      const { startX, startWidth, direction } = resizeStateRef.current
+      const delta = latestClientXRef.current - startX
       const nextWidth = clampWidth(
         direction === 'left' ? startWidth + delta : startWidth - delta,
         minWidth,
         maxWidth,
       )
-      setWidth(nextWidth)
+      setWidth((current) => (current === nextWidth ? current : nextWidth))
     })
   }, [maxWidth, minWidth])
 
   const stopResize = useCallback(() => {
     resizeStateRef.current = null
+    if (frameRef.current) {
+      cancelAnimationFrame(frameRef.current)
+      frameRef.current = 0
+    }
     document.body.classList.remove('is-resizing-panel')
     window.removeEventListener('pointermove', handlePointerMove)
     if (stopResizeRef.current) {
@@ -45,6 +57,7 @@ export function useResizableWidth({ initialWidth, minWidth, maxWidth }) {
     }
 
     document.body.classList.add('is-resizing-panel')
+    latestClientXRef.current = event.clientX
     window.addEventListener('pointermove', handlePointerMove)
     window.addEventListener('pointerup', stopResize)
   }, [handlePointerMove, stopResize, width])
@@ -57,6 +70,7 @@ export function useResizableWidth({ initialWidth, minWidth, maxWidth }) {
     }
 
     document.body.classList.add('is-resizing-panel')
+    latestClientXRef.current = event.clientX
     window.addEventListener('pointermove', handlePointerMove)
     window.addEventListener('pointerup', stopResize)
   }
@@ -68,6 +82,10 @@ export function useResizableWidth({ initialWidth, minWidth, maxWidth }) {
 
   useEffect(() => () => {
     document.body.classList.remove('is-resizing-panel')
+    if (frameRef.current) {
+      cancelAnimationFrame(frameRef.current)
+      frameRef.current = 0
+    }
     if (handlePointerMoveRef.current) {
       window.removeEventListener('pointermove', handlePointerMoveRef.current)
     }

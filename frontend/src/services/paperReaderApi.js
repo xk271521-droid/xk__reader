@@ -128,6 +128,35 @@ export function getPaperFileUrl(paperId) {
   return `${PAPERS_BASE}/${paperId}/file`
 }
 
+export async function fetchFullTranslation(paperId) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/full-translation`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function startFullTranslation(paperId, payload) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/full-translation/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function retryFullTranslation(paperId, payload) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/full-translation/retry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export function getFullTranslationDownloadUrl(paperId) {
+  return `${PAPERS_BASE}/${paperId}/full-translation/download`
+}
+
 // ── Reading Records ──────────────────────────────────────
 
 export async function recordReadingEvent(paperId, openedAt) {
