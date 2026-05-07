@@ -5,6 +5,7 @@ import { UserCenterPage } from '../components/account/UserCenterPage'
 import { HomePage } from '../components/home/HomePage'
 import { StatusPanel } from '../components/layout/StatusPanel'
 import { UtilityRail } from '../components/layout/UtilityRail'
+import { FullTranslationReader } from '../components/reader/FullTranslationReader'
 import { PaperReader } from '../components/reader/PaperReader'
 import { SelectionInsightPanel } from '../components/reader/SelectionInsightPanel'
 import { SideWorkspacePanel } from '../components/reader/SideWorkspacePanel'
@@ -30,7 +31,17 @@ import {
   uploadAvatar,
   updateCurrentUser,
 } from '../services/authApi'
-import { getPaperFileUrl } from '../services/paperReaderApi'
+import {
+  fetchFullTranslation,
+  getPaperFileUrl,
+  retryFullTranslation,
+  startFullTranslation,
+  streamFullTranslation,
+} from '../services/paperReaderApi'
+import {
+  buildFullTranslationPages,
+  hashTranslationPages,
+} from '../components/reader/fullTranslationLayout'
 import 'pdfjs-dist/web/pdf_viewer.css'
 import '../styles/app.css'
 
@@ -121,6 +132,18 @@ function triggerTextDownload(content, fileName) {
   URL.revokeObjectURL(url)
 }
 
+function normalizeFullTranslationStatus(value) {
+  return ['idle', 'running', 'completed', 'error'].includes(value) ? value : 'idle'
+}
+
+function getFullTranslationProgress(payload) {
+  const total = Number(payload?.total_units) || 0
+  const completed = Number(payload?.completed_units) || 0
+  if (payload?.status === 'completed') return 100
+  if (total <= 0) return payload?.status === 'running' ? 3 : 0
+  return Math.max(3, Math.min(99, (completed / total) * 100))
+}
+
 function App() {
   const readerRef = useRef(null)
   const userMenuRef = useRef(null)
@@ -141,11 +164,17 @@ function App() {
   const [chatFollowupLoadingMessageId, setChatFollowupLoadingMessageId] = useState({})
   const [providerLabel, setProviderLabel] = useState('')
   const [activeProviderId, setActiveProviderId] = useState(null)
+  const [fullTranslation, setFullTranslation] = useState(null)
+  const [fullTranslationStatus, setFullTranslationStatus] = useState('idle')
+  const [fullTranslationProgress, setFullTranslationProgress] = useState(0)
+  const [fullTranslationBusy, setFullTranslationBusy] = useState(false)
+  const [isFullTranslationOpen, setIsFullTranslationOpen] = useState(false)
   const chatMessageCounterRef = useRef(0)
   const chatRequestCounterRef = useRef(0)
   const initialSuggestionRequestRef = useRef({})
   const initialSuggestionBatchRef = useRef({})
   const followupSuggestionRequestRef = useRef({})
+  const fullTranslationPollRef = useRef(null)
   const serverStatus = useBackendStatus()
 
   // Get active AI provider name
@@ -351,6 +380,73 @@ function App() {
     ? (annotationUndoStacks[activePaperId]?.length || 0) > 0
     : false
 
+  function applyFullTranslationState(payload) {
+    const status = normalizeFullTranslationStatus(payload?.status)
+    setFullTranslation(payload || null)
+    setFullTranslationStatus(status)
+    setFullTranslationProgress(getFullTranslationProgress(payload))
+  }
+
+  function clearFullTranslationPolling() {
+    if (fullTranslationPollRef.current) {
+      window.clearInterval(fullTranslationPollRef.current)
+      fullTranslationPollRef.current = null
+    }
+  }
+
+  function beginFullTranslationPolling(paperId) {
+    clearFullTranslationPolling()
+    if (!paperId) return
+    fullTranslationPollRef.current = window.setInterval(async () => {
+      try {
+        const payload = await streamFullTranslation(paperId)
+        applyFullTranslationState(payload)
+        if (payload?.status !== 'running') {
+          clearFullTranslationPolling()
+        }
+      } catch (err) {
+        clearFullTranslationPolling()
+        setFullTranslationStatus('error')
+      }
+    }, 1500)
+  }
+
+  useEffect(() => () => clearFullTranslationPolling(), [])
+
+  useEffect(() => {
+    let cancelled = false
+    clearFullTranslationPolling()
+    setIsFullTranslationOpen(false)
+
+    if (!activePaperId) {
+      setFullTranslation(null)
+      setFullTranslationStatus('idle')
+      setFullTranslationProgress(0)
+      return undefined
+    }
+
+    async function restoreFullTranslationState() {
+      try {
+        const payload = await fetchFullTranslation(activePaperId)
+        if (cancelled) return
+        applyFullTranslationState(payload)
+        if (payload?.status === 'running') {
+          beginFullTranslationPolling(activePaperId)
+        }
+      } catch {
+        if (!cancelled) {
+          setFullTranslationStatus('idle')
+          setFullTranslationProgress(0)
+        }
+      }
+    }
+
+    restoreFullTranslationState()
+    return () => {
+      cancelled = true
+    }
+  }, [activePaperId])
+
   function snapshotAnnotations(items) {
     return (items || []).map((annotation) => ({
       page_number: annotation.page_number,
@@ -537,9 +633,13 @@ function App() {
   }
 
   function buildPaperChatContext() {
+    const fullTextContext = String(activePaperFullText || '').replace(/\s+/g, ' ').trim()
+    const summaryContext = fullTextContext
+      ? `论文全文前文摘录：${fullTextContext.slice(0, 3600)}`
+      : (activePaperSummary || '')
     return {
       paper_title: metadata.title || fileName || '',
-      summary: activePaperSummary || '',
+      summary: summaryContext,
       selected_text: selectionCard.text || '',
       provider_id: activeProviderId,
     }
@@ -608,6 +708,52 @@ function App() {
       mla: 'MLA',
     }
     triggerTextDownload(citationText, `${baseName}-${suffixMap[format] || 'citation'}.txt`)
+  }
+
+  async function handleFullTranslate() {
+    if (!activePaperId) return
+
+    if (fullTranslationStatus === 'completed' && fullTranslation?.pages?.length) {
+      setIsFullTranslationOpen(true)
+      return
+    }
+
+    if (fullTranslationStatus === 'running' || fullTranslationBusy) {
+      beginFullTranslationPolling(activePaperId)
+      return
+    }
+
+    if (!pdfDocument) {
+      window.alert('PDF 还在加载，稍等一下再启动全文翻译。')
+      return
+    }
+
+    setFullTranslationBusy(true)
+    try {
+      const pages = await buildFullTranslationPages(pdfDocument, pageMetrics)
+      if (!pages.length) {
+        window.alert('没有提取到可翻译的正文内容。')
+        return
+      }
+      const payload = {
+        source_hash: hashTranslationPages(pages),
+        pages,
+        provider_id: activeProviderId || null,
+      }
+      const request = fullTranslationStatus === 'error' ? retryFullTranslation : startFullTranslation
+      const result = await request(activePaperId, payload)
+      applyFullTranslationState(result)
+      if (result?.status === 'completed') {
+        setIsFullTranslationOpen(true)
+      } else {
+        beginFullTranslationPolling(activePaperId)
+      }
+    } catch (err) {
+      window.alert(err?.message || '全文翻译启动失败，请检查 AI 配置后重试。')
+      setFullTranslationStatus('error')
+    } finally {
+      setFullTranslationBusy(false)
+    }
   }
 
   async function fetchInitialSuggestions(force = false) {
@@ -1304,118 +1450,133 @@ function App() {
             !isAuthViewOpen && !isAccountView && isReaderView ? ' is-active' : ' is-hidden'
           }`}
         >
-          <PaperReader
-            pdfReader={paperReaderState}
-            readerRef={readerRef}
-            activeTool={activeTool}
-            isThumbnailsOpen={isThumbnailsOpen}
-            thumbnailWidth={thumbnailPanel.width}
-            onThumbnailResizeStart={thumbnailPanel.startResizeLeft}
-            onToggleThumbnails={() => setIsThumbnailsOpen((v) => !v)}
-            onToolChange={setActiveTool}
-            onSelect={handleSelection}
-            onThumbnailPageClick={(pageNum) => {
-              setCurrentPage(pageNum)
-              const el = readerRef.current?.querySelector(`[data-page-number="${pageNum}"]`)
-              if (el) el.scrollIntoView({ block: 'start', behavior: 'instant' })
-            }}
-            onWheelZoom={zoomBy}
-            searchTerm={pdfSearch.searchTerm}
-            onSearchChange={pdfSearch.onSearchChange}
-            matchIndex={pdfSearch.matchIndex}
-            matches={pdfSearch.matches}
-            noteFocus={noteFocus}
-            onSearchExecute={pdfSearch.performSearch}
-            totalMatches={pdfSearch.totalMatches}
-            onSearchPrev={pdfSearch.onSearchPrev}
-            onSearchNext={pdfSearch.onSearchNext}
-            canUndoAnnotation={canUndoAnnotation}
-            onUndoAnnotation={handleUndoAnnotation}
-            currentPaperId={activePaperId}
-            annotations={annotations}
-            onCreateAnnotation={handleCreateAnnotation}
-            onDeleteAnnotation={handleDeleteAnnotation}
-            onEraseAnnotationRange={handleEraseAnnotationRange}
-            onInsertSelectionNote={handleInsertSelectionNote}
-            onAskAI={function () { if (selectionCard.text) handleAskAIText(selectionCard.text) }}
-            onScreenshotTranslate={handleScreenshotTranslate}
-            onScreenshotAskAI={handleAskAIText}
-            onScreenshotInsertNote={handleInsertScreenshotNote}
-            onDownload={handleDownloadOption}
-            fullTranslateActive={activeWorkspacePanel === 'words'}
-            onFullTranslate={function () {
-              setActiveWorkspacePanel((current) => (current === 'words' ? '' : 'words'))
-            }}
-          />
-
-          <div
-            aria-label="调整即时理解面板宽度"
-            aria-orientation="vertical"
-            className="workspace-resizer"
-            onPointerDown={insightPanel.startResize}
-            role="separator"
-          />
-
-          <SelectionInsightPanel
-            domain={selectionCard.domain}
-            onDomainChange={setDomain}
-            selectionCard={selectionCard}
-            width={insightPanel.width}
-            aiEnabled={aiEnabled}
-            onToggleAI={toggleAI}
-          />
-
-          {activeWorkspacePanel ? (
-            <div
-              aria-label="调整工作面板宽度"
-              aria-orientation="vertical"
-              className="workspace-resizer"
-              onPointerDown={workspacePanel.startResize}
-              role="separator"
+          {isFullTranslationOpen ? (
+            <FullTranslationReader
+              paperId={activePaperId}
+              fileName={fileName}
+              metadata={metadata}
+              pageMetrics={pageMetrics}
+              pageNumbers={pageNumbers}
+              pdfDocument={pdfDocument}
+              translation={fullTranslation}
+              onBack={() => setIsFullTranslationOpen(false)}
             />
-          ) : null}
+          ) : (
+            <>
+              <PaperReader
+                pdfReader={paperReaderState}
+                readerRef={readerRef}
+                activeTool={activeTool}
+                isThumbnailsOpen={isThumbnailsOpen}
+                thumbnailWidth={thumbnailPanel.width}
+                onThumbnailResizeStart={thumbnailPanel.startResizeLeft}
+                onToggleThumbnails={() => setIsThumbnailsOpen((v) => !v)}
+                onToolChange={setActiveTool}
+                onSelect={handleSelection}
+                onThumbnailPageClick={(pageNum) => {
+                  setCurrentPage(pageNum)
+                  const el = readerRef.current?.querySelector(`[data-page-number="${pageNum}"]`)
+                  if (el) el.scrollIntoView({ block: 'start', behavior: 'instant' })
+                }}
+                onWheelZoom={zoomBy}
+                searchTerm={pdfSearch.searchTerm}
+                onSearchChange={pdfSearch.onSearchChange}
+                matchIndex={pdfSearch.matchIndex}
+                matches={pdfSearch.matches}
+                noteFocus={noteFocus}
+                onSearchExecute={pdfSearch.performSearch}
+                totalMatches={pdfSearch.totalMatches}
+                onSearchPrev={pdfSearch.onSearchPrev}
+                onSearchNext={pdfSearch.onSearchNext}
+                canUndoAnnotation={canUndoAnnotation}
+                onUndoAnnotation={handleUndoAnnotation}
+                currentPaperId={activePaperId}
+                annotations={annotations}
+                onCreateAnnotation={handleCreateAnnotation}
+                onDeleteAnnotation={handleDeleteAnnotation}
+                onEraseAnnotationRange={handleEraseAnnotationRange}
+                onInsertSelectionNote={handleInsertSelectionNote}
+                onAskAI={function () { if (selectionCard.text) handleAskAIText(selectionCard.text) }}
+                onScreenshotTranslate={handleScreenshotTranslate}
+                onScreenshotAskAI={handleAskAIText}
+                onScreenshotInsertNote={handleInsertScreenshotNote}
+                onDownload={handleDownloadOption}
+                fullTranslateActive={fullTranslationStatus === 'completed'}
+                fullTranslateStatus={fullTranslationBusy ? 'running' : fullTranslationStatus}
+                fullTranslateProgress={fullTranslationProgress}
+                onFullTranslate={handleFullTranslate}
+              />
 
-          <SideWorkspacePanel
-            activePanel={activeWorkspacePanel}
-            paperId={activePaperId}
-            fileName={fileName}
-            metadata={metadata}
-            currentUser={currentUser}
-            width={workspacePanel.width}
-            notebooks={notebooks}
-            notesLoading={notesLoading}
-            notesSaving={notesSaving}
-            activeNoteTarget={activeNoteTarget}
-            onCreateNotebook={handleCreateNotebook}
-            onDraftChange={setNotebooks}
-            onSaveNotebooks={handleSaveAllNotebooks}
-            onSetActiveNoteTarget={setActiveNoteTarget}
-            onJumpToNote={handleJumpToNoteAnchor}
-            chatMessages={activeChatMessages}
-            chatInput={activeChatInput}
-            chatAsking={activeChatAsking}
-            chatInitialSuggestions={activeInitialSuggestions}
-            chatInitialSuggestionsLoading={activeInitialSuggestionsLoading}
-            chatFollowupLoadingMessageId={activeFollowupLoadingMessageId}
-            providerLabel={providerLabel}
-            onChatInputChange={function (value) {
-              setChatInput(function (previous) {
-                return {
-                  ...previous,
-                  [activeView]: value,
-                }
-              })
-            }}
-            onChatSubmit={handleChatSubmit}
-            onRefreshInitialSuggestions={function () { fetchInitialSuggestions(true) }}
-          />
+              <div
+                aria-label="调整即时理解面板宽度"
+                aria-orientation="vertical"
+                className="workspace-resizer"
+                onPointerDown={insightPanel.startResize}
+                role="separator"
+              />
 
-          <UtilityRail
-            activeItem={activeWorkspacePanel}
-            collapsed={isUtilityRailCollapsed}
-            onSelect={setActiveWorkspacePanel}
-            onToggleCollapsed={() => setIsUtilityRailCollapsed((value) => !value)}
-          />
+              <SelectionInsightPanel
+                domain={selectionCard.domain}
+                onDomainChange={setDomain}
+                selectionCard={selectionCard}
+                width={insightPanel.width}
+                aiEnabled={aiEnabled}
+                onToggleAI={toggleAI}
+              />
+
+              {activeWorkspacePanel ? (
+                <div
+                  aria-label="调整工作面板宽度"
+                  aria-orientation="vertical"
+                  className="workspace-resizer"
+                  onPointerDown={workspacePanel.startResize}
+                  role="separator"
+                />
+              ) : null}
+
+              <SideWorkspacePanel
+                activePanel={activeWorkspacePanel}
+                paperId={activePaperId}
+                fileName={fileName}
+                metadata={metadata}
+                currentUser={currentUser}
+                width={workspacePanel.width}
+                notebooks={notebooks}
+                notesLoading={notesLoading}
+                notesSaving={notesSaving}
+                activeNoteTarget={activeNoteTarget}
+                onCreateNotebook={handleCreateNotebook}
+                onDraftChange={setNotebooks}
+                onSaveNotebooks={handleSaveAllNotebooks}
+                onSetActiveNoteTarget={setActiveNoteTarget}
+                onJumpToNote={handleJumpToNoteAnchor}
+                chatMessages={activeChatMessages}
+                chatInput={activeChatInput}
+                chatAsking={activeChatAsking}
+                chatInitialSuggestions={activeInitialSuggestions}
+                chatInitialSuggestionsLoading={activeInitialSuggestionsLoading}
+                chatFollowupLoadingMessageId={activeFollowupLoadingMessageId}
+                providerLabel={providerLabel}
+                onChatInputChange={function (value) {
+                  setChatInput(function (previous) {
+                    return {
+                      ...previous,
+                      [activeView]: value,
+                    }
+                  })
+                }}
+                onChatSubmit={handleChatSubmit}
+                onRefreshInitialSuggestions={function () { fetchInitialSuggestions(true) }}
+              />
+
+              <UtilityRail
+                activeItem={activeWorkspacePanel}
+                collapsed={isUtilityRailCollapsed}
+                onSelect={setActiveWorkspacePanel}
+                onToggleCollapsed={() => setIsUtilityRailCollapsed((value) => !value)}
+              />
+            </>
+          )}
         </div>
 
         <div

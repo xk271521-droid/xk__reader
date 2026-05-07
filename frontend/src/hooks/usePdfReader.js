@@ -1085,6 +1085,7 @@ export function usePdfReader({ currentUser } = {}) {
     ),
     pdfDocument: activePaper?.pdfDocument ?? null,
     activePaperSummary: activePaper ? summaryMapRef.current.get(activePaper.id) ?? '' : '',
+    activePaperFullText: activePaper ? fullTextMapRef.current.get(activePaper.id) ?? '' : '',
     recentPapers,
     readingStats,
     recentReadings,

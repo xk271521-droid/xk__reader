@@ -5730,3 +5730,280 @@ body.is-resizing-panel .reader-resizer--left::after {
 
 .pdf-pinned-shot__resizer { position: absolute; right: 0; bottom: 0; width: 20px; height: 20px; cursor: nwse-resize; z-index: 6; background: linear-gradient(135deg, transparent 50%, rgba(15,23,42,0.25) 50%); border-radius: 0 0 6px 0; }
 .pdf-pinned-shot__resizer:hover { background: linear-gradient(135deg, transparent 50%, rgba(15,23,42,0.4) 50%); }
+
+.full-translation-view {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 15% 0%, rgba(59, 130, 246, 0.10), transparent 34%),
+    linear-gradient(180deg, #f8fbff 0%, #eef4fb 100%);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.12);
+}
+
+.full-translation-toolbar {
+  flex: 0 0 auto;
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(14px);
+}
+
+.full-translation-action,
+.translation-zoom-group button {
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 999px;
+  background: #ffffff;
+  color: #334155;
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.full-translation-action {
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.full-translation-action:hover,
+.translation-zoom-group button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(37, 99, 235, 0.38);
+  background: #f8fbff;
+}
+
+.full-translation-action.is-active {
+  border-color: rgba(37, 99, 235, 0.35);
+  background: #eaf2ff;
+  color: #1d4ed8;
+}
+
+.full-translation-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.full-translation-title strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.full-translation-title span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.full-translation-controls {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.translation-zoom-group {
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+  background: rgba(248, 250, 252, 0.9);
+  color: #475569;
+  font-size: 12px;
+}
+
+.translation-zoom-group button {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.translation-zoom-group b {
+  min-width: 38px;
+  color: #0f172a;
+  font-size: 12px;
+  text-align: center;
+}
+
+.translation-split-shell {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 0;
+  overflow: hidden;
+}
+
+.translation-pane {
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.translation-scroll {
+  height: 100%;
+  overflow: auto;
+  padding: 22px 28px 60px;
+  scroll-behavior: smooth;
+}
+
+.translation-scroll--translated {
+  background:
+    linear-gradient(90deg, rgba(37, 99, 235, 0.06), transparent 16px),
+    #f7f4ed;
+}
+
+.translation-split-resizer {
+  flex: 0 0 10px;
+  width: 10px;
+  border: 0;
+  border-left: 1px solid rgba(148, 163, 184, 0.22);
+  border-right: 1px solid rgba(148, 163, 184, 0.22);
+  background: linear-gradient(180deg, transparent, rgba(37, 99, 235, 0.14), transparent);
+  cursor: col-resize;
+}
+
+.translation-original-page-wrap,
+.translation-page {
+  position: relative;
+  margin: 0 auto 22px;
+  background: #ffffff;
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.12);
+}
+
+.translation-original-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 20;
+}
+
+.translation-source-hotspot {
+  position: absolute;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.translation-source-hotspot.is-hovered,
+.translation-source-hotspot.is-active {
+  border-color: rgba(37, 99, 235, 0.45);
+  background: rgba(96, 165, 250, 0.16);
+}
+
+.translation-page {
+  overflow: hidden;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+}
+
+.translation-page__badge {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 2;
+  display: inline-flex;
+  min-width: 26px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.translation-block {
+  position: absolute;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 1px 3px;
+  background: transparent;
+  color: #172033;
+  font-family: "Noto Serif SC", "Source Han Serif SC", Georgia, serif;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  text-align: left;
+  cursor: pointer;
+}
+
+.translation-block:hover,
+.translation-block.is-hovered {
+  border-color: rgba(20, 184, 166, 0.35);
+  background: rgba(20, 184, 166, 0.10);
+}
+
+.translation-block.is-active {
+  border-color: rgba(37, 99, 235, 0.48);
+  background: rgba(96, 165, 250, 0.16);
+}
+
+.translation-empty-state {
+  width: min(520px, 90%);
+  margin: 70px auto;
+  padding: 28px;
+  border: 1px dashed rgba(148, 163, 184, 0.55);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.8);
+  color: #64748b;
+  text-align: center;
+}
+
+.toolbar-tool--full-translate-completed {
+  border-color: rgba(37, 99, 235, 0.34);
+  background: #eaf2ff;
+  color: #1d4ed8;
+}
+
+.toolbar-tool--full-translate-error {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: #fff1f2;
+  color: #be123c;
+}
+
+.toolbar-progress-ring {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background:
+    conic-gradient(#2563eb var(--progress, 0%), rgba(37, 99, 235, 0.16) 0),
+    #ffffff;
+  box-shadow: inset 0 0 0 4px #ffffff;
+}
+
+@media (max-width: 1100px) {
+  .full-translation-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .full-translation-controls {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+}

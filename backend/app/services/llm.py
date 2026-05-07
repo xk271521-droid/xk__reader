@@ -450,36 +450,51 @@ def translate_full_text_blocks(
         return {}
 
     client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
-    items_json = json.dumps(
-        [{"id": item.get("id", ""), "text": item.get("text", "")} for item in items],
-        ensure_ascii=False,
-    )
-    response = client.chat.completions.create(
-        model=model,
-        temperature=0.2,
-        max_tokens=3500,
-        messages=[
-            {"role": "system", "content": FULL_TRANSLATION_SYSTEM_PROMPT},
-            {"role": "user", "content": FULL_TRANSLATION_USER_TEMPLATE.format(items_json=items_json)},
-        ],
-    )
-    content = response.choices[0].message.content or ""
-    payload = _parse_json_payload(content)
-    raw_items = payload.get("items")
-    if not isinstance(raw_items, list):
-        raise ValueError("AI did not return translation JSON.")
 
-    translated: dict[str, str] = {}
-    for item in raw_items:
-        if not isinstance(item, dict):
+    def translate_once(batch_items: list[dict[str, str]]) -> dict[str, str]:
+        items_json = json.dumps(
+            [{"id": item.get("id", ""), "text": item.get("text", "")} for item in batch_items],
+            ensure_ascii=False,
+        )
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0.2,
+            max_tokens=6000,
+            messages=[
+                {"role": "system", "content": FULL_TRANSLATION_SYSTEM_PROMPT},
+                {"role": "user", "content": FULL_TRANSLATION_USER_TEMPLATE.format(items_json=items_json)},
+            ],
+        )
+        content = response.choices[0].message.content or ""
+        payload = _parse_json_payload(content)
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list):
+            return {}
+
+        result: dict[str, str] = {}
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "").strip()
+            text = " ".join(str(item.get("translation") or "").split()).strip()
+            if item_id and text:
+                result[item_id] = text
+        return result
+
+    translated = translate_once(items)
+    missing_items = [item for item in items if item.get("id") not in translated]
+
+    # Batch JSON responses from cheaper models occasionally omit one or two ids.
+    # Retry missing blocks one by one so a partial response does not fail the whole paper.
+    for missing_item in missing_items:
+        item_id = missing_item.get("id", "")
+        if not item_id:
             continue
-        item_id = str(item.get("id") or "").strip()
-        text = " ".join(str(item.get("translation") or "").split()).strip()
-        if item_id and text:
-            translated[item_id] = text
-
-    missing = [item.get("id", "") for item in items if item.get("id") not in translated]
-    if missing:
-        raise ValueError("AI translation response missed some blocks.")
+        try:
+            translated.update(translate_once([missing_item]))
+        except Exception:
+            pass
+        if item_id not in translated:
+            translated[item_id] = str(missing_item.get("text") or "").strip()
 
     return translated

@@ -153,6 +153,13 @@ export async function retryFullTranslation(paperId, payload) {
   return parseJsonResponse(response)
 }
 
+export async function streamFullTranslation(paperId) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/full-translation/stream`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
 export function getFullTranslationDownloadUrl(paperId) {
   return `${PAPERS_BASE}/${paperId}/full-translation/download`
 }
