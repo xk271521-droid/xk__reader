@@ -12,6 +12,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select, update as sql_update
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -82,20 +83,12 @@ def build_full_translation_response(item: PaperFullTranslation | None) -> FullTr
         if block.get("status") == "failed"
     )
     return FullTranslationResponse(
-        status=(
-            "error"
-            if item.status == "completed" and pending_blocks_count
-            else item.status if item.status in {"idle", "running", "completed", "error", "cancelled"} else "idle"
-        ),
+        status=item.status if item.status in {"idle", "running", "completed", "error", "cancelled"} else "idle",
         source_hash=item.source_hash or "",
         pages=item.pages_json or [],
         completed_units=item.completed_units or 0,
         total_units=item.total_units or 0,
-        error_message=(
-            "全文翻译缓存不完整，请点击重新生成。"
-            if item.status == "completed" and pending_blocks_count
-            else item.error_message
-        ),
+        error_message=item.error_message,
         provider_id=item.provider_id,
         parse_mode=getattr(item, "parse_mode", "auto") or "auto",
         parse_engine=getattr(item, "parse_engine", "local") or "local",
@@ -103,6 +96,7 @@ def build_full_translation_response(item: PaperFullTranslation | None) -> FullTr
         translation_engine=getattr(item, "translation_engine", "ai") or "ai",
         termbase_version=getattr(item, "termbase_version", "") or "",
         failed_blocks_count=failed_blocks_count + pending_blocks_count,
+        pending_blocks_count=pending_blocks_count,
     )
 
 
@@ -529,6 +523,7 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
                 block_refs = []
                 return
             item.pages_json = pages
+            flag_modified(item, "pages_json")
             item.completed_units = completed
             item.status = "running"
             db.add(item)
@@ -559,10 +554,12 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
         if item:
             if item.status == "cancelled" or cancelled:
                 item.pages_json = pages
+                flag_modified(item, "pages_json")
                 item.status = "cancelled"
                 item.error_message = item.error_message or "已取消全文翻译。"
             else:
                 item.pages_json = pages
+                flag_modified(item, "pages_json")
                 item.completed_units = item.total_units
                 item.status = "completed"
                 item.error_message = None

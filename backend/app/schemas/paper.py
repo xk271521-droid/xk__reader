@@ -124,3 +124,4 @@ class FullTranslationResponse(BaseModel):
     translation_engine: str = "ai"
     termbase_version: str = ""
     failed_blocks_count: int = 0
+    pending_blocks_count: int = 0

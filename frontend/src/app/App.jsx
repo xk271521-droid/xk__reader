@@ -145,6 +145,14 @@ function getFullTranslationProgress(payload) {
   return Math.max(3, Math.min(99, (completed / total) * 100))
 }
 
+function hasCompleteFullTranslationCache(payload) {
+  return Boolean(
+    payload?.status === 'completed'
+    && payload?.pages?.length
+    && !Number(payload?.pending_blocks_count || 0)
+  )
+}
+
 const READER_LAYOUT_GAP = 8
 const RESIZER_WIDTH = 10
 const WORKSPACE_RAIL_EXPANDED_WIDTH = 72
@@ -739,7 +747,7 @@ function App() {
     const force = Boolean(options?.force)
     if (!activePaperId) return
 
-    if (!force && fullTranslationStatus === 'completed' && fullTranslation?.pages?.length) {
+    if (!force && hasCompleteFullTranslationCache(fullTranslation)) {
       setIsFullTranslationOpen(true)
       return
     }
@@ -782,7 +790,8 @@ function App() {
         provider_id: activeProviderId || null,
         parse_mode: fullTranslationParseMode,
       }
-      const request = force || fullTranslationStatus === 'error' ? retryFullTranslation : startFullTranslation
+      const shouldRetry = force || fullTranslationStatus === 'error' || Number(fullTranslation?.pending_blocks_count || 0) > 0
+      const request = shouldRetry ? retryFullTranslation : startFullTranslation
       const result = await request(activePaperId, payload)
       applyFullTranslationState(result)
       if (result?.status === 'completed') {
@@ -1546,7 +1555,7 @@ function App() {
                 onScreenshotAskAI={handleAskAIText}
                 onScreenshotInsertNote={handleInsertScreenshotNote}
                 onDownload={handleDownloadOption}
-                fullTranslateActive={fullTranslationStatus === 'completed'}
+                fullTranslateActive={hasCompleteFullTranslationCache(fullTranslation)}
               fullTranslateStatus={fullTranslationBusy ? 'running' : fullTranslationStatus}
               fullTranslateProgress={fullTranslationProgress}
               fullTranslateParseMode={fullTranslationParseMode}
