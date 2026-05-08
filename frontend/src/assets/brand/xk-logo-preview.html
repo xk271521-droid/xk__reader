@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>xk 阅读 Logo 预览</title>
+  <style>
+    :root {
+      color: #171812;
+      background: #f3efe6;
+      font-family: "Microsoft YaHei UI", "PingFang SC", "Source Han Sans SC", sans-serif;
+    }
+    body {
+      margin: 0;
+      padding: 40px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 28px;
+    }
+    p {
+      margin: 0 0 30px;
+      color: #776b58;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 24px;
+    }
+    .card {
+      border: 1px solid rgba(40, 34, 20, .12);
+      border-radius: 26px;
+      background: rgba(255, 252, 244, .78);
+      box-shadow: 0 18px 48px rgba(35, 28, 12, .1);
+      padding: 24px;
+    }
+    .card h2 {
+      margin: 0 0 18px;
+      font-size: 18px;
+    }
+    .icon-row {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      margin-bottom: 20px;
+    }
+    .icon {
+      width: 96px;
+      height: 96px;
+      border-radius: 24px;
+    }
+    .tiny {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      box-shadow: 0 8px 18px rgba(0, 0, 0, .18);
+    }
+    .wordmark {
+      width: 100%;
+      max-width: 560px;
+      border-radius: 18px;
+      overflow: hidden;
+      background: #11120f;
+    }
+    .note {
+      margin-top: 14px;
+      color: #8a7650;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+  </style>
+</head>
+<body>
+  <h1>xk 阅读 Logo 候选</h1>
+  <p>候选 B 已作为推荐版同时保存为 xk-logo-icon.svg 和 xk-logo-wordmark.svg。</p>
+  <main class="grid">
+    <section class="card">
+      <h2>A 极简学术徽章</h2>
+      <div class="icon-row">
+        <img class="icon" src="./xk-logo-candidate-a-icon.svg" alt="候选 A 图标" />
+        <img class="tiny" src="./xk-logo-candidate-a-icon.svg" alt="候选 A 小尺寸" />
+      </div>
+      <img class="wordmark" src="./xk-logo-candidate-a-wordmark.svg" alt="候选 A 横向 Logo" />
+      <div class="note">稳重、典藏感强，适合偏学院派品牌。</div>
+    </section>
+    <section class="card">
+      <h2>B PDF 书页 + AI 光路（推荐）</h2>
+      <div class="icon-row">
+        <img class="icon" src="./xk-logo-candidate-b-icon.svg" alt="候选 B 图标" />
+        <img class="tiny" src="./xk-logo-candidate-b-icon.svg" alt="候选 B 小尺寸" />
+      </div>
+      <img class="wordmark" src="./xk-logo-candidate-b-wordmark.svg" alt="候选 B 横向 Logo" />
+      <div class="note">阅读器识别度最高，PDF、AI、学术三个信息都比较清楚。</div>
+    </section>
+    <section class="card">
+      <h2>C 知识树 / 引用节点</h2>
+      <div class="icon-row">
+        <img class="icon" src="./xk-logo-candidate-c-icon.svg" alt="候选 C 图标" />
+        <img class="tiny" src="./xk-logo-candidate-c-icon.svg" alt="候选 C 小尺寸" />
+      </div>
+      <img class="wordmark" src="./xk-logo-candidate-c-wordmark.svg" alt="候选 C 横向 Logo" />
+      <div class="note">更强调知识管理和笔记树，适合后续脑图/笔记功能品牌化。</div>
+    </section>
+  </main>
+</body>
+</html>

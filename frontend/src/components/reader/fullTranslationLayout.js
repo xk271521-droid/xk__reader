@@ -26,6 +26,14 @@ function normalizeText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim()
 }
 
+function shouldJoinTextItems(previous, current, lineHeight) {
+  if (!previous || !current) return false
+  const gap = current.x - previous.right
+  if (gap < -Math.max(3, lineHeight * 0.35)) return false
+  if (gap > Math.max(18, lineHeight * 1.8)) return false
+  return Math.abs(current.fontSize - previous.fontSize) < 2.5
+}
+
 function lineFromTextItem(item, pageWidth, pageHeight, index) {
   const text = normalizeText(item.str)
   if (!text) return null
@@ -49,6 +57,73 @@ function lineFromTextItem(item, pageWidth, pageHeight, index) {
   }
 }
 
+function mergeTextItemsToLines(items, pageWidth, pageHeight) {
+  const fragments = items
+    .map((item, index) => lineFromTextItem(item, pageWidth, pageHeight, index))
+    .filter(Boolean)
+    .sort((a, b) => (Math.abs(a.y - b.y) > 3 ? a.y - b.y : a.x - b.x))
+  const rows = []
+
+  for (const fragment of fragments) {
+    const row = rows.find((candidate) => {
+      const rowHeight = Math.max(10, candidate.bottom - candidate.y)
+      return Math.abs(fragment.y - candidate.y) < Math.max(3, rowHeight * 0.45)
+    })
+    if (row) {
+      row.items.push(fragment)
+      row.y = Math.min(row.y, fragment.y)
+      row.bottom = Math.max(row.bottom, fragment.bottom)
+      row.fontSize = Math.max(row.fontSize, fragment.fontSize)
+    } else {
+      rows.push({
+        y: fragment.y,
+        bottom: fragment.bottom,
+        fontSize: fragment.fontSize,
+        items: [fragment],
+      })
+    }
+  }
+
+  return rows
+    .sort((a, b) => a.y - b.y)
+    .flatMap((row) => {
+      const sorted = row.items.sort((a, b) => a.x - b.x)
+      const lineHeight = Math.max(10, row.bottom - row.y)
+      const groups = []
+      for (const item of sorted) {
+        const last = groups[groups.length - 1]
+        const previous = last?.items[last.items.length - 1]
+        if (last && shouldJoinTextItems(previous, item, lineHeight)) {
+          const needsSpace = item.x - previous.right > Math.max(1.5, item.fontSize * 0.18)
+          last.text += `${needsSpace ? ' ' : ''}${item.text}`
+          last.items.push(item)
+          last.right = Math.max(last.right, item.right)
+          last.bottom = Math.max(last.bottom, item.bottom)
+          last.fontSize = Math.max(last.fontSize, item.fontSize)
+        } else {
+          groups.push({
+            text: item.text,
+            items: [item],
+            x: item.x,
+            y: item.y,
+            right: item.right,
+            bottom: item.bottom,
+            fontSize: item.fontSize,
+          })
+        }
+      }
+      return groups.map((group) => ({
+        id: group.items.map((item) => item.id).join('-'),
+        text: normalizeText(group.text),
+        x: group.x,
+        y: group.y,
+        right: group.right,
+        bottom: group.bottom,
+        fontSize: group.fontSize,
+      }))
+    })
+}
+
 function mergeLinesToBlocks(lines, pageNumber, pageWidth, pageHeight) {
   const sorted = lines
     .filter(Boolean)
@@ -58,10 +133,15 @@ function mergeLinesToBlocks(lines, pageNumber, pageWidth, pageHeight) {
   for (const line of sorted) {
     const last = blocks[blocks.length - 1]
     const lineHeight = Math.max(10, line.bottom - line.y)
+    const paragraphIndentOk = last && Math.abs(line.x - last.x) < Math.max(46, lineHeight * 3.2)
+    const lineSpacingOk = last && line.y - last.bottom < Math.max(18, lineHeight * 1.8)
+    const fontOk = last && Math.abs(line.fontSize - last.fontSize) < 2.5
+    const previousLooksOpen = last && (!/[.!?。！？]$/.test(last.text.trim()) || line.x >= last.x - Math.max(12, lineHeight))
     const canMerge = last
-      && Math.abs(line.x - last.x) < Math.max(24, lineHeight * 1.2)
-      && line.y - last.bottom < Math.max(14, lineHeight * 1.45)
-      && Math.abs(line.fontSize - last.fontSize) < 2.5
+      && paragraphIndentOk
+      && lineSpacingOk
+      && fontOk
+      && previousLooksOpen
       && last.text.length < 1600
       && !/^(abstract|摘要|references|参考文献)$/i.test(last.text.trim())
 
@@ -135,9 +215,7 @@ export async function buildFullTranslationPages(pdfDocument, pageMetrics) {
     const width = pageMetrics?.[pageNumber - 1]?.width || viewport.width
     const height = pageMetrics?.[pageNumber - 1]?.height || viewport.height
     const textContent = await page.getTextContent()
-    const lines = textContent.items
-      .map((item, index) => lineFromTextItem(item, width, height, index))
-      .filter(Boolean)
+    const lines = mergeTextItemsToLines(textContent.items, width, height)
 
     pages.push({
       page_number: pageNumber,

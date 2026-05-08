@@ -32,6 +32,7 @@ import {
   updateCurrentUser,
 } from '../services/authApi'
 import {
+  cancelFullTranslation,
   fetchFullTranslation,
   getPaperFileUrl,
   retryFullTranslation,
@@ -133,7 +134,7 @@ function triggerTextDownload(content, fileName) {
 }
 
 function normalizeFullTranslationStatus(value) {
-  return ['idle', 'running', 'completed', 'error'].includes(value) ? value : 'idle'
+  return ['idle', 'running', 'completed', 'error', 'cancelled'].includes(value) ? value : 'idle'
 }
 
 function getFullTranslationProgress(payload) {
@@ -143,6 +144,17 @@ function getFullTranslationProgress(payload) {
   if (total <= 0) return payload?.status === 'running' ? 3 : 0
   return Math.max(3, Math.min(99, (completed / total) * 100))
 }
+
+const READER_LAYOUT_GAP = 8
+const RESIZER_WIDTH = 10
+const WORKSPACE_RAIL_EXPANDED_WIDTH = 72
+const WORKSPACE_RAIL_COLLAPSED_WIDTH = 46
+const READER_MIN_WIDTH = 280
+const INSIGHT_MIN_WIDTH = 180
+const INSIGHT_MAX_WIDTH = 460
+const WORKSPACE_MIN_WIDTH = 300
+const WORKSPACE_DEFAULT_WIDTH = 380
+const WORKSPACE_MAX_WIDTH = 620
 
 function App() {
   const readerRef = useRef(null)
@@ -168,6 +180,7 @@ function App() {
   const [fullTranslationStatus, setFullTranslationStatus] = useState('idle')
   const [fullTranslationProgress, setFullTranslationProgress] = useState(0)
   const [fullTranslationBusy, setFullTranslationBusy] = useState(false)
+  const [fullTranslationParseMode, setFullTranslationParseMode] = useState('auto')
   const [isFullTranslationOpen, setIsFullTranslationOpen] = useState(false)
   const chatMessageCounterRef = useRef(0)
   const chatRequestCounterRef = useRef(0)
@@ -264,15 +277,27 @@ function App() {
     minWidth: 160,
     maxWidth: 420,
   })
+  const workspacePanel = useResizableWidth({
+    initialWidth: WORKSPACE_DEFAULT_WIDTH,
+    minWidth: WORKSPACE_MIN_WIDTH,
+    maxWidth: WORKSPACE_MAX_WIDTH,
+  })
+  const railWidth = isUtilityRailCollapsed ? WORKSPACE_RAIL_COLLAPSED_WIDTH : WORKSPACE_RAIL_EXPANDED_WIDTH
+  const workspaceWidth = activeWorkspacePanel ? workspacePanel.width : 0
+  const workspaceReserveWidth = activeWorkspacePanel
+    ? workspaceWidth + railWidth + RESIZER_WIDTH + READER_LAYOUT_GAP * 2
+    : railWidth + READER_LAYOUT_GAP
+  const insightSafeMaxWidth = Math.max(
+    INSIGHT_MIN_WIDTH,
+    Math.min(
+      INSIGHT_MAX_WIDTH,
+      window.innerWidth - workspaceReserveWidth - READER_MIN_WIDTH - RESIZER_WIDTH - READER_LAYOUT_GAP * 3,
+    ),
+  )
   const insightPanel = useResizableWidth({
     initialWidth: 300,
-    minWidth: 180,
-    maxWidth: 460,
-  })
-  const workspacePanel = useResizableWidth({
-    initialWidth: 380,
-    minWidth: 300,
-    maxWidth: 620,
+    minWidth: INSIGHT_MIN_WIDTH,
+    maxWidth: insightSafeMaxWidth,
   })
 
   const { selectionCard, handleSelection, dismissSelectionCard, setDomain, aiEnabled, toggleAI } = useSelectionInsight({
@@ -710,16 +735,32 @@ function App() {
     triggerTextDownload(citationText, `${baseName}-${suffixMap[format] || 'citation'}.txt`)
   }
 
-  async function handleFullTranslate() {
+  async function handleFullTranslate(options = {}) {
+    const force = Boolean(options?.force)
     if (!activePaperId) return
 
-    if (fullTranslationStatus === 'completed' && fullTranslation?.pages?.length) {
+    if (!force && fullTranslationStatus === 'completed' && fullTranslation?.pages?.length) {
       setIsFullTranslationOpen(true)
       return
     }
 
-    if (fullTranslationStatus === 'running' || fullTranslationBusy) {
-      beginFullTranslationPolling(activePaperId)
+    if (fullTranslationStatus === 'running') {
+      const shouldCancel = window.confirm('全文翻译正在进行，确定要取消吗？')
+      if (!shouldCancel) {
+        beginFullTranslationPolling(activePaperId)
+        return
+      }
+      try {
+        const result = await cancelFullTranslation(activePaperId)
+        applyFullTranslationState(result)
+        clearFullTranslationPolling()
+      } catch (err) {
+        window.alert(err?.message || '取消全文翻译失败，请稍后再试。')
+      }
+      return
+    }
+
+    if (fullTranslationBusy) {
       return
     }
 
@@ -739,8 +780,9 @@ function App() {
         source_hash: hashTranslationPages(pages),
         pages,
         provider_id: activeProviderId || null,
+        parse_mode: fullTranslationParseMode,
       }
-      const request = fullTranslationStatus === 'error' ? retryFullTranslation : startFullTranslation
+      const request = force || fullTranslationStatus === 'error' ? retryFullTranslation : startFullTranslation
       const result = await request(activePaperId, payload)
       applyFullTranslationState(result)
       if (result?.status === 'completed') {
@@ -1459,6 +1501,9 @@ function App() {
               pageNumbers={pageNumbers}
               pdfDocument={pdfDocument}
               translation={fullTranslation}
+              parseMode={fullTranslationParseMode}
+              onParseModeChange={setFullTranslationParseMode}
+              onRegenerate={() => handleFullTranslate({ force: true })}
               onBack={() => setIsFullTranslationOpen(false)}
             />
           ) : (
@@ -1502,10 +1547,12 @@ function App() {
                 onScreenshotInsertNote={handleInsertScreenshotNote}
                 onDownload={handleDownloadOption}
                 fullTranslateActive={fullTranslationStatus === 'completed'}
-                fullTranslateStatus={fullTranslationBusy ? 'running' : fullTranslationStatus}
-                fullTranslateProgress={fullTranslationProgress}
-                onFullTranslate={handleFullTranslate}
-              />
+              fullTranslateStatus={fullTranslationBusy ? 'running' : fullTranslationStatus}
+              fullTranslateProgress={fullTranslationProgress}
+              fullTranslateParseMode={fullTranslationParseMode}
+              onFullTranslateParseModeChange={setFullTranslationParseMode}
+              onFullTranslate={handleFullTranslate}
+            />
 
               <div
                 aria-label="调整即时理解面板宽度"

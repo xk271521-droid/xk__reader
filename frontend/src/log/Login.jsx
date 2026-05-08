@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { loginUser, registerUser } from '../services/authApi'
+import xkLogoIcon from '../assets/brand/xk-logo-icon.svg'
 import './Login.css'
 
 const EDUCATION_OPTIONS = ['本科', '硕士', '博士', '教师', '其他']
@@ -669,7 +670,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
               <img
                 alt="XK 阅读 logo"
                 className="scene-brand-link__logo"
-                src="https://i.postimg.cc/nLrDYrHW/icon.png"
+                src={xkLogoIcon}
               />
               <span>XK 阅读</span>
             </a>
@@ -703,7 +704,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
             <img
               alt="XK 阅读 logo"
               className="auth-card__mobile-logo"
-              src="https://i.postimg.cc/nLrDYrHW/icon.png"
+              src={xkLogoIcon}
             />
             <span>XK 阅读</span>
           </div>

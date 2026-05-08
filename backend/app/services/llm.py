@@ -495,6 +495,6 @@ def translate_full_text_blocks(
         except Exception:
             pass
         if item_id not in translated:
-            translated[item_id] = str(missing_item.get("text") or "").strip()
+            continue
 
     return translated

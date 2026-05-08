@@ -78,6 +78,38 @@ def _ensure_annotation_geometry_version_column() -> None:
             )
 
 
+def _ensure_full_translation_parse_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("paper_full_translations")}
+    except Exception:
+        return
+
+    additions = [
+        ("parse_mode", "VARCHAR(24)", "'auto'"),
+        ("parse_engine", "VARCHAR(24)", "'local'"),
+        ("parse_summary", "JSON" if engine.dialect.name != "sqlite" else "TEXT", None),
+        ("translation_engine", "VARCHAR(32)", "'ai'"),
+        ("termbase_version", "VARCHAR(64)", "''"),
+    ]
+    with engine.begin() as connection:
+        for name, column_type, default in additions:
+            if name in columns:
+                continue
+            if default:
+                connection.execute(
+                    text(f"ALTER TABLE paper_full_translations ADD COLUMN {name} {column_type} NOT NULL DEFAULT {default}")
+                )
+            else:
+                connection.execute(
+                    text(f"ALTER TABLE paper_full_translations ADD COLUMN {name} {column_type}")
+                )
+                if name == "parse_summary":
+                    connection.execute(
+                        text("UPDATE paper_full_translations SET parse_summary = '{}' WHERE parse_summary IS NULL")
+                    )
+
+
 def create_app() -> FastAPI:
     application = FastAPI(title=settings.app_name)
     application.add_middleware(
@@ -98,6 +130,7 @@ def create_app() -> FastAPI:
     def create_tables() -> None:
         Base.metadata.create_all(bind=engine)
         _ensure_annotation_geometry_version_column()
+        _ensure_full_translation_parse_columns()
         _ensure_system_providers()
 
     return application

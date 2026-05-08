@@ -59,6 +59,17 @@ class Settings:
     papers_upload_dir: str = os.getenv("PAPERS_UPLOAD_DIR", str(BASE_DIR / "uploads" / "papers"))
     baidu_translate_appid: str = os.getenv("BAIDU_TRANSLATE_APPID", "")
     baidu_translate_secret: str = os.getenv("BAIDU_TRANSLATE_SECRET", "")
+    aliyun_docmind_enabled: bool = os.getenv("ALIYUN_DOCMIND_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    aliyun_docmind_access_key_id: str = os.getenv("ALIYUN_DOCMIND_ACCESS_KEY_ID", "")
+    aliyun_docmind_access_key_secret: str = os.getenv("ALIYUN_DOCMIND_ACCESS_KEY_SECRET", "")
+    aliyun_docmind_endpoint: str = os.getenv("ALIYUN_DOCMIND_ENDPOINT", "docmind-api.cn-hangzhou.aliyuncs.com")
+    aliyun_docmind_region: str = os.getenv("ALIYUN_DOCMIND_REGION", "cn-hangzhou")
+    translation_engine: str = os.getenv("TRANSLATION_ENGINE", "ai").strip() or "ai"
+    tencent_mt_enabled: bool = os.getenv("TENCENT_MT_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    tencent_secret_id: str = os.getenv("TENCENT_SECRET_ID", "")
+    tencent_secret_key: str = os.getenv("TENCENT_SECRET_KEY", "")
+    tencent_mt_region: str = os.getenv("TENCENT_MT_REGION", "ap-guangzhou")
+    termbase_path: str = os.getenv("TERMBASE_PATH", str(BASE_DIR / "data" / "termbase.json"))
 
     # 系统默认 AI 提供者（所有用户共享）
     default_glm_api_key: str = os.getenv("DEFAULT_GLM_API_KEY", "")
@@ -71,6 +82,22 @@ class Settings:
     @property
     def ai_enabled(self) -> bool:
         return bool(self.openai_api_key)
+
+    @property
+    def aliyun_docmind_available(self) -> bool:
+        return bool(
+            self.aliyun_docmind_enabled
+            and self.aliyun_docmind_access_key_id
+            and self.aliyun_docmind_access_key_secret
+        )
+
+    @property
+    def tencent_mt_available(self) -> bool:
+        return bool(
+            self.tencent_mt_enabled
+            and self.tencent_secret_id
+            and self.tencent_secret_key
+        )
 
     @property
     def system_providers(self) -> list[dict[str, str]]:

@@ -3,6 +3,7 @@ const PDF_DOCUMENT_OPTIONS = Object.freeze({
   cMapUrl: '/cmaps/',
   cMapPacked: true,
   standardFontDataUrl: '/standard_fonts/',
+  wasmUrl: '/wasm/',
   useSystemFonts: true,
 })
 

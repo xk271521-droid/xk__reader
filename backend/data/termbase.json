@@ -1,0 +1,18 @@
+{
+  "terms": [
+    {
+      "source": "CNN-GWO",
+      "target": "CNN-GWO",
+      "case_sensitive": true,
+      "protect": true
+    },
+    {
+      "source": "Human Action Recognition",
+      "target": "人体动作识别"
+    },
+    {
+      "source": "local spatio-temporal features",
+      "target": "局部时空特征"
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 360" role="img" aria-labelledby="title desc">
+  <title id="title">xk 阅读候选 A 横向 Logo</title>
+  <desc id="desc">学术徽章图标与 xk 阅读文字组合。</desc>
+  <defs>
+    <linearGradient id="a-bg" x1="46" y1="28" x2="320" y2="332" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#20211d"/>
+      <stop offset=".54" stop-color="#0f1110"/>
+      <stop offset="1" stop-color="#2b2112"/>
+    </linearGradient>
+    <linearGradient id="a-gold" x1="108" y1="98" x2="272" y2="274" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff0b8"/>
+      <stop offset=".45" stop-color="#d6a83f"/>
+      <stop offset="1" stop-color="#916718"/>
+    </linearGradient>
+  </defs>
+  <rect width="1180" height="360" rx="42" fill="#f6f1e7"/>
+  <g transform="translate(40 40)">
+    <rect width="280" height="280" rx="64" fill="url(#a-bg)"/>
+    <circle cx="140" cy="140" r="96" fill="none" stroke="#d6a83f" stroke-width="5" stroke-opacity=".3"/>
+    <circle cx="140" cy="140" r="72" fill="none" stroke="#fff0b8" stroke-width="1.5" stroke-dasharray="2 9" stroke-opacity=".55"/>
+    <path d="M87 79c0-12 10-22 22-22h79c6 0 11 2 15 6l18 18c4 4 6 9 6 15v106c0 12-10 22-22 22h-96c-12 0-22-10-22-22V79z" fill="#f7f0df"/>
+    <path d="M190 60v26c0 7 5 12 12 12h21" fill="none" stroke="#b99035" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M116 119h68M116 143h52M116 167h73" stroke="#282821" stroke-width="9" stroke-linecap="round" opacity=".86"/>
+    <path d="M101 196c42-10 67-31 92-74" fill="none" stroke="url(#a-gold)" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="101" cy="196" r="7" fill="#d6a83f"/>
+    <circle cx="148" cy="171" r="5" fill="#fff0b8"/>
+    <circle cx="193" cy="122" r="7" fill="#d6a83f"/>
+  </g>
+  <text x="370" y="172" fill="#181915" font-family="'Microsoft YaHei UI','PingFang SC','Source Han Sans SC',sans-serif" font-size="92" font-weight="800" letter-spacing="-2">xk 阅读</text>
+  <text x="374" y="232" fill="#7a6332" font-family="'Microsoft YaHei UI','PingFang SC','Source Han Sans SC',sans-serif" font-size="30" font-weight="500" letter-spacing="6">AI PAPER READER</text>
+  <path d="M374 264h320" stroke="#d6a83f" stroke-width="5" stroke-linecap="round"/>
+  <path d="M716 264h40" stroke="#181915" stroke-width="5" stroke-linecap="round" opacity=".75"/>
+</svg>

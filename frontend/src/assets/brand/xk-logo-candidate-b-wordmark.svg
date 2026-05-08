@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 360" role="img" aria-labelledby="title desc">
+  <title id="title">xk 阅读候选 B 横向 Logo</title>
+  <desc id="desc">PDF 双页、AI 光路与 xk 阅读文字组合。</desc>
+  <defs>
+    <radialGradient id="b-glow" cx="34%" cy="24%" r="76%">
+      <stop offset="0" stop-color="#493c22"/>
+      <stop offset=".52" stop-color="#181917"/>
+      <stop offset="1" stop-color="#080908"/>
+    </radialGradient>
+    <linearGradient id="b-page" x1="92" y1="65" x2="235" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff8e8"/>
+      <stop offset="1" stop-color="#e9dcc0"/>
+    </linearGradient>
+    <linearGradient id="b-gold" x1="75" y1="214" x2="241" y2="87" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8b5f13"/>
+      <stop offset=".48" stop-color="#d8aa3d"/>
+      <stop offset="1" stop-color="#fff1af"/>
+    </linearGradient>
+  </defs>
+  <rect width="1180" height="360" rx="42" fill="#11120f"/>
+  <g transform="translate(42 40)">
+    <rect width="280" height="280" rx="64" fill="url(#b-glow)"/>
+    <path d="M60 78c26-14 58-14 95 0v159c-37-15-69-15-95 0V78z" fill="#f2e7ce" opacity=".92"/>
+    <path d="M155 78c37-14 69-14 95 0v159c-26-15-58-15-95 0V78z" fill="url(#b-page)"/>
+    <path d="M155 78v159" stroke="#c49a42" stroke-width="4" stroke-linecap="round" opacity=".72"/>
+    <path d="M92 116h39M92 139h34M176 116h45M176 139h34M176 162h47" stroke="#1c1d18" stroke-width="8" stroke-linecap="round" opacity=".82"/>
+    <path d="M78 198c33 2 58-11 78-38 21-27 44-39 75-35" fill="none" stroke="url(#b-gold)" stroke-width="10" stroke-linecap="round"/>
+    <circle cx="78" cy="198" r="9" fill="#d8aa3d"/>
+    <circle cx="156" cy="160" r="6" fill="#fff1af"/>
+    <circle cx="231" cy="125" r="9" fill="#d8aa3d"/>
+  </g>
+  <text x="372" y="170" fill="#fff7e5" font-family="'Microsoft YaHei UI','PingFang SC','Source Han Sans SC',sans-serif" font-size="92" font-weight="850" letter-spacing="-2">xk 阅读</text>
+  <text x="376" y="232" fill="#d8aa3d" font-family="'Microsoft YaHei UI','PingFang SC','Source Han Sans SC',sans-serif" font-size="30" font-weight="500" letter-spacing="6">INTELLIGENT PAPER READER</text>
+  <path d="M377 264h350" stroke="#d8aa3d" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="762" cy="264" r="7" fill="#fff1af"/>
+</svg>

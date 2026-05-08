@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
@@ -67,14 +69,69 @@ def build_paper_response(paper: Paper) -> PaperResponse:
 def build_full_translation_response(item: PaperFullTranslation | None) -> FullTranslationResponse:
     if not item:
         return FullTranslationResponse()
+    pending_blocks_count = sum(
+        1
+        for page in (item.pages_json or [])
+        for block in (page.get("blocks") or [])
+        if block.get("status") == "pending"
+    )
+    failed_blocks_count = sum(
+        1
+        for page in (item.pages_json or [])
+        for block in (page.get("blocks") or [])
+        if block.get("status") == "failed"
+    )
     return FullTranslationResponse(
-        status=item.status if item.status in {"idle", "running", "completed", "error"} else "idle",
+        status=(
+            "error"
+            if item.status == "completed" and pending_blocks_count
+            else item.status if item.status in {"idle", "running", "completed", "error", "cancelled"} else "idle"
+        ),
         source_hash=item.source_hash or "",
         pages=item.pages_json or [],
         completed_units=item.completed_units or 0,
         total_units=item.total_units or 0,
-        error_message=item.error_message,
+        error_message=(
+            "全文翻译缓存不完整，请点击重新生成。"
+            if item.status == "completed" and pending_blocks_count
+            else item.error_message
+        ),
         provider_id=item.provider_id,
+        parse_mode=getattr(item, "parse_mode", "auto") or "auto",
+        parse_engine=getattr(item, "parse_engine", "local") or "local",
+        parse_summary=getattr(item, "parse_summary", None) or {},
+        translation_engine=getattr(item, "translation_engine", "ai") or "ai",
+        termbase_version=getattr(item, "termbase_version", "") or "",
+        failed_blocks_count=failed_blocks_count + pending_blocks_count,
+    )
+
+
+COPY_BLOCK_TYPES = {"formula", "image", "table", "page_meta"}
+COPY_BLOCK_KINDS = {"footer", "caption"}
+
+
+def normalize_block_type(block: dict) -> str:
+    kind = str(block.get("kind") or "paragraph").strip() or "paragraph"
+    block_type = str(block.get("type") or "").strip() or "text"
+    text = str(block.get("source_text") or "").strip()
+    if kind == "caption":
+        block_type = "caption"
+    if re.search(r"^(fig\.|figure|table)\s*\d+", text, re.I):
+        block_type = "caption"
+    if re.search(r"[∑∫√≈≤≥∞α-ωΑ-Ω]|\\[a-zA-Z]+|\$[^$]+\$", text):
+        block_type = "formula"
+    block["type"] = block_type
+    return block_type
+
+
+def should_copy_block(block: dict) -> bool:
+    block_type = normalize_block_type(block)
+    kind = str(block.get("kind") or "").strip()
+    return bool(
+        block.get("skip_translate")
+        or block_type in COPY_BLOCK_TYPES
+        or kind in COPY_BLOCK_KINDS
+        or str(block.get("translate_policy") or "") in {"copy", "skip"}
     )
 
 
@@ -82,9 +139,14 @@ def normalize_translation_pages(pages: list[dict]) -> list[dict]:
     normalized = deepcopy(pages or [])
     for page in normalized:
         for block in page.get("blocks") or []:
-            if block.get("skip_translate"):
+            normalize_block_type(block)
+            if should_copy_block(block):
+                block["translate_policy"] = "copy"
+                block["status"] = "copied"
                 block["translated_text"] = block.get("source_text", "")
             else:
+                block["translate_policy"] = "translate"
+                block["status"] = block.get("status") if block.get("status") in {"translated", "failed"} else "pending"
                 block["translated_text"] = block.get("translated_text", "")
     return normalized
 
@@ -94,7 +156,7 @@ def count_translatable_units(pages: list[dict]) -> int:
         1
         for page in pages or []
         for block in page.get("blocks") or []
-        if not block.get("skip_translate") and str(block.get("source_text") or "").strip()
+        if not should_copy_block(block) and str(block.get("source_text") or "").strip()
     )
 
 
@@ -115,8 +177,42 @@ def get_translation_source_hash(pages: list[dict]) -> str:
                 for block in page.get("blocks") or []
             ],
         })
-    import json
     return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def build_translation_cache_key(parse_mode: str, parse_engine: str, local_hash: str, translation_engine: str = "ai", termbase_version: str = "") -> str:
+    return f"{parse_mode}:{parse_engine}:{translation_engine}:{termbase_version}:{local_hash}"
+
+
+def is_completed_translation_cache_hit(
+    item: PaperFullTranslation | None,
+    *,
+    parse_mode: str,
+    local_hash: str,
+    translation_engine: str = "ai",
+    termbase_version: str = "",
+) -> bool:
+    if not item or item.status != "completed":
+        return False
+    if any(
+        block.get("status") in {"pending", "failed"}
+        for page in (item.pages_json or [])
+        for block in (page.get("blocks") or [])
+    ):
+        return False
+    source_hash = item.source_hash or ""
+    if source_hash == local_hash:
+        return True
+    if source_hash == build_translation_cache_key(parse_mode, "local", local_hash, translation_engine, termbase_version):
+        return True
+    legacy_prefix = f"{parse_mode}:local:"
+    if source_hash == f"{legacy_prefix}{local_hash}":
+        return True
+    if parse_mode == "auto" and source_hash.startswith(f"auto:aliyun:{translation_engine}:{termbase_version}:"):
+        return True
+    if parse_mode == "aliyun" and source_hash.startswith(f"aliyun:aliyun:{translation_engine}:{termbase_version}:"):
+        return True
+    return False
 
 
 def load_active_provider(db: Session, provider_id: int | None = None) -> AiProvider | None:
@@ -138,51 +234,299 @@ def load_active_provider(db: Session, provider_id: int | None = None) -> AiProvi
     )
 
 
+def contains_cjk_text(text: str) -> bool:
+    return any("\u3400" <= char <= "\u9fff" for char in text or "")
+
+
+def is_allowed_untranslated_block(block: dict, text: str) -> bool:
+    import re
+
+    value = str(text or "").strip()
+    if block.get("skip_translate"):
+        return True
+    if not value:
+        return False
+    if re.match(r"^(https?://|doi:|www\.)", value, re.I):
+        return True
+    if re.match(r"^[\d\s()[\].,;:/\\+\-=<>%°]+$", value):
+        return True
+    return False
+
+
+def get_download_translation_text(block: dict) -> str:
+    translated = str(block.get("translated_text") or "").strip()
+    source = str(block.get("source_text") or "").strip()
+    if block.get("status") == "failed":
+        return f"[未译] {source}" if source else ""
+    if translated and (contains_cjk_text(translated) or is_allowed_untranslated_block(block, translated)):
+        return translated
+    if source and is_allowed_untranslated_block(block, source):
+        return source
+    if translated:
+        return f"[未译] {translated}"
+    if source:
+        return f"[未译] {source}"
+    return ""
+
+
+def detect_local_parse_quality(pages: list[dict]) -> dict:
+    total_pages = len(pages or [])
+    blocks = [block for page in pages or [] for block in page.get("blocks") or []]
+    source_texts = [str(block.get("source_text") or "").strip() for block in blocks if str(block.get("source_text") or "").strip()]
+    all_text = "\n".join(source_texts)
+    text_chars = len(re.sub(r"\s+", "", all_text))
+    mojibake_hits = len(re.findall(r"[锟�]|[鐚€畬殏炕璇戞枃鍙傝€冩憳鎽樿]{2,}", all_text))
+    tiny_blocks = sum(1 for text in source_texts if len(text) <= 3)
+    avg_chars_per_page = text_chars / max(1, total_pages)
+    tiny_ratio = tiny_blocks / max(1, len(source_texts))
+    reasons = []
+    if text_chars < max(80, total_pages * 120):
+        reasons.append("文本过少，可能是扫描件或图片型 PDF")
+    if avg_chars_per_page < 180:
+        reasons.append("平均每页文字过少")
+    if mojibake_hits >= 2:
+        reasons.append("检测到明显乱码")
+    if tiny_ratio > 0.35 and len(source_texts) > 30:
+        reasons.append("文本块过碎，版式可能较复杂")
+    return {
+        "total_pages": total_pages,
+        "total_blocks": len(blocks),
+        "text_chars": text_chars,
+        "avg_chars_per_page": round(avg_chars_per_page, 1),
+        "tiny_block_ratio": round(tiny_ratio, 3),
+        "mojibake_hits": mojibake_hits,
+        "needs_cloud": bool(reasons),
+        "reasons": reasons,
+    }
+
+
+def blocks_from_markdown(markdown: str, page_width: float = 595.0, page_height: float = 842.0) -> list[dict]:
+    blocks = []
+    current: list[str] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        text = " ".join(line.strip() for line in current if line.strip()).strip()
+        current.clear()
+        if not text:
+            return
+        index = len(blocks) + 1
+        is_heading = text.startswith("#")
+        cleaned = re.sub(r"^#+\s*", "", text).strip()
+        kind = "heading" if is_heading else "paragraph"
+        blocks.append({
+            "id": f"p1-a{index}",
+            "kind": kind,
+            "type": "text",
+            "source_text": cleaned,
+            "translated_text": "",
+            "bbox": [48, 64 + (index - 1) * 28, page_width - 48, 90 + (index - 1) * 28],
+            "font_size": 15 if is_heading else 12,
+            "font_weight": 700 if is_heading else 400,
+            "align": "left",
+            "skip_translate": False,
+            "translate_policy": "translate",
+            "status": "pending",
+        })
+
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            flush()
+            continue
+        if stripped.startswith(("![](", "![", "<img")):
+            flush()
+            index = len(blocks) + 1
+            blocks.append({
+                "id": f"p1-img{index}",
+                "kind": "caption",
+                "type": "image",
+                "source_text": "图片/图表（已保留原文区域）",
+                "translated_text": "图片/图表（已保留原文区域）",
+                "bbox": [48, 64 + (index - 1) * 28, page_width - 48, 120 + (index - 1) * 28],
+                "font_size": 12,
+                "font_weight": 400,
+                "align": "left",
+                "skip_translate": True,
+                "translate_policy": "copy",
+                "status": "copied",
+            })
+            continue
+        if stripped.startswith("|"):
+            flush()
+            index = len(blocks) + 1
+            blocks.append({
+                "id": f"p1-table{index}",
+                "kind": "caption",
+                "type": "table",
+                "source_text": stripped,
+                "translated_text": stripped,
+                "bbox": [48, 64 + (index - 1) * 28, page_width - 48, 112 + (index - 1) * 28],
+                "font_size": 12,
+                "font_weight": 400,
+                "align": "left",
+                "skip_translate": True,
+                "translate_policy": "copy",
+                "status": "copied",
+            })
+            continue
+        current.append(stripped)
+    flush()
+    return blocks
+
+
+def pages_from_aliyun_result(result: dict, fallback_pages: list[dict]) -> list[dict]:
+    markdown = str(result.get("markdown") or "").strip()
+    if not markdown:
+        return fallback_pages
+    first_page = fallback_pages[0] if fallback_pages else {}
+    width = float(first_page.get("width") or 595)
+    height = float(first_page.get("height") or 842)
+    blocks = blocks_from_markdown(markdown, width, height)
+    return [{
+        "page_number": 1,
+        "width": width,
+        "height": max(height, 120 + len(blocks) * 34),
+        "blocks": blocks,
+    }]
+
+
+def maybe_enhance_pages_with_aliyun(paper: Paper, pages: list[dict], parse_mode: str) -> tuple[list[dict], str, dict]:
+    quality = detect_local_parse_quality(pages)
+    requested = parse_mode == "aliyun"
+    forbidden = parse_mode == "local"
+    summary = {
+        "mode": parse_mode,
+        "local_pages": len(pages or []),
+        "aliyun_pages": 0,
+        "quality": quality,
+        "aliyun_available": settings.aliyun_docmind_available,
+    }
+    if forbidden:
+        summary["decision"] = "local_forced"
+        return pages, "local", summary
+    if not requested and not quality["needs_cloud"]:
+        summary["decision"] = "local_quality_ok"
+        return pages, "local", summary
+    if not settings.aliyun_docmind_available:
+        summary["decision"] = "aliyun_unavailable"
+        summary["warning"] = "阿里云文档智能未启用，已使用本地解析。"
+        return pages, "local", summary
+
+    actual_file = _resolve_paper_file(paper.file_path)
+    if not actual_file or not actual_file.exists():
+        summary["decision"] = "paper_file_missing"
+        summary["warning"] = "论文文件已丢失，无法调用阿里云解析。"
+        return pages, "local", summary
+
+    try:
+        from app.services.docmind import parse_document_with_aliyun
+
+        result = parse_document_with_aliyun(actual_file, high_precision=requested)
+        enhanced_pages = normalize_translation_pages(pages_from_aliyun_result(result, pages))
+        summary["decision"] = "aliyun_used"
+        summary["aliyun_pages"] = len(enhanced_pages)
+        summary["job_id"] = result.get("job_id")
+        return enhanced_pages, "aliyun", summary
+    except Exception as exc:
+        summary["decision"] = "aliyun_failed_fallback_local"
+        summary["warning"] = str(exc)[:300]
+        return pages, "local", summary
+
+
 def run_full_translation_task(translation_id: int, provider_id: int | None) -> None:
     from app.db.session import SessionLocal
     from app.services.llm import translate_full_text_blocks
+    from app.services.machine_translation import get_translation_engine, translate_with_tencent_mt
+    from app.services.termbase import load_termbase
 
     db = SessionLocal()
     try:
         item = db.get(PaperFullTranslation, translation_id)
         if not item:
             return
+        if item.status == "cancelled":
+            return
 
+        translation_engine = get_translation_engine()
         provider = load_active_provider(db, provider_id)
-        if not provider:
+        if translation_engine == "ai" and not provider:
             item.status = "error"
             item.error_message = "没有可用的 AI 厂商，请先在 AI 配置中启用一个。"
             db.add(item)
             db.commit()
             return
 
-        item.provider_id = provider.id
+        terms, termbase_version = load_termbase()
+        item.provider_id = provider.id if provider else None
+        item.translation_engine = translation_engine
+        item.termbase_version = termbase_version
         item.status = "running"
         item.error_message = None
         db.add(item)
         db.commit()
 
-        api_key = decrypt_api_key(provider.encrypted_api_key)
+        api_key = decrypt_api_key(provider.encrypted_api_key) if provider else ""
         pages = deepcopy(item.pages_json or [])
         completed = 0
+        cancelled = False
         batch: list[dict[str, str]] = []
         block_refs: list[dict] = []
 
+        def refresh_cancel_state() -> bool:
+            nonlocal item
+            item = db.get(PaperFullTranslation, translation_id)
+            return not item or item.status == "cancelled"
+
         def flush_batch() -> None:
-            nonlocal completed, batch, block_refs, item, pages
+            nonlocal completed, batch, block_refs, item, pages, cancelled
             if not batch:
                 return
-            translated = translate_full_text_blocks(
-                base_url=provider.base_url,
-                api_key=api_key,
-                model=provider.model,
-                items=batch,
-            )
+            if refresh_cancel_state():
+                cancelled = True
+                batch = []
+                block_refs = []
+                return
+            translated: dict[str, str] = {}
+            if translation_engine == "tencent_mt":
+                try:
+                    translated = translate_with_tencent_mt(items=batch, terms=terms)
+                except Exception:
+                    translated = {}
+            missing_batch = [entry for entry in batch if entry.get("id") not in translated]
+            if missing_batch and provider:
+                translated.update(
+                    translate_full_text_blocks(
+                        base_url=provider.base_url,
+                        api_key=api_key,
+                        model=provider.model,
+                        items=missing_batch,
+                    )
+                )
+            if refresh_cancel_state():
+                cancelled = True
+                batch = []
+                block_refs = []
+                return
             for block in block_refs:
-                block["translated_text"] = translated.get(block.get("id"), block.get("source_text", ""))
+                translated_text = str(translated.get(block.get("id")) or "").strip()
+                if translated_text and (contains_cjk_text(translated_text) or is_allowed_untranslated_block(block, translated_text)):
+                    block["translated_text"] = translated_text
+                    block["status"] = "translated"
+                    block["translation_engine"] = translation_engine
+                else:
+                    block["translated_text"] = ""
+                    block["status"] = "failed"
+                    block["translation_engine"] = translation_engine
             completed += len(batch)
             item = db.get(PaperFullTranslation, translation_id)
             if not item:
+                return
+            if item.status == "cancelled":
+                cancelled = True
+                batch = []
+                block_refs = []
                 return
             item.pages_json = pages
             item.completed_units = completed
@@ -194,22 +538,34 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
 
         for page in pages:
             for block in page.get("blocks") or []:
+                if cancelled:
+                    break
                 source_text = str(block.get("source_text") or "").strip()
-                if block.get("skip_translate") or not source_text:
+                if should_copy_block(block) or not source_text:
                     block["translated_text"] = source_text
+                    block["translate_policy"] = "copy"
+                    block["status"] = "copied"
                     continue
                 batch.append({"id": block.get("id", ""), "text": source_text})
                 block_refs.append(block)
-                if len(batch) >= 10:
+                if len(batch) >= 5:
                     flush_batch()
-        flush_batch()
+            if cancelled:
+                break
+        if not cancelled:
+            flush_batch()
 
         item = db.get(PaperFullTranslation, translation_id)
         if item:
-            item.pages_json = pages
-            item.completed_units = item.total_units
-            item.status = "completed"
-            item.error_message = None
+            if item.status == "cancelled" or cancelled:
+                item.pages_json = pages
+                item.status = "cancelled"
+                item.error_message = item.error_message or "已取消全文翻译。"
+            else:
+                item.pages_json = pages
+                item.completed_units = item.total_units
+                item.status = "completed"
+                item.error_message = None
             db.add(item)
             db.commit()
     except Exception as exc:
@@ -640,24 +996,48 @@ def start_full_translation(
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
 
-    pages = normalize_translation_pages([page.model_dump() for page in payload.pages])
-    computed_hash = get_translation_source_hash(pages)
-    source_hash = payload.source_hash or computed_hash
+    from app.services.machine_translation import get_translation_engine
+    from app.services.termbase import load_termbase
+
+    translation_engine = get_translation_engine()
+    _terms, termbase_version = load_termbase()
+    item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
+    local_pages = normalize_translation_pages([page.model_dump() for page in payload.pages])
+    local_hash = payload.source_hash or get_translation_source_hash(local_pages)
+    if is_completed_translation_cache_hit(
+        item,
+        parse_mode=payload.parse_mode,
+        local_hash=local_hash,
+        translation_engine=translation_engine,
+        termbase_version=termbase_version,
+    ):
+        return build_full_translation_response(item)
+    if item and item.status == "running" and item.source_hash.endswith(local_hash):
+        return build_full_translation_response(item)
+
+    pages, parse_engine, parse_summary = maybe_enhance_pages_with_aliyun(paper, local_pages, payload.parse_mode)
+    parsed_hash = get_translation_source_hash(pages)
+    source_hash = build_translation_cache_key(
+        payload.parse_mode,
+        parse_engine,
+        local_hash if parse_engine == "local" else parsed_hash,
+        translation_engine,
+        termbase_version,
+    )
     total_units = count_translatable_units(pages)
     if total_units <= 0:
         raise HTTPException(status_code=400, detail="没有可翻译的正文内容。")
-
-    item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
-    if item and item.status == "completed" and item.source_hash == source_hash:
-        return build_full_translation_response(item)
-    if item and item.status == "running" and item.source_hash == source_hash:
-        return build_full_translation_response(item)
 
     if not item:
         item = PaperFullTranslation(paper_id=paper_id)
 
     item.provider_id = payload.provider_id
     item.source_hash = source_hash
+    item.parse_mode = payload.parse_mode
+    item.parse_engine = parse_engine
+    item.parse_summary = parse_summary
+    item.translation_engine = translation_engine
+    item.termbase_version = termbase_version
     item.status = "running"
     item.pages_json = pages
     item.completed_units = 0
@@ -684,6 +1064,27 @@ def retry_full_translation(
         db.delete(item)
         db.commit()
     return start_full_translation(paper_id, payload, background_tasks, current_user, db)
+
+
+@router.post("/{paper_id}/full-translation/cancel", response_model=FullTranslationResponse)
+def cancel_full_translation(
+    paper_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> FullTranslationResponse:
+    paper = db.scalar(select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="论文不存在。")
+    item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
+    if not item:
+        return FullTranslationResponse()
+    if item.status == "running":
+        item.status = "cancelled"
+        item.error_message = "已取消全文翻译。"
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+    return build_full_translation_response(item)
 
 
 @router.get("/{paper_id}/full-translation/stream", response_model=FullTranslationResponse)
@@ -717,7 +1118,7 @@ def download_full_translation(
     for page in item.pages_json or []:
         chunks.append(f"\n\n# 第 {page.get('page_number')} 页\n")
         for block in page.get("blocks") or []:
-            text = str(block.get("translated_text") or block.get("source_text") or "").strip()
+            text = get_download_translation_text(block)
             if text:
                 chunks.append(text)
     content = "\n\n".join(chunks).strip()

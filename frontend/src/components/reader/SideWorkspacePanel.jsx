@@ -1,16 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ArrowLeft,
   Bold,
   Bot,
   ChevronDown,
   ChevronUp,
+  ClipboardCopy,
+  FileText,
+  FlaskConical,
+  Highlighter,
   Image as ImageIcon,
+  Layers3,
   LocateFixed,
+  Loader2,
   Minus,
   NotebookPen,
   Palette,
   Plus,
+  Presentation,
+  RefreshCw,
   Save,
+  Sparkles,
   Trash2,
   Type,
 } from 'lucide-react'
@@ -1115,6 +1125,311 @@ function FullTranslatePanelV2() {
   )
 }
 
+const SUMMARY_TYPES = [
+  {
+    id: 'overview',
+    title: '整篇总结',
+    subtitle: '快速理解论文主线、方法、实验和结论',
+    emptyHint: '生成一份结构化总览，适合第一次快速读懂全文。',
+    themeClass: 'summary-theme--overview',
+    Icon: FileText,
+  },
+  {
+    id: 'annotations',
+    title: '我的标注总结',
+    subtitle: '只归纳你高亮、下划线和重点标记过的内容',
+    emptyHint: '把你自己划过的重点重新整理成可复习的摘要。',
+    themeClass: 'summary-theme--annotations',
+    Icon: Highlighter,
+  },
+  {
+    id: 'review',
+    title: '文献综述卡片',
+    subtitle: '研究问题、方法、结果、不足和优点统一成卡',
+    emptyHint: '适合多篇论文横向对比，后面能直接服务综述写作。',
+    themeClass: 'summary-theme--review',
+    Icon: Layers3,
+  },
+  {
+    id: 'reproduction',
+    title: '复现总结',
+    subtitle: '模型结构、数据集、参数、环境和公式逻辑',
+    emptyHint: '给后续实验复现和代码阅读准备一份工程向清单。',
+    themeClass: 'summary-theme--reproduction',
+    Icon: FlaskConical,
+  },
+  {
+    id: 'meeting',
+    title: '组会汇报稿',
+    subtitle: '按研究生组会口径生成可直接开口讲的稿子',
+    emptyHint: '自动整理背景、创新点、实验结果、局限和下周计划。',
+    themeClass: 'summary-theme--meeting',
+    Icon: Presentation,
+  },
+]
+
+const SUMMARY_STATUS_LABELS = {
+  idle: '未生成',
+  generating: '生成中',
+  generated: '已生成',
+  failed: '失败',
+}
+
+function buildSummarySections(typeId, paperTitle) {
+  const safeTitle = paperTitle || '当前文献'
+  const sectionsByType = {
+    overview: [
+      ['论文主要讲什么', `围绕《${safeTitle}》建立全局阅读框架，先抓论文主题、研究对象和核心贡献。`],
+      ['要解决什么问题', '提炼作者想解决的学术痛点、现有方法不足，以及论文为什么有必要做。'],
+      ['用了什么方法', '概括模型、算法、实验流程或理论分析路径，保留关键术语，避免把方法讲散。'],
+      ['做了什么实验', '整理数据来源、对比对象、评价指标和主要实验设置。'],
+      ['得出什么结论', '压缩出论文最重要的发现，并标明哪些结论可以服务你的研究。'],
+      ['论文有哪些不足', '指出适用场景、实验验证、泛化能力和未来工作里的潜在问题。'],
+    ],
+    annotations: [
+      ['标注重点概览', '只读取你标过的高亮、下划线、波浪线内容，生成属于你自己的重点摘要。'],
+      ['方法相关重点', '把标注中的模型、步骤、变量、公式含义集中到一个模块，方便复习。'],
+      ['结果相关重点', '归纳你标出的实验结果、性能提升、对比结论和作者解释。'],
+      ['可继续追问', '根据标注内容生成后续可以问 AI 的问题，帮助继续深读。'],
+    ],
+    review: [
+      ['研究问题', '用一句话说明论文研究的问题、对象和场景。'],
+      ['核心方法', '固定格式整理论文使用的核心方法，便于多篇文献横向比较。'],
+      ['实验结果', '提取关键结果、指标变化、对比结论和有效性证据。'],
+      ['研究不足/空白', '总结论文没解决的问题，为你后续选题和创新点提供入口。'],
+      ['优点', '归纳论文值得借鉴的思路、结构、实验设计或论证方式。'],
+    ],
+    reproduction: [
+      ['模型结构', '抽取网络结构、模块组成、输入输出关系和整体流程。'],
+      ['用到的数据集', '列出数据集、样本来源、划分方式和预处理信息。'],
+      ['实验参数', '整理训练参数、评价指标、消融设置和对比基线。'],
+      ['实验环境', '记录框架、硬件、软件环境等可能影响复现的条件。'],
+      ['关键公式逻辑', '解释公式变量和推导用途，优先服务代码实现和实验复现。'],
+    ],
+    meeting: [
+      ['本周阅读论文简介', `这周阅读了一篇与《${safeTitle}》相关的论文，主要围绕研究问题和方法改进展开。`],
+      ['研究背景 & 现存问题', '用组会口吻说明领域痛点，以及传统方法目前解决不了的地方。'],
+      ['论文核心创新点', '突出导师最关心的创新点：相比旧方法改了哪里，新思路是什么。'],
+      ['研究方法/模型思路', '用大白话讲清楚作者方法从输入到输出的实现流程。'],
+      ['实验结果 & 效果表现', '说明在哪些数据集上验证、效果提升多少、结论是否可靠。'],
+      ['论文不足 & 局限性', '主动总结适用限制、实验不足和未来改进空间。'],
+      ['对自己课题的启发 + 下周计划', '把论文思路连接到自己的课题，并形成下一步阅读或实验计划。'],
+    ],
+  }
+  return (sectionsByType[typeId] || sectionsByType.overview).map(([title, body]) => ({ title, body }))
+}
+
+function formatSummaryMarkdown(type, sections) {
+  return [`# ${type.title}`, ...sections.map((section, index) => `\n## ${String(index + 1).padStart(2, '0')} ${section.title}\n${section.body}`)].join('\n')
+}
+
+function LiteratureSummaryPanel({ fileName, metadata }) {
+  const paperTitle = metadata?.title || buildPaperTitle(fileName)
+  const timersRef = useRef([])
+  const [activeSummaryId, setActiveSummaryId] = useState('')
+  const [summaryState, setSummaryState] = useState(() =>
+    SUMMARY_TYPES.reduce((acc, type) => {
+      acc[type.id] = { status: 'idle', sections: [], updatedAt: '', justCompleted: false }
+      return acc
+    }, {}),
+  )
+
+  useEffect(() => {
+    return () => {
+      timersRef.current.forEach((timerId) => window.clearTimeout(timerId))
+      timersRef.current = []
+    }
+  }, [])
+
+  const activeType = SUMMARY_TYPES.find((type) => type.id === activeSummaryId)
+  const activeSummary = activeType ? summaryState[activeType.id] : null
+  const generatedCount = SUMMARY_TYPES.filter((type) => summaryState[type.id]?.status === 'generated').length
+  const generatingCount = SUMMARY_TYPES.filter((type) => summaryState[type.id]?.status === 'generating').length
+
+  function schedule(callback, delay) {
+    const timerId = window.setTimeout(() => {
+      timersRef.current = timersRef.current.filter((id) => id !== timerId)
+      callback()
+    }, delay)
+    timersRef.current.push(timerId)
+  }
+
+  function finishGenerate(typeId) {
+    setSummaryState((current) => ({
+      ...current,
+      [typeId]: {
+        status: 'generated',
+        sections: buildSummarySections(typeId, paperTitle),
+        updatedAt: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+        justCompleted: true,
+      },
+    }))
+    schedule(() => {
+      setSummaryState((current) => ({
+        ...current,
+        [typeId]: { ...current[typeId], justCompleted: false },
+      }))
+    }, 1000)
+  }
+
+  function beginGenerate(typeId, options = {}) {
+    if (summaryState[typeId]?.status === 'generating') return
+    if (options.open) setActiveSummaryId(typeId)
+    setSummaryState((current) => ({
+      ...current,
+      [typeId]: { ...current[typeId], status: 'generating', justCompleted: false },
+    }))
+    schedule(() => finishGenerate(typeId), options.delay || 760)
+  }
+
+  function handleCardClick(type) {
+    const current = summaryState[type.id]
+    setActiveSummaryId(type.id)
+    if (current?.status === 'idle' || current?.status === 'failed') beginGenerate(type.id, { open: true })
+  }
+
+  function handleRegenerate(typeId) {
+    const current = summaryState[typeId]
+    if (current?.status === 'generated' && !window.confirm('会覆盖当前总结，确定重新生成吗？')) return
+    beginGenerate(typeId, { open: true })
+  }
+
+  function handleGenerateAll() {
+    SUMMARY_TYPES.forEach((type, index) => {
+      const current = summaryState[type.id]
+      if (current?.status === 'generated' || current?.status === 'generating') return
+      schedule(() => beginGenerate(type.id, { delay: 720 }), index * 260)
+    })
+  }
+
+  async function handleCopy(type, sections) {
+    if (!sections.length) return
+    try {
+      await navigator.clipboard.writeText(formatSummaryMarkdown(type, sections))
+    } catch (error) {
+      console.warn('copy summary failed', error)
+    }
+  }
+
+  if (activeType) {
+    const isGenerating = activeSummary?.status === 'generating'
+    const sections = activeSummary?.sections || []
+    const Icon = activeType.Icon
+    return (
+      <div className={`workspace-panel__content summary-panel ${activeType.themeClass}`}>
+        <section className="summary-detail">
+          <div className="summary-detail__hero">
+            <button className="summary-back-btn" type="button" onClick={() => setActiveSummaryId('')}>
+              <ArrowLeft size={16} />
+              <span>返回总结列表</span>
+            </button>
+            <div className="summary-detail__title-row">
+              <div className="summary-detail__icon">
+                <Icon size={22} />
+              </div>
+              <div>
+                <span>AI Literature Summary</span>
+                <h3>{activeType.title}</h3>
+                <p>{activeType.subtitle}</p>
+              </div>
+            </div>
+          </div>
+          <div className="summary-detail__actions">
+            <button className="summary-primary-action" type="button" disabled={isGenerating} onClick={() => handleRegenerate(activeType.id)}>
+              {isGenerating ? <Loader2 size={15} className="summary-spin" /> : <RefreshCw size={15} />}
+              {isGenerating ? '生成中...' : sections.length ? '重新生成' : '生成'}
+            </button>
+            <button className="summary-secondary-action" type="button" disabled={!sections.length || isGenerating} onClick={() => handleCopy(activeType, sections)}>
+              <ClipboardCopy size={15} />
+              复制
+            </button>
+            <button
+              className="summary-secondary-action"
+              type="button"
+              disabled={!sections.length || isGenerating}
+              onClick={() => window.alert('插入阅读笔记入口已预留，下一步会接入笔记树。')}
+            >
+              <NotebookPen size={15} />
+              插入笔记
+            </button>
+          </div>
+          {isGenerating ? (
+            <div className="summary-detail__loading">
+              <Sparkles size={18} />
+              <strong>正在生成结构化总结</strong>
+              <p>先搭建模块骨架，再逐段填充重点内容。</p>
+            </div>
+          ) : null}
+          <div className="summary-section-list">
+            {(sections.length ? sections : buildSummarySections(activeType.id, paperTitle).slice(0, 3)).map((section, index) => (
+              <article className={`summary-section ${!sections.length ? 'is-preview' : ''}`} key={`${section.title}-${index}`} style={{ '--summary-section-index': index }}>
+                <span className="summary-section__index">{String(index + 1).padStart(2, '0')}</span>
+                <div>
+                  <h4>{section.title}</h4>
+                  <p>{sections.length ? section.body : '生成后这里会展示该模块的正式内容。'}</p>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  return (
+    <div className="workspace-panel__content summary-panel">
+      <section className="summary-home">
+        <div className="summary-home__hero">
+          <span>AI SUMMARY CENTER</span>
+          <h3>文献总结</h3>
+          <p>把一篇论文拆成不同用途的总结卡片：速读、标注复盘、综述写作、复现实验和组会汇报。</p>
+          <div className="summary-home__meta">
+            <strong>{generatedCount}/5 已生成</strong>
+            <span>{generatingCount ? `${generatingCount} 个正在生成` : '点击卡片开始生成'}</span>
+          </div>
+          <button className="summary-generate-all" type="button" disabled={generatingCount > 0} onClick={handleGenerateAll}>
+            <Sparkles size={15} />
+            全部生成
+          </button>
+        </div>
+        <div className="summary-card-grid">
+          {SUMMARY_TYPES.map((type) => {
+            const state = summaryState[type.id]
+            const status = state?.status || 'idle'
+            const preview = state?.sections?.[0]?.body || type.emptyHint
+            const Icon = type.Icon
+            return (
+              <button
+                className={`summary-card ${type.themeClass} is-${status} ${state?.justCompleted ? 'is-complete-flash' : ''}`}
+                type="button"
+                key={type.id}
+                onClick={() => handleCardClick(type)}
+              >
+                <div className="summary-card__top">
+                  <span className="summary-card__icon">
+                    <Icon size={19} />
+                  </span>
+                  <span className={`summary-status summary-status--${status}`}>
+                    {status === 'generating' ? <Loader2 size={12} className="summary-spin" /> : null}
+                    {SUMMARY_STATUS_LABELS[status]}
+                  </span>
+                </div>
+                <h4>{type.title}</h4>
+                <p className="summary-card__subtitle">{type.subtitle}</p>
+                <p className={`summary-card__preview ${status === 'idle' ? 'is-muted' : ''}`}>{preview}</p>
+                <div className="summary-card__footer">
+                  <span>{state?.updatedAt ? `更新于 ${state.updatedAt}` : '点击进入详情'}</span>
+                  <Sparkles size={14} />
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function SummaryPanel() {
   return (
     <div className="workspace-panel__content summary-panel">
@@ -1193,7 +1508,7 @@ export function SideWorkspacePanel({
         />
       ) : null}
       {activePanel === 'words' ? <FullTranslatePanel /> : null}
-      {activePanel === 'summary' ? <SummaryPanel /> : null}
+      {activePanel === 'summary' ? <LiteratureSummaryPanel fileName={fileName} metadata={metadata} /> : null}
     </aside>
   )
 }

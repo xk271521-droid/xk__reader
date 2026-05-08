@@ -39,6 +39,8 @@ export function PaperReader({
   fullTranslateActive,
   fullTranslateStatus,
   fullTranslateProgress,
+  fullTranslateParseMode,
+  onFullTranslateParseModeChange,
   onFullTranslate,
 }) {
   return (
@@ -66,6 +68,8 @@ export function PaperReader({
         fullTranslateActive={fullTranslateActive}
         fullTranslateStatus={fullTranslateStatus}
         fullTranslateProgress={fullTranslateProgress}
+        fullTranslateParseMode={fullTranslateParseMode}
+        onFullTranslateParseModeChange={onFullTranslateParseModeChange}
         onFullTranslate={onFullTranslate}
       />
 

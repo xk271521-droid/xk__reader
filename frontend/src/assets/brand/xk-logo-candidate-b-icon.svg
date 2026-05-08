@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">xk 阅读候选 B 图标</title>
+  <desc id="desc">抽象 PDF 双页与金色 AI 光路。</desc>
+  <defs>
+    <radialGradient id="b-glow" cx="35%" cy="26%" r="72%">
+      <stop offset="0" stop-color="#473b22"/>
+      <stop offset=".5" stop-color="#181917"/>
+      <stop offset="1" stop-color="#080908"/>
+    </radialGradient>
+    <linearGradient id="b-page" x1="138" y1="110" x2="370" y2="400" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff8e8"/>
+      <stop offset="1" stop-color="#e9dcc0"/>
+    </linearGradient>
+    <linearGradient id="b-gold" x1="120" y1="354" x2="395" y2="142" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8b5f13"/>
+      <stop offset=".48" stop-color="#d8aa3d"/>
+      <stop offset="1" stop-color="#fff1af"/>
+    </linearGradient>
+    <filter id="b-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="20" stdDeviation="22" flood-color="#000" flood-opacity=".38"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#b-glow)"/>
+  <path d="M96 118c46-25 99-25 160 0v278c-61-26-114-26-160 0V118z" fill="#f2e7ce" opacity=".92"/>
+  <path d="M256 118c61-25 114-25 160 0v278c-46-26-99-26-160 0V118z" fill="url(#b-page)"/>
+  <path d="M256 118v278" stroke="#c49a42" stroke-width="6" stroke-linecap="round" opacity=".72"/>
+  <g filter="url(#b-shadow)">
+    <path d="M150 184h70M150 224h60M292 184h78M292 224h58M292 264h82" stroke="#1c1d18" stroke-width="14" stroke-linecap="round" opacity=".82"/>
+    <path d="M124 326c57 3 101-19 137-67 35-46 74-66 126-59" fill="none" stroke="url(#b-gold)" stroke-width="16" stroke-linecap="round"/>
+    <circle cx="124" cy="326" r="15" fill="#d8aa3d"/>
+    <circle cx="260" cy="260" r="11" fill="#fff1af"/>
+    <circle cx="387" cy="200" r="15" fill="#d8aa3d"/>
+  </g>
+  <path d="M116 407c72-23 204-23 280 0" fill="none" stroke="#d8aa3d" stroke-width="5" stroke-linecap="round" opacity=".34"/>
+</svg>

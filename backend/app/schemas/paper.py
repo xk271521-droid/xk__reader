@@ -82,6 +82,7 @@ class PaperMetadata(BaseModel):
 class FullTranslationBlock(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     kind: str = Field(default="paragraph", max_length=40)
+    type: str = Field(default="text", max_length=40)
     source_text: str = Field(default="", max_length=5000)
     translated_text: str = Field(default="", max_length=8000)
     bbox: list[float] = Field(default_factory=list, max_length=4)
@@ -89,6 +90,10 @@ class FullTranslationBlock(BaseModel):
     font_weight: int = 400
     align: str = Field(default="left", max_length=20)
     skip_translate: bool = False
+    translate_policy: str = Field(default="translate", max_length=24)
+    status: str = Field(default="pending", max_length=24)
+    asset_url: str | None = Field(default=None, max_length=1000)
+    snapshot_url: str | None = Field(default=None, max_length=1000)
 
 
 class FullTranslationPage(BaseModel):
@@ -102,13 +107,20 @@ class FullTranslationStartRequest(BaseModel):
     source_hash: str = Field(min_length=8, max_length=64)
     pages: list[FullTranslationPage] = Field(default_factory=list, min_length=1)
     provider_id: int | None = Field(default=None, ge=1)
+    parse_mode: Literal["auto", "local", "aliyun"] = "auto"
 
 
 class FullTranslationResponse(BaseModel):
-    status: Literal["idle", "running", "completed", "error"] = "idle"
+    status: Literal["idle", "running", "completed", "error", "cancelled"] = "idle"
     source_hash: str = ""
     pages: list[dict[str, Any]] = Field(default_factory=list)
     completed_units: int = 0
     total_units: int = 0
     error_message: str | None = None
     provider_id: int | None = None
+    parse_mode: str = "auto"
+    parse_engine: str = "local"
+    parse_summary: dict[str, Any] = Field(default_factory=dict)
+    translation_engine: str = "ai"
+    termbase_version: str = ""
+    failed_blocks_count: int = 0

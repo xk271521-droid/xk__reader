@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 360" role="img" aria-labelledby="title desc">
+  <title id="title">xk 阅读候选 C 横向 Logo</title>
+  <desc id="desc">知识树图标与 xk 阅读文字组合。</desc>
+  <defs>
+    <linearGradient id="c-bg" x1="43" y1="38" x2="321" y2="326" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2b2b25"/>
+      <stop offset=".52" stop-color="#121310"/>
+      <stop offset="1" stop-color="#2c2416"/>
+    </linearGradient>
+    <linearGradient id="c-gold" x1="85" y1="64" x2="235" y2="244" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff2bd"/>
+      <stop offset=".5" stop-color="#d7a83c"/>
+      <stop offset="1" stop-color="#835912"/>
+    </linearGradient>
+  </defs>
+  <rect width="1180" height="360" rx="42" fill="#f7f1e4"/>
+  <g transform="translate(42 40)">
+    <rect width="280" height="280" rx="64" fill="url(#c-bg)"/>
+    <path d="M83 72c0-12 10-22 22-22h90c12 0 22 10 22 22v136c0 12-10 22-22 22h-90c-12 0-22-10-22-22V72z" fill="#f6edd9"/>
+    <path d="M111 101h78M111 124h52M111 187h78" stroke="#22231d" stroke-width="8" stroke-linecap="round" opacity=".78"/>
+    <path d="M150 80v127M150 143l-43 33M150 143l43 33M150 120l-37-25M150 120l36-25" stroke="url(#c-gold)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="150" cy="120" r="10" fill="#d7a83c"/>
+    <circle cx="150" cy="143" r="10" fill="#fff2bd"/>
+    <circle cx="113" cy="95" r="8" fill="#d7a83c"/>
+    <circle cx="186" cy="95" r="8" fill="#d7a83c"/>
+    <circle cx="107" cy="176" r="8" fill="#d7a83c"/>
+    <circle cx="193" cy="176" r="8" fill="#d7a83c"/>
+  </g>
+  <text x="370" y="170" fill="#151610" font-family="'Microsoft YaHei UI','PingFang SC','Source Han Sans SC',sans-serif" font-size="92" font-weight="850" letter-spacing="-2">xk 阅读</text>
+  <text x="374" y="232" fill="#7d622b" font-family="'Microsoft YaHei UI','PingFang SC','Source Han Sans SC',sans-serif" font-size="30" font-weight="500" letter-spacing="6">READ · TRANSLATE · THINK</text>
+  <path d="M374 264h255" stroke="#d7a83c" stroke-width="5" stroke-linecap="round"/>
+  <path d="M651 264h72" stroke="#151610" stroke-width="5" stroke-linecap="round" opacity=".72"/>
+</svg>

@@ -14,6 +14,10 @@ export function useResizableWidth({ initialWidth, minWidth, maxWidth }) {
   const frameRef = useRef(0)
   const latestClientXRef = useRef(0)
 
+  useEffect(() => {
+    setWidth((current) => clampWidth(current, minWidth, maxWidth))
+  }, [maxWidth, minWidth])
+
   const handlePointerMove = useCallback((event) => {
     if (!resizeStateRef.current) return
 

@@ -30,6 +30,12 @@ const downloadItems = [
   { id: 'mla', label: 'MLA 引文' },
 ]
 
+const parseModeItems = [
+  { id: 'auto', label: '自动解析' },
+  { id: 'local', label: '仅本地' },
+  { id: 'aliyun', label: '阿里云增强' },
+]
+
 function ToolbarIconButton({ children, label, onClick, active = false, disabled = false }) {
   return (
     <button
@@ -67,6 +73,8 @@ export function PdfToolbar({
   fullTranslateActive = false,
   fullTranslateStatus = 'idle',
   fullTranslateProgress = 0,
+  fullTranslateParseMode = 'auto',
+  onFullTranslateParseModeChange,
   onFullTranslate,
 }) {
   const downloadWrapRef = useRef(null)
@@ -149,9 +157,25 @@ export function PdfToolbar({
           <span>
             {fullTranslateStatus === 'running'
               ? `翻译中 ${Math.round(fullTranslateProgress || 0)}%`
-              : '全文·翻译'}
+              : fullTranslateStatus === 'cancelled'
+                ? '已取消'
+                : '全文·翻译'}
           </span>
         </button>
+
+        <select
+          className="toolbar-parse-mode"
+          title="全文翻译解析方式"
+          aria-label="全文翻译解析方式"
+          value={fullTranslateParseMode || 'auto'}
+          onChange={(event) => onFullTranslateParseModeChange?.(event.target.value)}
+        >
+          {parseModeItems.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.label}
+            </option>
+          ))}
+        </select>
 
         <div className="toolbar-download" ref={downloadWrapRef}>
           <button
