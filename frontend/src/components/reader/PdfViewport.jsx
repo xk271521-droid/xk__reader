@@ -13,19 +13,22 @@ import {
   findLineAtPoint,
   findSelectionBoundaryAtPoint,
   findWordAtPoint,
+  formatRangeTextForCopy,
   getDecorationRectsForRange,
   getHighlightRectsForRange,
   getPageTextSlice,
   getLineRectsForRange,
+  getSearchRectsForRange,
   isPointInsideRect,
 } from './pdfSelectionModel'
 
 const PAGE_OVERSCAN = 2
 const DRAG_START_DISTANCE = 2
 const DEFAULT_ANNOTATION_COLOR = '#F2B800'
+const DEFAULT_INK_OPTIONS = { color: '#15803D', opacity: 0.85, strokeWidth: 6 }
 
 function getPageFrameFromElement(element) {
-  return element instanceof HTMLElement
+  return element && typeof element.closest === 'function'
     ? element.closest('.pdf-page-frame')
     : null
 }
@@ -37,6 +40,7 @@ function createEmptySelection() {
     startChar: 0,
     endChar: 0,
     text: '',
+    copyText: '',
     rects: [],
     anchorRect: null,
     contextBefore: '',
@@ -61,6 +65,7 @@ function buildSelectionFromChars(pageIndex, pageNumber, startChar, endChar) {
     orderedEnd = Math.min(pageIndex.length, orderedStart + 1)
   }
   const text = getPageTextSlice(pageIndex, orderedStart, orderedEnd)
+  const copyText = formatRangeTextForCopy(pageIndex, orderedStart, orderedEnd)
   const rects = getLineRectsForRange(pageIndex, orderedStart, orderedEnd)
   if (!text.trim() || rects.length === 0) {
     return createEmptySelection()
@@ -72,11 +77,70 @@ function buildSelectionFromChars(pageIndex, pageNumber, startChar, endChar) {
     startChar: orderedStart,
     endChar: orderedEnd,
     text,
+    copyText,
     rects,
     anchorRect: rects[0] || null,
     contextBefore: pageIndex.fullText.slice(Math.max(0, orderedStart - 120), orderedStart),
     contextAfter: pageIndex.fullText.slice(orderedEnd, Math.min(pageIndex.length, orderedEnd + 120)),
   }
+}
+
+function compactFocusText(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+function buildCompactPageTextMap(pageIndex) {
+  const chars = []
+  const indexes = []
+  for (const item of pageIndex?.chars || []) {
+    const normalized = compactFocusText(item.char)
+    if (!normalized) continue
+    for (const char of normalized) {
+      chars.push(char)
+      indexes.push(item.index)
+    }
+  }
+  return {
+    text: chars.join(''),
+    indexes,
+  }
+}
+
+function findRangeForQuote(pageIndex, quote) {
+  const target = compactFocusText(quote)
+  if (!pageIndex || target.length < 8) return null
+  const compactPage = buildCompactPageTextMap(pageIndex)
+  if (!compactPage.text) return null
+
+  const candidates = [target]
+  for (const length of [180, 140, 100, 70, 45, 28]) {
+    if (target.length > length) candidates.push(target.slice(0, length))
+  }
+
+  for (const candidate of candidates) {
+    if (candidate.length < 8) continue
+    const compactStart = compactPage.text.indexOf(candidate)
+    if (compactStart < 0) continue
+    const compactEnd = compactStart + candidate.length - 1
+    const startChar = compactPage.indexes[compactStart]
+    const endChar = compactPage.indexes[compactEnd] + 1
+    if (startChar == null || endChar == null || endChar <= startChar) continue
+    return { startChar, endChar }
+  }
+  return null
+}
+
+function resolveFocusRange(pageIndex, focus) {
+  if (!pageIndex || !focus) return null
+  const startChar = focus.startChar ?? focus.start_char
+  const endChar = focus.endChar ?? focus.end_char
+  if (startChar != null && endChar != null && endChar > startChar) {
+    return { startChar, endChar }
+  }
+  return findRangeForQuote(pageIndex, focus.quote || focus.quote_text || '')
 }
 
 function getRangeFromBoxSelection(pageIndex, pageNumber, rect, pageAnnotations = []) {
@@ -102,11 +166,72 @@ function getRangeFromBoxSelection(pageIndex, pageNumber, rect, pageAnnotations =
   })
 
   if (touchedChars.length === 0) return null
-  return {
-    pageNumber,
-    startChar: Math.min(...touchedChars.map((char) => char.index)),
-    endChar: Math.max(...touchedChars.map((char) => char.index)) + 1,
+  return splitCharsIntoLineRanges(touchedChars, pageNumber)
+}
+
+function splitCharsIntoLineRanges(chars, pageNumber) {
+  const groups = new Map()
+  for (const char of chars) {
+    const lineIndex = char.lineIndex ?? -1
+    if (!groups.has(lineIndex)) groups.set(lineIndex, [])
+    groups.get(lineIndex).push(char)
   }
+
+  return Array.from(groups.entries())
+    .sort(([leftLine], [rightLine]) => leftLine - rightLine)
+    .flatMap(([, lineChars]) => {
+      const ordered = [...lineChars].sort((left, right) => left.index - right.index)
+      const ranges = []
+      let current = null
+      for (const char of ordered) {
+        if (!current || char.index > current.endChar) {
+          current = {
+            pageNumber,
+            startChar: char.index,
+            endChar: char.index + 1,
+          }
+          ranges.push(current)
+          continue
+        }
+        current.endChar = Math.max(current.endChar, char.index + 1)
+      }
+      return ranges
+    })
+}
+
+function inkStrokeIntersectsRect(stroke, rect) {
+  if (!stroke?.points?.length || !rect) return false
+  const points = stroke.points.filter((point) =>
+    point &&
+    Number.isFinite(point.x) &&
+    Number.isFinite(point.y),
+  )
+  if (!points.length) return false
+  if (points.some((point) => isPointInsideRect(point.x, point.y, rect, 0.004))) {
+    return true
+  }
+
+  const left = rect.left
+  const right = rect.left + rect.width
+  const top = rect.top
+  const bottom = rect.top + rect.height
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1]
+    const current = points[index]
+    const segmentLeft = Math.min(previous.x, current.x)
+    const segmentRight = Math.max(previous.x, current.x)
+    const segmentTop = Math.min(previous.y, current.y)
+    const segmentBottom = Math.max(previous.y, current.y)
+    if (
+      segmentRight >= left - 0.004 &&
+      segmentLeft <= right + 0.004 &&
+      segmentBottom >= top - 0.004 &&
+      segmentTop <= bottom + 0.004
+    ) {
+      return true
+    }
+  }
+  return false
 }
 
 function buildEraserPreview(pageIndex, pageNumber, startChar, endChar) {
@@ -180,6 +305,30 @@ function normalizeDragRect(start, end) {
   }
 }
 
+function simplifyInkPoints(points = []) {
+  const simplified = []
+  let previous = null
+  for (const point of points) {
+    const next = {
+      x: clampUnit(point.x),
+      y: clampUnit(point.y),
+    }
+    if (!previous || Math.hypot(next.x - previous.x, next.y - previous.y) >= 0.0018) {
+      simplified.push(next)
+      previous = next
+    }
+  }
+  return simplified
+}
+
+function normalizeInkPoint(event, pageFrame) {
+  const point = normalizePointer(event, pageFrame)
+  return {
+    x: clampUnit(point.x),
+    y: clampUnit(point.y),
+  }
+}
+
 export function PdfViewport({
   activeTool,
   error,
@@ -199,10 +348,14 @@ export function PdfViewport({
   onVisiblePageChange,
   onWheelZoom,
   annotations = [],
+  inkAnnotations = [],
+  inkOptions = DEFAULT_INK_OPTIONS,
   currentPaperId,
   onCreateAnnotation,
   onDeleteAnnotation,
   onEraseAnnotationRange,
+  onCreateInkAnnotation,
+  onDeleteInkAnnotation,
   onInsertSelectionNote,
   onAskAI,
   onScreenshotTranslate,
@@ -217,6 +370,7 @@ export function PdfViewport({
   const onVisiblePageChangeRef = useRef(onVisiblePageChange)
   const pointerSelectionRef = useRef(null)
   const eraserStrokeRef = useRef(null)
+  const inkStrokeRef = useRef(null)
   const screenshotDragRef = useRef(null)
   const pinnedDragRef = useRef(null)
   const currentSelectionRef = useRef(createEmptySelection())
@@ -226,6 +380,7 @@ export function PdfViewport({
   const [screenshotSelection, setScreenshotSelection] = useState(null)
   const [pinnedScreenshots, setPinnedScreenshots] = useState([])
   const [eraserPreview, setEraserPreview] = useState(createEmptyEraserPreview())
+  const [drawingInkStroke, setDrawingInkStroke] = useState(null)
   const [selectionState, setSelectionState] = useState(createEmptySelection())
   const [searchFlashNonce, setSearchFlashNonce] = useState(0)
   const activeSearchMatch = matchIndex >= 0 ? matches[matchIndex] : null
@@ -243,6 +398,16 @@ export function PdfViewport({
     }
     return map
   }, [annotations])
+
+  const inkAnnotationsByPage = useMemo(() => {
+    const map = new Map()
+    for (const annotation of inkAnnotations || []) {
+      const pageNum = annotation.page_number ?? annotation.pageNumber
+      if (!map.has(pageNum)) map.set(pageNum, [])
+      map.get(pageNum).push(annotation)
+    }
+    return map
+  }, [inkAnnotations])
 
   const searchMatchesByPage = useMemo(() => {
     const map = new Map()
@@ -262,16 +427,17 @@ export function PdfViewport({
   function getRenderableAnnotations(pageNum) {
     const pageIndex = pageIndexesRef.current.get(pageNum)
     const pageAnnotations = annotationsByPage.get(pageNum) || []
-    const renderedAnnotations = pageAnnotations.map((annotation) => ({
+    const renderSourceAnnotations = mergeRenderableAnnotationRanges(pageAnnotations)
+    const renderedAnnotations = renderSourceAnnotations.map((annotation) => ({
       ...annotation,
-      rects: pageIndex && (annotation.geometry_version || 'v1') === 'v2'
+      rects: pageIndex && ['v2', 'v3'].includes(annotation.geometry_version || 'v1')
         ? annotation.type === 'highlight'
           ? getHighlightRectsForRange(pageIndex, annotation.start_char, annotation.end_char)
           : getLineRectsForRange(pageIndex, annotation.start_char, annotation.end_char)
         : (annotation.rects || []),
       decorationRects:
         pageIndex &&
-        (annotation.geometry_version || 'v1') === 'v2' &&
+        ['v2', 'v3'].includes(annotation.geometry_version || 'v1') &&
         (annotation.type === 'underline' || annotation.type === 'wavy_underline')
         ? getDecorationRectsForRange(pageIndex, annotation.start_char, annotation.end_char)
         : [],
@@ -291,26 +457,66 @@ export function PdfViewport({
         start_char: match.startChar,
         end_char: match.endChar,
         quote_text: '',
-        rects: getLineRectsForRange(pageIndex, match.startChar, match.endChar),
+        rects: getSearchRectsForRange(pageIndex, match.startChar, match.endChar),
         type: isCurrent ? 'search_current' : 'search',
         color: null,
       }
     })
 
-    const renderedNoteFocus = pageIndex && noteFocus?.pageNumber === pageNum
+    const noteFocusRange = pageIndex && noteFocus?.pageNumber === pageNum
+      ? resolveFocusRange(pageIndex, noteFocus)
+      : null
+    const renderedNoteFocus = pageIndex && noteFocusRange
       ? [{
         id: `note-focus:${noteFocus.nonce}`,
         page_number: pageNum,
-        start_char: noteFocus.startChar,
-        end_char: noteFocus.endChar,
+        start_char: noteFocusRange.startChar,
+        end_char: noteFocusRange.endChar,
         quote_text: '',
-        rects: getLineRectsForRange(pageIndex, noteFocus.startChar, noteFocus.endChar),
+        rects: getLineRectsForRange(pageIndex, noteFocusRange.startChar, noteFocusRange.endChar),
         type: 'note_focus',
         color: null,
       }]
       : []
 
     return [...renderedAnnotations, ...renderedSearchMatches, ...renderedNoteFocus]
+  }
+
+  function mergeRenderableAnnotationRanges(pageAnnotations = []) {
+    const groups = new Map()
+    const renderAnnotations = []
+
+    for (const annotation of pageAnnotations) {
+      if (!['highlight', 'underline', 'wavy_underline'].includes(annotation.type)) {
+        renderAnnotations.push(annotation)
+        continue
+      }
+      const key = [
+        annotation.page_number,
+        annotation.type,
+        annotation.color || '',
+        annotation.geometry_version || 'v1',
+      ].join(':')
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(annotation)
+    }
+
+    for (const group of groups.values()) {
+      group.sort((left, right) => left.start_char - right.start_char || left.end_char - right.end_char)
+      let current = null
+      for (const annotation of group) {
+        if (current && annotation.start_char <= current.end_char) {
+          current.end_char = Math.max(current.end_char, annotation.end_char)
+          current.quote_text = [current.quote_text, annotation.quote_text].filter(Boolean).join(' ')
+          current.rects = [...(current.rects || []), ...(annotation.rects || [])]
+          continue
+        }
+        current = { ...annotation, id: `merged:${annotation.id}` }
+        renderAnnotations.push(current)
+      }
+    }
+
+    return renderAnnotations
   }
 
   const visiblePages = useMemo(() => {
@@ -327,7 +533,7 @@ export function PdfViewport({
     setSelectionState(selection)
     if (shouldNotify && selection.visible) {
       onSelect?.({
-        text: selection.text,
+        text: selection.copyText || selection.text,
         pageNumber: selection.pageNumber,
         startChar: selection.startChar,
         endChar: selection.endChar,
@@ -431,7 +637,7 @@ export function PdfViewport({
     if (!extractedSelection.visible && !options.allowImageOnly) return null
     if (!extractedSelection.visible && !capture?.dataUrl) return null
     return {
-      text: extractedSelection.visible ? extractedSelection.text : '',
+      text: extractedSelection.visible ? (extractedSelection.copyText || extractedSelection.text) : '',
       imageUrl: capture?.dataUrl || null,
       pageNumber: extractedSelection.visible ? extractedSelection.pageNumber : selection.pageNumber,
       startChar: extractedSelection.visible ? extractedSelection.startChar : null,
@@ -556,13 +762,16 @@ export function PdfViewport({
 
   function scrollToNoteFocus(focus, behavior = 'smooth') {
     const container = readerRef.current
-    if (!container || !focus?.pageNumber || focus.startChar == null || focus.endChar == null) return false
+    if (!container || !focus?.pageNumber) return false
 
     const pageFrame = container.querySelector(`[data-page-number="${focus.pageNumber}"]`)
     const pageIndex = pageIndexesRef.current.get(focus.pageNumber)
     if (!pageFrame || !pageIndex) return false
 
-    const rects = getLineRectsForRange(pageIndex, focus.startChar, focus.endChar)
+    const focusRange = resolveFocusRange(pageIndex, focus)
+    if (!focusRange) return false
+
+    const rects = getLineRectsForRange(pageIndex, focusRange.startChar, focusRange.endChar)
     const firstRect = rects[0]
     if (!firstRect) return false
 
@@ -647,7 +856,7 @@ export function PdfViewport({
 
   function getAnnotationHitRects(annotation, pageIndex) {
     if (!annotation) return []
-    if (!pageIndex || (annotation.geometry_version || 'v1') !== 'v2') {
+    if (!pageIndex || !['v2', 'v3'].includes(annotation.geometry_version || 'v1')) {
       return [...(annotation.rects || [])]
     }
 
@@ -712,47 +921,49 @@ export function PdfViewport({
   function expandRangesForPreview(pageIndex, ranges = []) {
     if (!pageIndex) return ranges
 
-    const expanded = []
-    const ordered = mergeRanges(ranges)
-    for (const range of ordered) {
+    const byLine = new Map()
+    const looseRanges = []
+    for (const range of mergeRanges(ranges)) {
       const startChar = pageIndex.chars?.[range.startChar]
       const endChar = pageIndex.chars?.[Math.max(range.startChar, range.endChar - 1)]
-      if (!startChar || !endChar || startChar.lineIndex !== endChar.lineIndex) {
-        expanded.push(range)
+      const lineIndex = startChar?.lineIndex === endChar?.lineIndex ? startChar?.lineIndex : null
+      if (lineIndex == null || lineIndex < 0) {
+        looseRanges.push(range)
         continue
       }
-
-      const line = pageIndex.lines?.[startChar.lineIndex]
-      if (!line) {
-        expanded.push(range)
-        continue
-      }
-
-      const lineChars = line.charIndices
-        .map((index) => pageIndex.chars[index])
-        .filter((char) => char?.rect)
-        .sort((left, right) => left.index - right.index)
-      const visibleChars = lineChars.filter((char) => !/\s/.test(char.char))
-      if (visibleChars.length === 0) {
-        expanded.push(range)
-        continue
-      }
-
-      const startIndex = visibleChars.findIndex((char) => char.index >= range.startChar)
-      const endIndex = [...visibleChars].reverse().findIndex((char) => char.index < range.endChar)
-      const normalizedStartIndex = startIndex >= 0 ? startIndex : 0
-      const normalizedEndIndex = endIndex >= 0 ? visibleChars.length - 1 - endIndex : visibleChars.length - 1
-      const first = visibleChars[Math.max(0, normalizedStartIndex - 1)] || visibleChars[0]
-      const last = visibleChars[Math.min(visibleChars.length - 1, normalizedEndIndex + 1)] || visibleChars[visibleChars.length - 1]
-
-      expanded.push({
-        pageNumber: range.pageNumber,
-        startChar: Math.min(first.index, range.startChar),
-        endChar: Math.max(last.index + 1, range.endChar),
-      })
+      if (!byLine.has(lineIndex)) byLine.set(lineIndex, [])
+      byLine.get(lineIndex).push(range)
     }
 
-    return mergeRanges(expanded)
+    const previewRanges = [...looseRanges]
+    for (const lineRanges of byLine.values()) {
+      const ordered = [...lineRanges].sort((left, right) => left.startChar - right.startChar)
+      let current = null
+      for (const range of ordered) {
+        if (!current) {
+          current = { ...range }
+          continue
+        }
+
+        const previousChar = pageIndex.chars?.[Math.max(current.startChar, current.endChar - 1)]
+        const nextChar = pageIndex.chars?.[range.startChar]
+        const charGap = Math.max(0, range.startChar - current.endChar)
+        const visualGap = previousChar?.rect && nextChar?.rect
+          ? Math.max(0, nextChar.rect.left - (previousChar.rect.left + previousChar.rect.width))
+          : 0
+
+        if (charGap <= 8 || visualGap <= 0.04) {
+          current.endChar = Math.max(current.endChar, range.endChar)
+          continue
+        }
+
+        previewRanges.push(current)
+        current = { ...range }
+      }
+      if (current) previewRanges.push(current)
+    }
+
+    return mergeRanges(previewRanges)
   }
 
   function getEraserSampleRanges(pageIndex, pageAnnotations, fromPoint, toPoint) {
@@ -896,23 +1107,95 @@ export function PdfViewport({
     const pageIndex = pageIndexesRef.current.get(selection.pageNumber)
     const pageAnnotations = (annotationsByPage.get(selection.pageNumber) || [])
       .filter((annotation) => annotation.type === 'highlight' || annotation.type === 'underline' || annotation.type === 'wavy_underline')
-    const range = getRangeFromBoxSelection(pageIndex, selection.pageNumber, selection.rect, pageAnnotations)
+    const ranges = getRangeFromBoxSelection(pageIndex, selection.pageNumber, selection.rect, pageAnnotations)
+    const pageInkAnnotations = (inkAnnotationsByPage.get(selection.pageNumber) || [])
+      .filter((stroke) => inkStrokeIntersectsRect(stroke, selection.rect))
     clearScreenshotSelection()
-    if (!range || !pageAnnotations.some((annotation) => annotationIntersectsRange(annotation, range, pageIndex))) {
+    await Promise.all(
+      pageInkAnnotations.map((stroke) => onDeleteInkAnnotation?.(stroke.id)),
+    )
+    const activeRanges = (ranges || []).filter((range) =>
+      pageAnnotations.some((annotation) => annotationIntersectsRange(annotation, range, pageIndex)),
+    )
+    if (!activeRanges.length) {
       return
     }
 
-    await onEraseAnnotationRange?.({
-      pageNumber: range.pageNumber,
-      startChar: range.startChar,
-      endChar: range.endChar,
-      eraseSessionId: `box:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    const eraseSessionId = `box:${Date.now()}:${Math.random().toString(36).slice(2)}`
+    for (const range of activeRanges) {
+      await onEraseAnnotationRange?.({
+        pageNumber: range.pageNumber,
+        startChar: range.startChar,
+        endChar: range.endChar,
+        eraseSessionId,
+      })
+    }
+  }
+
+  async function commitInkStroke() {
+    const stroke = inkStrokeRef.current
+    inkStrokeRef.current = null
+    setDrawingInkStroke(null)
+
+    if (!stroke?.points?.length || stroke.points.length < 2) {
+      return
+    }
+
+    const points = simplifyInkPoints(stroke.points)
+    if (points.length < 2) return
+
+    await onCreateInkAnnotation?.({
+      pageNumber: stroke.pageNumber,
+      color: stroke.color,
+      opacity: stroke.opacity,
+      strokeWidth: stroke.strokeWidth,
+      points,
     })
+  }
+
+  function handleInkPointerDown(event, pageNumberFromOverlay = null) {
+    if (activeTool !== 'ink') return
+    const pageFrame = getPageFrameFromElement(event.currentTarget || event.target)
+    if (!pageFrame) return
+    const pageNum = pageNumberFromOverlay || Number(pageFrame.dataset.pageNumber || '0')
+    if (!pageNum) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget?.setPointerCapture?.(event.pointerId)
+    window.getSelection()?.removeAllRanges()
+    clearSelection()
+    clearScreenshotSelection()
+    clearEraserPreview()
+
+    const point = normalizeInkPoint(event, pageFrame)
+    const nextStroke = {
+      pageNumber: pageNum,
+      color: inkOptions.color || DEFAULT_INK_OPTIONS.color,
+      opacity: inkOptions.opacity ?? DEFAULT_INK_OPTIONS.opacity,
+      strokeWidth: inkOptions.strokeWidth ?? DEFAULT_INK_OPTIONS.strokeWidth,
+      points: [point],
+    }
+    inkStrokeRef.current = {
+      ...nextStroke,
+      pageFrame,
+      pointerId: event.pointerId,
+    }
+    setDrawingInkStroke(nextStroke)
+  }
+
+  function handleInkErase(stroke) {
+    if (activeTool !== 'eraser') return
+    onDeleteInkAnnotation?.(stroke.id)
   }
 
   function handleMouseDown(event) {
     if (event.detail === 3) {
       handleTripleClick(event)
+      return
+    }
+
+    if (activeTool === 'ink') {
       return
     }
 
@@ -973,6 +1256,7 @@ export function PdfViewport({
       pageNum: resolved.pageNum,
       pageIndex: resolved.pageIndex,
       blockIndex: resolved.boundary.blockIndex,
+      columnId: resolved.boundary.columnId,
       anchorBoundary: resolved.boundary,
       startChar: resolved.boundary.charIndex,
       endChar: resolved.boundary.charIndex,
@@ -985,6 +1269,29 @@ export function PdfViewport({
   }
 
   function handleMouseMove(event) {
+    if (activeTool === 'ink' && inkStrokeRef.current?.pageFrame) {
+      const stroke = inkStrokeRef.current
+      if (stroke.pointerId != null && event.pointerId != null && stroke.pointerId !== event.pointerId) {
+        return
+      }
+      event.preventDefault()
+      const point = normalizeInkPoint(event, stroke.pageFrame)
+      const previous = stroke.points[stroke.points.length - 1]
+      if (previous && Math.hypot(point.x - previous.x, point.y - previous.y) < 0.0012) {
+        return
+      }
+      stroke.points = [...stroke.points, point]
+      inkStrokeRef.current = stroke
+      setDrawingInkStroke({
+        pageNumber: stroke.pageNumber,
+        color: stroke.color,
+        opacity: stroke.opacity,
+        strokeWidth: stroke.strokeWidth,
+        points: stroke.points,
+      })
+      return
+    }
+
     if (activeTool === 'eraser' && eraserStrokeRef.current?.active) {
       event.preventDefault()
       updateEraserPreviewAtPointer(event)
@@ -1007,15 +1314,16 @@ export function PdfViewport({
       if (activeTool === 'erase_box') {
         const pageAnnotations = (annotationsByPage.get(current.pageNum) || [])
           .filter((annotation) => annotation.type === 'highlight' || annotation.type === 'underline' || annotation.type === 'wavy_underline')
-        const range = getRangeFromBoxSelection(pageIndexesRef.current.get(current.pageNum), current.pageNum, rect, pageAnnotations)
-        const previewRects = range
-          ? getLineRectsForRange(pageIndexesRef.current.get(current.pageNum), range.startChar, range.endChar)
+        const pageIndex = pageIndexesRef.current.get(current.pageNum)
+        const ranges = getRangeFromBoxSelection(pageIndex, current.pageNum, rect, pageAnnotations)
+        const previewRects = ranges?.length
+          ? ranges.flatMap((range) => getLineRectsForRange(pageIndex, range.startChar, range.endChar))
           : []
         setEraserPreview({
           visible: previewRects.length > 0,
           pageNumber: current.pageNum,
-          startChar: range?.startChar || 0,
-          endChar: range?.endChar || 0,
+          startChar: ranges?.[0]?.startChar || 0,
+          endChar: ranges?.[ranges.length - 1]?.endChar || 0,
           rects: previewRects,
         })
       }
@@ -1036,7 +1344,11 @@ export function PdfViewport({
       pageResolved.point.y,
       current.anchorBoundary,
     )
-    if (!boundary || boundary.blockIndex !== current.blockIndex) {
+    if (
+      !boundary ||
+      boundary.blockIndex !== current.blockIndex ||
+      (current.columnId != null && boundary.columnId != null && boundary.columnId !== current.columnId)
+    ) {
       return
     }
 
@@ -1078,6 +1390,11 @@ export function PdfViewport({
   }
 
   async function handleMouseUp() {
+    if (activeTool === 'ink') {
+      await commitInkStroke()
+      return
+    }
+
     if (activeTool === 'eraser') {
       await commitEraserStroke()
       return
@@ -1186,7 +1503,7 @@ export function PdfViewport({
       pageNumber: selection.pageNumber,
       startChar: selection.startChar,
       endChar: selection.endChar,
-      quoteText: selection.text,
+      quoteText: selection.copyText || selection.text,
       rects: selection.rects,
       type,
       color,
@@ -1215,7 +1532,7 @@ export function PdfViewport({
     const selection = currentSelectionRef.current
     if (selection.visible && selection.text.trim()) {
       onInsertSelectionNote?.({
-        text: selection.text,
+        text: selection.copyText || selection.text,
         pageNumber: selection.pageNumber,
         startChar: selection.startChar,
         endChar: selection.endChar,
@@ -1248,6 +1565,13 @@ export function PdfViewport({
     if (activeTool !== 'eraser') {
       eraserStrokeRef.current = null
       clearEraserPreview()
+    }
+  }, [activeTool])
+
+  useEffect(() => {
+    if (activeTool !== 'ink') {
+      inkStrokeRef.current = null
+      setDrawingInkStroke(null)
     }
   }, [activeTool])
 
@@ -1385,7 +1709,7 @@ export function PdfViewport({
       const selection = currentSelectionRef.current
       if (!selection.visible || !selection.text) return
       event.preventDefault()
-      event.clipboardData?.setData('text/plain', selection.text)
+      event.clipboardData?.setData('text/plain', selection.copyText || selection.text)
     }
 
     document.addEventListener('copy', handleCopy)
@@ -1477,6 +1801,11 @@ export function PdfViewport({
 
   useEffect(() => {
     function handleWindowMouseUp() {
+      if (activeTool === 'ink') {
+        handleMouseUp()
+        return
+      }
+
       if (activeTool === 'eraser') {
         handleMouseUp()
         return
@@ -1495,7 +1824,9 @@ export function PdfViewport({
     function handleWindowBlur() {
       pointerSelectionRef.current = null
       eraserStrokeRef.current = null
+      inkStrokeRef.current = null
       screenshotDragRef.current = null
+      setDrawingInkStroke(null)
       clearEraserPreview()
     }
 
@@ -1531,8 +1862,10 @@ export function PdfViewport({
       className={`pdf-stage pdf-stage--tool-${activeTool}`}
       ref={readerRef}
       onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
+      onMouseMove={activeTool === 'ink' ? undefined : handleMouseMove}
+      onMouseUp={activeTool === 'ink' ? undefined : handleMouseUp}
+      onPointerMove={activeTool === 'ink' ? handleMouseMove : undefined}
+      onPointerUp={activeTool === 'ink' ? handleMouseUp : undefined}
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
       onContextMenu={(e) => {
@@ -1566,10 +1899,16 @@ export function PdfViewport({
           <PdfPage
             key={item}
             annotations={getRenderableAnnotations(item)}
+            inkAnnotations={inkAnnotationsByPage.get(item) || []}
+            drawingStroke={drawingInkStroke?.pageNumber === item ? drawingInkStroke : null}
             currentSelection={selectionState.visible && selectionState.pageNumber === item ? selectionState : null}
             eraserPreview={eraserPreview.visible && eraserPreview.pageNumber === item ? eraserPreview : null}
             screenshotSelection={screenshotSelection?.pageNumber === item ? screenshotSelection : null}
             selectionTool={activeTool}
+            onInkPointerDown={(event) => handleInkPointerDown(event, item)}
+            onInkPointerMove={handleMouseMove}
+            onInkPointerUp={handleMouseUp}
+            onInkErase={handleInkErase}
             onPageIndexReady={handlePageIndexReady}
             pageMetric={pageMetrics[index] ?? pageMetrics[0]}
             pageNumber={item}

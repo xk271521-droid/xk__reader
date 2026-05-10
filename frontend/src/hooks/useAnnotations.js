@@ -128,6 +128,18 @@ export function useAnnotations(paperId) {
     }
   }, [paperId])
 
+  const clearAnnotations = useCallback(async () => {
+    if (!paperId) return null
+
+    try {
+      const data = await apiFetch(`${ANNOTATIONS_BASE}/${paperId}/annotations`, { method: 'DELETE' })
+      setAnnotations(data?.annotations || [])
+      return data
+    } catch {
+      return null
+    }
+  }, [paperId])
+
   useEffect(() => {
     loadAnnotations()
   }, [loadAnnotations])
@@ -138,6 +150,7 @@ export function useAnnotations(paperId) {
     loadAnnotations,
     createAnnotation,
     deleteAnnotation,
+    clearAnnotations,
     eraseAnnotationRange,
     restoreAnnotations,
   }

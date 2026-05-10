@@ -3,11 +3,14 @@ import {
   ArrowDown,
   ArrowUp,
   Camera,
+  Check,
+  ChevronDown,
   Columns,
   Download,
   Eraser,
   Languages,
   MousePointer2,
+  Pencil,
   ScanLine,
   Search,
   Undo2,
@@ -18,10 +21,16 @@ import {
 
 const toolItems = [
   { id: 'select', label: '选择', icon: MousePointer2 },
+  { id: 'ink', label: '手绘', icon: Pencil },
   { id: 'screenshot', label: '截图', icon: Camera },
-  { id: 'eraser', label: '涂抹擦除', icon: Eraser },
-  { id: 'erase_box', label: '框选擦除', icon: ScanLine },
 ]
+
+const eraserModeItems = [
+  { id: 'brush', label: '涂抹擦除', tool: 'eraser', icon: Eraser },
+  { id: 'box', label: '框选擦除', tool: 'erase_box', icon: ScanLine },
+]
+
+const inkColors = ['#15803D', '#2563EB', '#DC2626', '#F59E0B', '#111827', '#7C3AED', '#DB2777', '#0F766E']
 
 const downloadItems = [
   { id: 'pdf', label: 'PDF 文件' },
@@ -76,9 +85,17 @@ export function PdfToolbar({
   fullTranslateParseMode = 'auto',
   onFullTranslateParseModeChange,
   onFullTranslate,
+  inkOptions = { color: '#15803D', opacity: 0.85, strokeWidth: 6 },
+  onInkOptionsChange,
+  activeEraserMode = 'brush',
+  onEraserModeChange,
 }) {
   const downloadWrapRef = useRef(null)
+  const eraserWrapRef = useRef(null)
+  const inkWrapRef = useRef(null)
   const [isDownloadOpen, setIsDownloadOpen] = useState(false)
+  const [isEraserOpen, setIsEraserOpen] = useState(false)
+  const [isInkOpen, setIsInkOpen] = useState(false)
 
   useEffect(() => {
     if (!isDownloadOpen) return undefined
@@ -93,6 +110,22 @@ export function PdfToolbar({
     return () => document.removeEventListener('pointerdown', handlePointerDown)
   }, [isDownloadOpen])
 
+  useEffect(() => {
+    if (!isEraserOpen && !isInkOpen) return undefined
+
+    function handlePointerDown(event) {
+      if (isEraserOpen && !eraserWrapRef.current?.contains(event.target)) {
+        setIsEraserOpen(false)
+      }
+      if (isInkOpen && !inkWrapRef.current?.contains(event.target)) {
+        setIsInkOpen(false)
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    return () => document.removeEventListener('pointerdown', handlePointerDown)
+  }, [isEraserOpen, isInkOpen])
+
   function handleSearchInput(event) {
     onSearchChange?.(event.target.value)
   }
@@ -104,6 +137,21 @@ export function PdfToolbar({
       else onSearchNext?.()
     }
   }
+
+  function updateInkOptions(partial) {
+    onInkOptionsChange?.({
+      ...inkOptions,
+      ...partial,
+    })
+  }
+
+  function selectEraserMode(item) {
+    onEraserModeChange?.(item.id)
+    onToolChange(item.tool)
+    setIsEraserOpen(false)
+  }
+
+  const activeEraserLabel = activeEraserMode === 'box' ? '框选' : '涂抹'
 
   return (
     <div className="reader-toolbar">
@@ -120,12 +168,84 @@ export function PdfToolbar({
       <div className="toolbar-group toolbar-group--tools">
         {toolItems.map((item) => {
           const Icon = item.icon
+          if (item.id === 'ink') {
+            return (
+              <div className="toolbar-popover-wrap" key={item.id} ref={inkWrapRef}>
+                <button
+                  type="button"
+                  className={`toolbar-tool toolbar-tool--${item.id}${activeTool === item.id ? ' is-active' : ''}`}
+                  title={item.label}
+                  aria-label={item.label}
+                  aria-expanded={isInkOpen}
+                  onClick={() => {
+                    onToolChange(item.id)
+                    setIsInkOpen((value) => !value)
+                    setIsEraserOpen(false)
+                  }}
+                >
+                  <Icon />
+                  <span>{item.label}</span>
+                  <ChevronDown className="toolbar-tool__chevron" />
+                </button>
+
+                {isInkOpen ? (
+                  <div className="toolbar-popover toolbar-ink-panel">
+                    <div className="toolbar-popover__title">画笔设置</div>
+                    <div className="toolbar-ink-colors">
+                      {inkColors.map((color) => (
+                        <button
+                          key={color}
+                          type="button"
+                          className={`toolbar-ink-color${inkOptions.color === color ? ' is-active' : ''}`}
+                          style={{ backgroundColor: color }}
+                          title={color}
+                          onClick={() => updateInkOptions({ color })}
+                        >
+                          {inkOptions.color === color ? <Check /> : null}
+                        </button>
+                      ))}
+                    </div>
+                    <label className="toolbar-ink-slider">
+                      <span>不透明度</span>
+                      <input
+                        type="range"
+                        min="10"
+                        max="100"
+                        value={Math.round((inkOptions.opacity ?? 0.85) * 100)}
+                        onChange={(event) => updateInkOptions({ opacity: Number(event.target.value) / 100 })}
+                      />
+                      <strong>{Math.round((inkOptions.opacity ?? 0.85) * 100)}%</strong>
+                    </label>
+                    <label className="toolbar-ink-slider">
+                      <span>粗细</span>
+                      <input
+                        type="range"
+                        min="1"
+                        max="28"
+                        value={inkOptions.strokeWidth ?? 6}
+                        onChange={(event) => updateInkOptions({ strokeWidth: Number(event.target.value) })}
+                      />
+                      <strong>{inkOptions.strokeWidth ?? 6}px</strong>
+                    </label>
+                    <div className="toolbar-ink-preview">
+                      <span
+                        style={{
+                          backgroundColor: inkOptions.color,
+                          height: Math.max(2, Math.min(18, inkOptions.strokeWidth ?? 6)),
+                          opacity: inkOptions.opacity ?? 0.85,
+                        }}
+                      />
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            )
+          }
+
           return (
             <button
               type="button"
-              className={`toolbar-tool toolbar-tool--${item.id}${
-                activeTool === item.id ? ' is-active' : ''
-              }`}
+              className={`toolbar-tool toolbar-tool--${item.id}${activeTool === item.id ? ' is-active' : ''}`}
               key={item.id}
               title={item.label}
               aria-label={item.label}
@@ -136,6 +256,49 @@ export function PdfToolbar({
             </button>
           )
         })}
+
+        <div className="toolbar-popover-wrap" ref={eraserWrapRef}>
+          <button
+            type="button"
+            className={`toolbar-tool toolbar-tool--eraser${
+              activeTool === 'eraser' || activeTool === 'erase_box' ? ' is-active' : ''
+            }`}
+            title={`橡皮擦：${activeEraserLabel}`}
+            aria-label={`橡皮擦：${activeEraserLabel}`}
+            aria-expanded={isEraserOpen}
+            onClick={() => {
+              onToolChange(activeEraserMode === 'box' ? 'erase_box' : 'eraser')
+              setIsEraserOpen((value) => !value)
+              setIsInkOpen(false)
+            }}
+          >
+            <Eraser />
+            <span>橡皮擦</span>
+            <small>{activeEraserLabel}</small>
+            <ChevronDown className="toolbar-tool__chevron" />
+          </button>
+
+          {isEraserOpen ? (
+            <div className="toolbar-popover toolbar-eraser-menu">
+              {eraserModeItems.map((item) => {
+                const Icon = item.icon
+                const isActive = activeEraserMode === item.id
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`toolbar-menu-item${isActive ? ' is-active' : ''}`}
+                    onClick={() => selectEraserMode(item)}
+                  >
+                    <Icon />
+                    <span>{item.label}</span>
+                    {isActive ? <Check /> : null}
+                  </button>
+                )
+              })}
+            </div>
+          ) : null}
+        </div>
 
         <button
           type="button"

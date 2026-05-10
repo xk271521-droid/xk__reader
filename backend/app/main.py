@@ -8,7 +8,7 @@ from sqlalchemy import inspect, select, text
 from app.api.router import api_router
 from app.core.config import settings
 from app.db.session import Base, SessionLocal, engine
-from app.models import Annotation, AiProvider, Folder, Paper, PaperFullTranslation, PaperNotebook, PaperNoteBlock, PaperNoteNode, ReadingRecord, User, UserAgreement, UserProfile  # noqa: F401
+from app.models import Annotation, AiProvider, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, User, UserAgreement, UserProfile  # noqa: F401
 
 
 def _ensure_system_providers() -> None:

@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef } from 'react'
 import { loadPdfJs } from '../../services/pdfjsClient'
+import { InkOverlay } from './InkOverlay'
 import { buildRenderedPageIndex } from './pdfSelectionModel'
 
 function getRenderScale() {
@@ -106,10 +107,16 @@ function cacheKey(pdfDocument, pageNumber) {
 
 function PdfPageComponent({
   annotations = [],
+  inkAnnotations = [],
+  drawingStroke = null,
   currentSelection = null,
   eraserPreview = null,
   screenshotSelection = null,
   selectionTool = 'select',
+  onInkPointerDown,
+  onInkPointerMove,
+  onInkPointerUp,
+  onInkErase,
   onPageIndexReady,
   pageMetric,
   pageNumber,
@@ -257,6 +264,16 @@ function PdfPageComponent({
         <>
           <canvas ref={canvasRef} />
           <div className="textLayer" ref={textLayerRef} />
+          <InkOverlay
+            drawingStroke={drawingStroke}
+            inkAnnotations={inkAnnotations}
+            isInkMode={selectionTool === 'ink'}
+            isEraserMode={selectionTool === 'eraser'}
+            onInkPointerDown={onInkPointerDown}
+            onInkPointerMove={onInkPointerMove}
+            onInkPointerUp={onInkPointerUp}
+            onInkErase={onInkErase}
+          />
           <div className="pdf-annotation-overlay">
             {annotations.map((annotation) => {
               const renderRects =

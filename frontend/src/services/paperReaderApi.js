@@ -192,6 +192,22 @@ export async function fetchReadingStats() {
   return parseJsonResponse(response)
 }
 
+export async function fetchResourceOverview() {
+  const response = await fetch('/api/resources/overview', {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function saveResourceLayout(paperId, layout) {
+  const response = await fetch(`/api/resources/${paperId}/layout`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(layout),
+  })
+  return parseJsonResponse(response)
+}
+
 export async function syncReadingRecords(records) {
   const response = await fetch('/api/reading-records/sync', {
     method: 'POST',
@@ -273,6 +289,29 @@ export async function fetchPaperSummary(text, providerId) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ text, provider_id: providerId }),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchPaperSummaries(paperId) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/summaries`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function generatePaperSummary(paperId, summaryType, payload = {}) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/summaries/${summaryType}/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchPaperSummaryStatus(paperId, summaryType) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/summaries/${summaryType}/status`, {
+    headers: authHeaders(),
   })
   return parseJsonResponse(response)
 }

@@ -56,6 +56,14 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    ink_annotations: Mapped[list["InkAnnotation"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    resource_layouts: Mapped[list["PaperResourceLayout"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class UserProfile(Base):

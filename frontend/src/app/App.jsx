@@ -13,6 +13,7 @@ import Login from '../log/Login.jsx'
 import { useBackendStatus } from '../hooks/useBackendStatus'
 import { usePdfReader } from '../hooks/usePdfReader'
 import { useAnnotations } from '../hooks/useAnnotations'
+import { useInkAnnotations } from '../hooks/useInkAnnotations'
 import { usePaperNotes } from '../hooks/usePaperNotes'
 import { usePdfSearch } from '../hooks/usePdfSearch'
 import { useResizableWidth } from '../hooks/useResizableWidth'
@@ -20,6 +21,7 @@ import { useSelectionInsight } from '../hooks/useSelectionInsight'
 import {
   createImageBlockDraft,
   createQuoteBlockDraft,
+  createTextBlockDraft,
   ensureInsertTarget,
   insertBlockIntoNotebooks,
 } from '../components/reader/noteTree'
@@ -34,8 +36,10 @@ import {
 import {
   cancelFullTranslation,
   fetchFullTranslation,
+  fetchResourceOverview,
   getPaperFileUrl,
   retryFullTranslation,
+  saveResourceLayout,
   startFullTranslation,
   streamFullTranslation,
 } from '../services/paperReaderApi'
@@ -157,7 +161,7 @@ const READER_LAYOUT_GAP = 8
 const RESIZER_WIDTH = 10
 const WORKSPACE_RAIL_EXPANDED_WIDTH = 72
 const WORKSPACE_RAIL_COLLAPSED_WIDTH = 46
-const READER_MIN_WIDTH = 280
+const READER_MIN_WIDTH = 640
 const INSIGHT_MIN_WIDTH = 180
 const INSIGHT_MAX_WIDTH = 460
 const WORKSPACE_MIN_WIDTH = 300
@@ -166,9 +170,12 @@ const WORKSPACE_MAX_WIDTH = 620
 
 function App() {
   const readerRef = useRef(null)
+  const readerLayoutRef = useRef(null)
   const userMenuRef = useRef(null)
   const [activeWorkspacePanel, setActiveWorkspacePanel] = useState('')
   const [activeTool, setActiveTool] = useState('select')
+  const [activeEraserMode, setActiveEraserMode] = useState('brush')
+  const [inkOptions, setInkOptions] = useState({ color: '#15803D', opacity: 0.85, strokeWidth: 6 })
   const [isThumbnailsOpen, setIsThumbnailsOpen] = useState(false)
   const [isUtilityRailCollapsed, setIsUtilityRailCollapsed] = useState(false)
   const [authMode, setAuthMode] = useState('login')
@@ -176,6 +183,7 @@ function App() {
   const [currentUser, setCurrentUser] = useState(null)
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
   const [accountSection, setAccountSection] = useState('')
+  const [readerLayoutWidth, setReaderLayoutWidth] = useState(0)
   const [chatMessages, setChatMessages] = useState({})
   const [chatInput, setChatInput] = useState({})
   const [chatAsking, setChatAsking] = useState({})
@@ -190,6 +198,7 @@ function App() {
   const [fullTranslationBusy, setFullTranslationBusy] = useState(false)
   const [fullTranslationParseMode, setFullTranslationParseMode] = useState('auto')
   const [isFullTranslationOpen, setIsFullTranslationOpen] = useState(false)
+  const [resourceOverview, setResourceOverview] = useState({ stats: {}, papers: [] })
   const chatMessageCounterRef = useRef(0)
   const chatRequestCounterRef = useRef(0)
   const initialSuggestionRequestRef = useRef({})
@@ -258,14 +267,23 @@ function App() {
   } = usePdfReader({ currentUser })
   const pdfSearch = usePdfSearch(readerRef, { pdfDocument, pageNumbers })
   const activePaperId = activeView !== 'home' ? Number(activeView) : null
+  const isHomeView = activeView === 'home'
+  const isReaderView = activeView !== 'home'
+  const isAccountView = Boolean(accountSection)
   const {
     annotations,
     loading: annLoading,
     createAnnotation,
     deleteAnnotation,
+    clearAnnotations,
     eraseAnnotationRange,
     restoreAnnotations,
   } = useAnnotations(activePaperId)
+  const {
+    inkAnnotations,
+    createInkAnnotation,
+    deleteInkAnnotation,
+  } = useInkAnnotations(activePaperId)
   const {
     notebooks,
     loading: notesLoading,
@@ -291,6 +309,7 @@ function App() {
     maxWidth: WORKSPACE_MAX_WIDTH,
   })
   const railWidth = isUtilityRailCollapsed ? WORKSPACE_RAIL_COLLAPSED_WIDTH : WORKSPACE_RAIL_EXPANDED_WIDTH
+  const readerShellWidth = readerLayoutWidth || (typeof window !== 'undefined' ? window.innerWidth : 1440)
   const workspaceWidth = activeWorkspacePanel ? workspacePanel.width : 0
   const workspaceReserveWidth = activeWorkspacePanel
     ? workspaceWidth + railWidth + RESIZER_WIDTH + READER_LAYOUT_GAP * 2
@@ -299,7 +318,7 @@ function App() {
     INSIGHT_MIN_WIDTH,
     Math.min(
       INSIGHT_MAX_WIDTH,
-      window.innerWidth - workspaceReserveWidth - READER_MIN_WIDTH - RESIZER_WIDTH - READER_LAYOUT_GAP * 3,
+      readerShellWidth - workspaceReserveWidth - READER_MIN_WIDTH - RESIZER_WIDTH - READER_LAYOUT_GAP * 3,
     ),
   )
   const insightPanel = useResizableWidth({
@@ -307,6 +326,35 @@ function App() {
     minWidth: INSIGHT_MIN_WIDTH,
     maxWidth: insightSafeMaxWidth,
   })
+  const workspaceSafeMaxWidth = Math.max(
+    WORKSPACE_MIN_WIDTH,
+    Math.min(
+      WORKSPACE_MAX_WIDTH,
+      readerShellWidth - insightPanel.width - railWidth - READER_MIN_WIDTH - RESIZER_WIDTH * 2 - READER_LAYOUT_GAP * 5,
+    ),
+  )
+
+  useEffect(() => {
+    const element = readerLayoutRef.current
+    if (!element) return undefined
+
+    function updateWidth() {
+      setReaderLayoutWidth(element.clientWidth || 0)
+    }
+
+    updateWidth()
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateWidth) : null
+    observer?.observe(element)
+    window.addEventListener('resize', updateWidth)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', updateWidth)
+    }
+  }, [isReaderView])
+
+  useEffect(() => {
+    workspacePanel.setWidth((current) => Math.min(current, workspaceSafeMaxWidth))
+  }, [workspacePanel.setWidth, workspaceSafeMaxWidth])
 
   const { selectionCard, handleSelection, dismissSelectionCard, setDomain, aiEnabled, toggleAI } = useSelectionInsight({
     readerRef,
@@ -314,6 +362,99 @@ function App() {
     paperSummary: activePaperSummary,
     activePaperFullText,
   })
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!currentUser) {
+      setResourceOverview({ stats: {}, papers: [] })
+      return undefined
+    }
+
+    async function loadResourceOverview() {
+      try {
+        const payload = await fetchResourceOverview()
+        if (!cancelled) {
+          setResourceOverview({
+            stats: payload?.stats || {},
+            papers: payload?.papers || [],
+          })
+        }
+      } catch {
+        if (!cancelled) {
+          setResourceOverview({ stats: {}, papers: [] })
+        }
+      }
+    }
+
+    loadResourceOverview()
+    return () => {
+      cancelled = true
+    }
+  }, [currentUser, recentPapers.length])
+
+  async function refreshResourceOverview() {
+    if (!currentUser) return
+    try {
+      const payload = await fetchResourceOverview()
+      setResourceOverview({
+        stats: payload?.stats || {},
+        papers: payload?.papers || [],
+      })
+    } catch {
+      // 资源图只是增强入口，刷新失败不影响阅读主流程。
+    }
+  }
+
+  async function handleSaveResourceLayout(paperId, layout) {
+    if (!currentUser || !paperId || !layout?.resource_type) return null
+    const saved = await saveResourceLayout(paperId, layout)
+    setResourceOverview((previous) => ({
+      stats: previous?.stats || {},
+      papers: (previous?.papers || []).map((paper) => {
+        if (String(paper.paper_id) !== String(paperId)) return paper
+        return {
+          ...paper,
+          resources: (paper.resources || []).map((resource) =>
+            resource.type === saved.resource_type
+              ? {
+                  ...resource,
+                  layout: {
+                    x_pct: saved.x_pct,
+                    y_pct: saved.y_pct,
+                    rotation_deg: saved.rotation_deg,
+                  },
+                }
+              : resource,
+          ),
+        }
+      }),
+    }))
+    return saved
+  }
+
+  function openPaperResource(paperId, resource = null) {
+    if (!paperId) return
+    switchToPaper(paperId)
+    setAccountSection('')
+    setIsFullTranslationOpen(false)
+
+    const resourceType = resource?.type || ''
+    if (resourceType === 'notes') {
+      setActiveWorkspacePanel('notes')
+      return
+    }
+
+    if (resourceType.startsWith('summary_')) {
+      setActiveWorkspacePanel('summary')
+      return
+    }
+
+    if (resourceType === 'annotations') {
+      setActiveWorkspacePanel('info')
+      return
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -383,9 +524,6 @@ function App() {
     }
   }, [isUserMenuOpen])
 
-  const isHomeView = activeView === 'home'
-  const isReaderView = activeView !== 'home'
-  const isAccountView = Boolean(accountSection)
   const userInitials = (currentUser?.nickname || 'xk').slice(0, 2).toLowerCase()
   const activeChatMessages = chatMessages[activeView] || []
   const activeChatInput = chatInput[activeView] || ''
@@ -1169,6 +1307,11 @@ function App() {
     applyNoteInsert(createQuoteBlockDraft(payload))
   }
 
+  async function handleInsertSummaryNote(content) {
+    if (!activePaperId || !content) return
+    applyNoteInsert(createTextBlockDraft(0, content))
+  }
+
   function handleCreateNotebook(kind) {
     if (!activePaperId) return
     setActiveWorkspacePanel('notes')
@@ -1181,6 +1324,7 @@ function App() {
     if (saved) {
       const prepared = ensureInsertTarget(saved, activeNoteTarget)
       setActiveNoteTarget(prepared.target)
+      refreshResourceOverview()
     }
     return saved
   }
@@ -1196,6 +1340,20 @@ function App() {
     })
   }
 
+  function handleJumpToSummaryEvidence(source) {
+    if (!source?.page && !source?.page_number) return
+    const pageNumber = Number(source.page || source.page_number)
+    if (!pageNumber) return
+    setCurrentPage(pageNumber)
+    setNoteFocus({
+      pageNumber,
+      startChar: source.start_char ?? source.startChar ?? null,
+      endChar: source.end_char ?? source.endChar ?? null,
+      quote: source.quote || source.quote_text || '',
+      nonce: Date.now(),
+    })
+  }
+
   useEffect(() => {
     if (!noteFocus) return undefined
     const timer = window.setTimeout(() => setNoteFocus(null), 2800)
@@ -1207,6 +1365,7 @@ function App() {
     const before = snapshotAnnotations(annotations)
     const result = await createAnnotation(payload)
     if (result) pushAnnotationUndo(activePaperId, before)
+    if (result) refreshResourceOverview()
     return result
   }
 
@@ -1215,6 +1374,17 @@ function App() {
     const before = snapshotAnnotations(annotations)
     const result = await deleteAnnotation(annotationId)
     if (result) pushAnnotationUndo(activePaperId, before)
+    if (result) refreshResourceOverview()
+    return result
+  }
+
+  async function handleClearAnnotations() {
+    if (!activePaperId || !annotations.length) return null
+    if (!window.confirm(`确定清空当前论文的 ${annotations.length} 条标注吗？此操作可通过撤销恢复一次。`)) return null
+    const before = snapshotAnnotations(annotations)
+    const result = await clearAnnotations()
+    if (result) pushAnnotationUndo(activePaperId, before)
+    if (result) refreshResourceOverview()
     return result
   }
 
@@ -1231,6 +1401,7 @@ function App() {
       pushAnnotationUndo(activePaperId, before)
       if (sessionKey) eraseUndoSessionsRef.current.add(sessionKey)
     }
+    refreshResourceOverview()
     return result
   }
 
@@ -1487,11 +1658,15 @@ function App() {
             onMovePaper={assignPaperToFolder}
             onOpenFilePicker={openFilePicker}
             onOpenPaper={switchToPaper}
+            onOpenResource={openPaperResource}
+            onRefreshResources={refreshResourceOverview}
+            onSaveResourceLayout={handleSaveResourceLayout}
             onRenameFolder={renameFolder}
             onResolveImportConflict={resolveImportConflict}
             recentPapers={recentPapers}
             recentReadings={recentReadings}
             readingStats={readingStats}
+            resourceOverview={resourceOverview}
             uncategorizedFolderId={uncategorizedFolderId}
           />
         </div>
@@ -1500,6 +1675,7 @@ function App() {
           className={`workspace-view workspace-view--reader${
             !isAuthViewOpen && !isAccountView && isReaderView ? ' is-active' : ' is-hidden'
           }`}
+          ref={readerLayoutRef}
         >
           {isFullTranslationOpen ? (
             <FullTranslationReader
@@ -1526,6 +1702,10 @@ function App() {
                 onThumbnailResizeStart={thumbnailPanel.startResizeLeft}
                 onToggleThumbnails={() => setIsThumbnailsOpen((v) => !v)}
                 onToolChange={setActiveTool}
+                activeEraserMode={activeEraserMode}
+                onEraserModeChange={setActiveEraserMode}
+                inkOptions={inkOptions}
+                onInkOptionsChange={setInkOptions}
                 onSelect={handleSelection}
                 onThumbnailPageClick={(pageNum) => {
                   setCurrentPage(pageNum)
@@ -1546,9 +1726,12 @@ function App() {
                 onUndoAnnotation={handleUndoAnnotation}
                 currentPaperId={activePaperId}
                 annotations={annotations}
+                inkAnnotations={inkAnnotations}
                 onCreateAnnotation={handleCreateAnnotation}
                 onDeleteAnnotation={handleDeleteAnnotation}
                 onEraseAnnotationRange={handleEraseAnnotationRange}
+                onCreateInkAnnotation={createInkAnnotation}
+                onDeleteInkAnnotation={deleteInkAnnotation}
                 onInsertSelectionNote={handleInsertSelectionNote}
                 onAskAI={function () { if (selectionCard.text) handleAskAIText(selectionCard.text) }}
                 onScreenshotTranslate={handleScreenshotTranslate}
@@ -1595,6 +1778,9 @@ function App() {
                 paperId={activePaperId}
                 fileName={fileName}
                 metadata={metadata}
+                annotations={annotations}
+                activePaperFullText={activePaperFullText}
+                providerId={activeProviderId}
                 currentUser={currentUser}
                 width={workspacePanel.width}
                 notebooks={notebooks}
@@ -1606,6 +1792,8 @@ function App() {
                 onSaveNotebooks={handleSaveAllNotebooks}
                 onSetActiveNoteTarget={setActiveNoteTarget}
                 onJumpToNote={handleJumpToNoteAnchor}
+                onJumpToEvidence={handleJumpToSummaryEvidence}
+                onClearAnnotations={handleClearAnnotations}
                 chatMessages={activeChatMessages}
                 chatInput={activeChatInput}
                 chatAsking={activeChatAsking}
@@ -1623,6 +1811,7 @@ function App() {
                 }}
                 onChatSubmit={handleChatSubmit}
                 onRefreshInitialSuggestions={function () { fetchInitialSuggestions(true) }}
+                onInsertSummaryNote={handleInsertSummaryNote}
               />
 
               <UtilityRail

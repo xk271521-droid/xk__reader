@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   BookCopy,
   ChevronLeft,
@@ -22,7 +22,6 @@ import {
 const homeSections = [
   { id: 'recent', label: '最近阅读', icon: Clock3 },
   { id: 'library', label: '我的文献', icon: LibraryBig },
-  { id: 'resources', label: '我的资源', icon: Package2 },
   { id: 'trash', label: '回收站', icon: Trash2 },
 ]
 
@@ -109,6 +108,242 @@ function getTranslatedTitle(paper) {
   return paper.metadata?.translatedTitle || paper.metadata?.subject || '—'
 }
 
+const RESOURCE_MAP_VIEWBOX_SIZE = 100
+const RESOURCE_DRAG_THRESHOLD = 5
+const RESOURCE_LEAF_MIN_X = 15
+const RESOURCE_LEAF_MAX_X = 88
+const RESOURCE_LEAF_MIN_Y = 14
+const RESOURCE_LEAF_MAX_Y = 86
+const RESOURCE_LEAF_DEFAULTS = [
+  { x_pct: 34, y_pct: 28, rotation_deg: -7 },
+  { x_pct: 51, y_pct: 39, rotation_deg: 4 },
+  { x_pct: 42, y_pct: 62, rotation_deg: -4 },
+  { x_pct: 61, y_pct: 23, rotation_deg: 8 },
+  { x_pct: 70, y_pct: 48, rotation_deg: -6 },
+  { x_pct: 55, y_pct: 74, rotation_deg: 5 },
+  { x_pct: 80, y_pct: 31, rotation_deg: -2 },
+  { x_pct: 76, y_pct: 68, rotation_deg: 7 },
+  { x_pct: 87, y_pct: 52, rotation_deg: -5 },
+  { x_pct: 65, y_pct: 84, rotation_deg: 3 },
+]
+
+function getResourceStatusText(resource) {
+  if (resource.type === 'notes' && resource.count > 1) return String(resource.count)
+  if (resource.count > 1 && !String(resource.type || '').startsWith('summary_')) return String(resource.count)
+  return resource.status === 'stale' ? '需更新' : '已生成'
+}
+
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function normalizeResourceLayout(layout, fallback) {
+  return {
+    x_pct: clamp(Number(layout?.x_pct ?? fallback.x_pct), RESOURCE_LEAF_MIN_X, RESOURCE_LEAF_MAX_X),
+    y_pct: clamp(Number(layout?.y_pct ?? fallback.y_pct), RESOURCE_LEAF_MIN_Y, RESOURCE_LEAF_MAX_Y),
+    rotation_deg: clamp(Number(layout?.rotation_deg ?? fallback.rotation_deg ?? 0), -18, 18),
+  }
+}
+
+function getDefaultResourceLayout(resource, index, count) {
+  const base = RESOURCE_LEAF_DEFAULTS[index % RESOURCE_LEAF_DEFAULTS.length]
+  const cycle = Math.floor(index / RESOURCE_LEAF_DEFAULTS.length)
+  const typeOffset = String(resource?.type || '')
+    .split('')
+    .reduce((sum, char) => sum + char.charCodeAt(0), 0)
+  return normalizeResourceLayout(
+    {
+      x_pct: base.x_pct + cycle * 2 + ((typeOffset % 5) - 2) * 0.8,
+      y_pct: base.y_pct + ((count % 3) - 1) * 1.4 + cycle * 2,
+      rotation_deg: base.rotation_deg + ((typeOffset % 7) - 3) * 0.4,
+    },
+    base,
+  )
+}
+
+function getResourceMapHeight(count) {
+  return Math.max(292, Math.min(420, 260 + Math.ceil(Math.max(1, count) / 3) * 38))
+}
+
+function buildResourceBranchPath(layout, index, count) {
+  const startX = 4
+  const startY = 51 + (count % 2 === 0 ? -2 : 1)
+  const endX = layout.x_pct
+  const endY = layout.y_pct
+  const curl = ((index % 5) - 2) * 3.2
+  const c1x = 13 + (index % 4) * 2.4
+  const c1y = startY + (endY - startY) * 0.22 + curl
+  const c2x = endX - 18 - (index % 3) * 4
+  const c2y = endY + (index % 2 === 0 ? 7 : -8) - curl * 0.18
+  return `M ${startX} ${startY} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${endX} ${endY}`
+}
+
+function PaperResourceMap({ paper, resources = [], onOpenResource, onSaveResourceLayout }) {
+  const mapRef = useRef(null)
+  const dragStateRef = useRef(null)
+  const suppressClickRef = useRef('')
+  const [hoveredType, setHoveredType] = useState('')
+  const [draggingType, setDraggingType] = useState('')
+  const [saveError, setSaveError] = useState('')
+  const [leafLayouts, setLeafLayouts] = useState({})
+  const height = getResourceMapHeight(resources.length)
+  const paperId = paper?.id ?? paper?.paper_id
+
+  useEffect(() => {
+    setLeafLayouts((current) => {
+      const next = {}
+      resources.forEach((resource, index) => {
+        const fallback = getDefaultResourceLayout(resource, index, resources.length)
+        next[resource.type] = resource.layout
+          ? normalizeResourceLayout(resource.layout, fallback)
+          : normalizeResourceLayout(current[resource.type], fallback)
+      })
+      return next
+    })
+  }, [resources])
+
+  if (!resources.length) return null
+
+  const layout = resources.map((resource, index) => {
+    const fallback = getDefaultResourceLayout(resource, index, resources.length)
+    const itemLayout = normalizeResourceLayout(leafLayouts[resource.type], fallback)
+    return {
+      resource,
+      layout: itemLayout,
+      d: buildResourceBranchPath(itemLayout, index, resources.length),
+      delay: `${(index % 6) * 0.34}s`,
+      float: `${4 + (index % 3)}px`,
+    }
+  })
+
+  function handlePointerDown(event, item) {
+    if (event.button !== 0 || !mapRef.current) return
+    const rect = mapRef.current.getBoundingClientRect()
+    dragStateRef.current = {
+      type: item.resource.type,
+      startX: event.clientX,
+      startY: event.clientY,
+      rect,
+      moved: false,
+      latest: item.layout,
+    }
+    setSaveError('')
+    setDraggingType(item.resource.type)
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+  }
+
+  function handlePointerMove(event) {
+    const state = dragStateRef.current
+    if (!state || !mapRef.current) return
+    const distance = Math.hypot(event.clientX - state.startX, event.clientY - state.startY)
+    if (distance < RESOURCE_DRAG_THRESHOLD && !state.moved) return
+    state.moved = true
+    const nextLayout = normalizeResourceLayout(
+      {
+        x_pct: state.latest.x_pct + ((event.clientX - state.startX) / state.rect.width) * 100,
+        y_pct: state.latest.y_pct + ((event.clientY - state.startY) / state.rect.height) * 100,
+        rotation_deg: state.latest.rotation_deg,
+      },
+      state.latest,
+    )
+    state.startX = event.clientX
+    state.startY = event.clientY
+    state.latest = nextLayout
+    setLeafLayouts((current) => ({
+      ...current,
+      [state.type]: nextLayout,
+    }))
+    event.preventDefault()
+  }
+
+  async function finishDrag(event, item) {
+    const state = dragStateRef.current
+    if (!state || state.type !== item.resource.type) return
+    event.currentTarget.releasePointerCapture?.(event.pointerId)
+    dragStateRef.current = null
+    setDraggingType('')
+    if (!state.moved) return
+
+    suppressClickRef.current = state.type
+    window.setTimeout(() => {
+      if (suppressClickRef.current === state.type) suppressClickRef.current = ''
+    }, 360)
+    try {
+      await onSaveResourceLayout?.(paperId, {
+        resource_type: state.type,
+        x_pct: state.latest.x_pct,
+        y_pct: state.latest.y_pct,
+        rotation_deg: state.latest.rotation_deg,
+      })
+    } catch {
+      setSaveError('\u5e03\u5c40\u4fdd\u5b58\u5931\u8d25\uff0c\u5237\u65b0\u524d\u4ecd\u4fdd\u7559\u672c\u6b21\u4f4d\u7f6e')
+    }
+  }
+
+  return (
+    <div
+      className="paper-resource-map paper-resource-map--organic"
+      ref={mapRef}
+      style={{ '--resource-map-height': `${height}px` }}
+    >
+      <svg
+        className="paper-resource-map__lines"
+        viewBox={`0 0 ${RESOURCE_MAP_VIEWBOX_SIZE} ${RESOURCE_MAP_VIEWBOX_SIZE}`}
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        {layout.map((item) => (
+          <path
+            key={item.resource.type}
+            d={item.d}
+            stroke={item.resource.color}
+            className={hoveredType === item.resource.type || draggingType === item.resource.type ? 'is-active' : ''}
+          />
+        ))}
+      </svg>
+
+      <div className="paper-resource-map__canopy" aria-hidden="true" />
+
+      <div className="paper-resource-map__cards">
+        {layout.map((item) => (
+          <button
+            key={item.resource.type}
+            type="button"
+            className={`paper-resource-card${hoveredType === item.resource.type ? ' is-active' : ''}${draggingType === item.resource.type ? ' is-dragging' : ''}`}
+            style={{
+              '--resource-color': item.resource.color,
+              '--float-delay': item.delay,
+              '--float-distance': item.float,
+              '--leaf-rotation': `${item.layout.rotation_deg}deg`,
+              left: `${item.layout.x_pct}%`,
+              top: `${item.layout.y_pct}%`,
+            }}
+            onClick={(event) => {
+              if (suppressClickRef.current === item.resource.type) {
+                event.preventDefault()
+                suppressClickRef.current = ''
+                return
+              }
+              onOpenResource?.(paper, item.resource)
+            }}
+            onPointerDown={(event) => handlePointerDown(event, item)}
+            onPointerMove={handlePointerMove}
+            onPointerUp={(event) => finishDrag(event, item)}
+            onPointerCancel={(event) => finishDrag(event, item)}
+            onMouseEnter={() => setHoveredType(item.resource.type)}
+            onMouseLeave={() => setHoveredType('')}
+          >
+            <span>{item.resource.label}</span>
+            <small>{getResourceStatusText(item.resource)}</small>
+          </button>
+        ))}
+      </div>
+      {saveError ? <div className="paper-resource-map__save-error">{saveError}</div> : null}
+    </div>
+  )
+}
+
 function RecentSection({ groupedPapers, onOpenPaper }) {
   if (groupedPapers.length === 0) {
     return (
@@ -174,12 +409,16 @@ function CategorySection({
   onDeletePaper,
   onMovePaper,
   onOpenPaper,
+  onOpenResource,
+  onSaveResourceLayout,
+  paperResourcesById = {},
   recentPapers,
   searchTerm,
   selectedFolderId,
   uncategorizedFolderId,
 }) {
   const [menuPaperId, setMenuPaperId] = useState('')
+  const [expandedResourcePaperId, setExpandedResourcePaperId] = useState('')
   const keyword = searchTerm.trim().toLowerCase()
   const currentCategoryName =
     selectedFolderId === uncategorizedFolderId
@@ -207,6 +446,7 @@ function CategorySection({
   useEffect(() => {
     setCurrentPage(1)
     setMenuPaperId('')
+    setExpandedResourcePaperId('')
   }, [selectedFolderId, searchTerm])
 
   // Jump to paper and auto-scroll page
@@ -244,11 +484,13 @@ function CategorySection({
   function handlePrevPage() {
     setCurrentPage((p) => Math.max(1, p - 1))
     setMenuPaperId('')
+    setExpandedResourcePaperId('')
   }
 
   function handleNextPage() {
     setCurrentPage((p) => Math.min(totalPages, p + 1))
     setMenuPaperId('')
+    setExpandedResourcePaperId('')
   }
 
   return (
@@ -273,13 +515,19 @@ function CategorySection({
         </div>
 
         {papersInCategory.length > 0 ? (
-          paddedRows.map((paper) =>
-            paper._empty ? (
-              <div key={paper._key} className="home-category-table__row home-category-table__row--empty" />
-            ) : (
+          paddedRows.map((paper) => {
+            if (paper._empty) {
+              return <div key={paper._key} className="home-category-table__row home-category-table__row--empty" />
+            }
+
+            const resourceRecord = paperResourcesById[String(paper.id)]
+            const resources = resourceRecord?.resources || []
+            const isResourceExpanded = expandedResourcePaperId === paper.id && resources.length > 0
+
+            return (
               <div
                 key={paper.id}
-                className={`home-category-table__row${highlightPaperId === paper.id ? ' is-highlight' : ''}`}
+                className={`home-category-table__row${highlightPaperId === paper.id ? ' is-highlight' : ''}${isResourceExpanded ? ' is-resource-expanded' : ''}`}
               >
                 <button
                   type="button"
@@ -294,6 +542,21 @@ function CategorySection({
                 <span title={paper.metadata.author || '-'}>{paper.metadata.author || '-'}</span>
                 <span>{paper.metadata.pageCount || 0} 页</span>
                 <div className="home-row-menu-wrap">
+                  {resources.length > 0 ? (
+                    <button
+                      type="button"
+                      className={`home-resource-trigger${isResourceExpanded ? ' is-active' : ''}`}
+                      title="展开资源图"
+                      onClick={() => {
+                        setMenuPaperId('')
+                        setExpandedResourcePaperId((currentId) => (currentId === paper.id ? '' : paper.id))
+                      }}
+                    >
+                      <Package2 />
+                      <span>资源 {resources.length}</span>
+                    </button>
+                  ) : null}
+
                   <button
                     type="button"
                     className="home-row-menu-trigger"
@@ -351,6 +614,7 @@ function CategorySection({
                         className="home-row-menu__item home-row-menu__item--danger"
                         onClick={() => {
                           setMenuPaperId('')
+                          setExpandedResourcePaperId('')
                           onDeletePaper(paper.id)
                         }}
                       >
@@ -359,9 +623,18 @@ function CategorySection({
                     </div>
                   ) : null}
                 </div>
+
+                {isResourceExpanded ? (
+                  <PaperResourceMap
+                    paper={paper}
+                    resources={resources}
+                    onOpenResource={onOpenResource}
+                    onSaveResourceLayout={onSaveResourceLayout}
+                  />
+                ) : null}
               </div>
-            ),
-          )
+            )
+          })
         ) : (
           <div className="home-empty-state home-empty-state--compact">
             <div className="home-empty-state__icon">
@@ -401,32 +674,6 @@ function CategorySection({
   )
 }
 
-function ResourcesSection() {
-  return (
-    <div className="home-panel-grid">
-      <div className="home-feature-card">
-        <p className="panel-label">个人资源库</p>
-        <h3>我的资源</h3>
-        <p>这里预留给你管理模板、术语表、实验脚本和常用链接，后续可以接入真实资源文件。</p>
-      </div>
-      <div className="home-list-card home-resource-grid">
-        <article className="home-mini-row">
-          <span>阅读模板</span>
-          <small>2 个</small>
-        </article>
-        <article className="home-mini-row">
-          <span>术语词表</span>
-          <small>0 个</small>
-        </article>
-        <article className="home-mini-row">
-          <span>外部链接</span>
-          <small>1 条</small>
-        </article>
-      </div>
-    </div>
-  )
-}
-
 function TrashSection() {
   return (
     <div className="home-panel-grid">
@@ -453,11 +700,15 @@ export function HomePage({
   onMovePaper,
   onOpenFilePicker,
   onOpenPaper,
+  onOpenResource,
+  onRefreshResources,
+  onSaveResourceLayout,
   onRenameFolder,
   onResolveImportConflict,
   recentPapers,
   recentReadings = [],
   readingStats = null,
+  resourceOverview = null,
   uncategorizedFolderId,
 }) {
   const [activeSection, setActiveSection] = useState('recent')
@@ -503,6 +754,20 @@ export function HomePage({
       searchTerm,
     )
   }, [recentReadings, searchTerm])
+
+  const paperResourcesById = useMemo(() => {
+    const next = {}
+    ;(resourceOverview?.papers || []).forEach((item) => {
+      next[String(item.paper_id)] = item
+    })
+    return next
+  }, [resourceOverview])
+
+  function handleOpenResource(paper, resource) {
+    const paperId = paper?.id ?? paper?.paper_id
+    if (!paperId) return
+    onOpenResource?.(paperId, resource)
+  }
 
   const weeklyStats = useMemo(() => {
     if (!readingStats) {
@@ -590,6 +855,10 @@ export function HomePage({
     }
   }
 
+  function handleSelectSection(sectionId) {
+    setActiveSection(sectionId)
+  }
+
   return (
     <section className="home-shell">
       <aside className="home-sidebar">
@@ -605,7 +874,7 @@ export function HomePage({
                   <button
                     type="button"
                     className={`home-sidebar__item${isActive ? ' is-active' : ''}`}
-                    onClick={() => setActiveSection(item.id)}
+                    onClick={() => handleSelectSection(item.id)}
                   >
                     <Icon />
                     <span>{item.label}</span>
@@ -726,7 +995,7 @@ export function HomePage({
       </aside>
 
       <div className="home-content">
-        {activeSection !== 'resources' && activeSection !== 'trash' ? (
+        {activeSection !== 'trash' ? (
         <div className={`home-toolbar${activeSection === 'library' ? ' is-library' : ''}`}>
           <div className="home-toolbar__actions">
             <button
@@ -836,13 +1105,11 @@ export function HomePage({
           <h3>
             {activeSection === 'recent' && '最近阅读'}
             {activeSection === 'library' && '我的文献'}
-            {activeSection === 'resources' && '我的资源'}
             {activeSection === 'trash' && '回收站'}
           </h3>
           {activeSection !== 'library' ? (
             <span>
               {activeSection === 'recent' && '按最近访问时间排序'}
-              {activeSection === 'resources' && '沉淀你的模板、词表与常用外部资料'}
               {activeSection === 'trash' && '后续可接恢复与彻底删除'}
             </span>
           ) : null}
@@ -861,6 +1128,9 @@ export function HomePage({
             onDeletePaper={onDeletePaper}
             onMovePaper={onMovePaper}
             onOpenPaper={onOpenPaper}
+            onOpenResource={handleOpenResource}
+            onSaveResourceLayout={onSaveResourceLayout}
+            paperResourcesById={paperResourcesById}
             recentPapers={recentPapers}
             searchTerm={searchTerm}
             selectedFolderId={selectedFolderId}
@@ -868,7 +1138,6 @@ export function HomePage({
           />
         ) : null}
 
-        {activeSection === 'resources' ? <ResourcesSection /> : null}
         {activeSection === 'trash' ? <TrashSection /> : null}
       </div>
 
