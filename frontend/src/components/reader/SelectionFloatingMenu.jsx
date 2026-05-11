@@ -7,10 +7,10 @@ import {
 } from 'lucide-react'
 
 const ANNOTATION_COLORS = [
-  { color: '#F2B800', label: '黄色' },
-  { color: '#22B66F', label: '绿色' },
-  { color: '#2F7DE1', label: '蓝色' },
-  { color: '#D84C92', label: '粉色' },
+  { color: '#F3B300', label: '黄色' },
+  { color: '#16A34A', label: '绿色' },
+  { color: '#2563EB', label: '蓝色' },
+  { color: '#DB2777', label: '粉色' },
 ]
 
 function stopMenuPointer(event) {

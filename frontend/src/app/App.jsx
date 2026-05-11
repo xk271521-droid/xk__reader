@@ -3,6 +3,7 @@ import { Brain, Copy, LogIn, LogOut, Settings2, UserRound } from 'lucide-react'
 import { AiConfigPage } from '../components/account/AiConfigPage'
 import { UserCenterPage } from '../components/account/UserCenterPage'
 import { HomePage } from '../components/home/HomePage'
+import { ResourcePreviewModal } from '../components/home/ResourcePreviewModal'
 import { StatusPanel } from '../components/layout/StatusPanel'
 import { UtilityRail } from '../components/layout/UtilityRail'
 import { FullTranslationReader } from '../components/reader/FullTranslationReader'
@@ -35,9 +36,9 @@ import {
 } from '../services/authApi'
 import {
   cancelFullTranslation,
+  downloadPaperExport,
   fetchFullTranslation,
   fetchResourceOverview,
-  getPaperFileUrl,
   retryFullTranslation,
   saveResourceLayout,
   startFullTranslation,
@@ -137,6 +138,15 @@ function triggerTextDownload(content, fileName) {
   URL.revokeObjectURL(url)
 }
 
+function triggerBlobDownload(blob, fileName) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 function normalizeFullTranslationStatus(value) {
   return ['idle', 'running', 'completed', 'error', 'cancelled'].includes(value) ? value : 'idle'
 }
@@ -199,6 +209,7 @@ function App() {
   const [fullTranslationParseMode, setFullTranslationParseMode] = useState('auto')
   const [isFullTranslationOpen, setIsFullTranslationOpen] = useState(false)
   const [resourceOverview, setResourceOverview] = useState({ stats: {}, papers: [] })
+  const [resourcePreview, setResourcePreview] = useState(null)
   const chatMessageCounterRef = useRef(0)
   const chatRequestCounterRef = useRef(0)
   const initialSuggestionRequestRef = useRef({})
@@ -232,6 +243,7 @@ function App() {
     createFolder,
     deletePaper,
     deleteFolder,
+    emptyTrash,
     error,
     fileInputRef,
     fileName,
@@ -249,15 +261,19 @@ function App() {
     pageNumber,
     pageNumbers,
     pdfDocument,
+    permanentlyDeletePaper,
     recentPapers,
     readingStats,
     recentReadings,
+    refreshTrashPapers,
     renameFolder,
     resolveImportConflict,
+    restorePaperFromTrash,
     scale,
     setCurrentPage,
     switchToPaper,
     totalPages,
+    trashPapers,
     uncategorizedFolderId,
     zoomIn,
     zoomOut,
@@ -296,8 +312,6 @@ function App() {
   const [noteFocus, setNoteFocus] = useState(null)
   const [annotationUndoStacks, setAnnotationUndoStacks] = useState({})
   const eraseUndoSessionsRef = useRef(new Set())
-  const activeFileUrl = activePaperId ? getPaperFileUrl(activePaperId) : null
-
   const thumbnailPanel = useResizableWidth({
     initialWidth: 300,
     minWidth: 160,
@@ -431,6 +445,14 @@ function App() {
       }),
     }))
     return saved
+  }
+
+  function openResourcePreview(preview) {
+    setResourcePreview(preview)
+  }
+
+  function closeResourcePreview() {
+    setResourcePreview(null)
   }
 
   function openPaperResource(paperId, resource = null) {
@@ -857,28 +879,27 @@ function App() {
     })
   }
 
-  function handleDownloadOption(format) {
+  async function handleDownloadOption(format) {
     const baseName = sanitizeDownloadName(metadata.title || fileName)
-
-    if (format === 'pdf') {
-      if (!activeFileUrl) {
-        window.alert('当前 PDF 暂时没有可下载地址')
-        return
-      }
-      const link = document.createElement('a')
-      link.href = activeFileUrl
-      link.download = fileName || `${baseName}.pdf`
-      link.click()
+    const suffixMap = {
+      pdf: 'pdf',
+      word: 'docx',
+    }
+    if (!activePaperId || Number.isNaN(activePaperId) || !suffixMap[format]) {
+      window.alert('当前文献暂时没有可下载地址')
       return
     }
 
-    const citationText = buildCitationText(format, metadata, fileName)
-    const suffixMap = {
-      gbt7714: 'GB-T-7714-2015',
-      cajcd: 'CAJ-CD',
-      mla: 'MLA',
+    try {
+      const result = await downloadPaperExport(
+        activePaperId,
+        format,
+        `${baseName}-annotated.${suffixMap[format]}`,
+      )
+      triggerBlobDownload(result.blob, result.fileName)
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : '下载失败，请稍后再试。')
     }
-    triggerTextDownload(citationText, `${baseName}-${suffixMap[format] || 'citation'}.txt`)
   }
 
   async function handleFullTranslate(options = {}) {
@@ -1655,11 +1676,15 @@ function App() {
             onCreateFolder={createFolder}
             onDeleteFolder={deleteFolder}
             onDeletePaper={deletePaper}
+            onEmptyTrash={emptyTrash}
             onMovePaper={assignPaperToFolder}
             onOpenFilePicker={openFilePicker}
             onOpenPaper={switchToPaper}
-            onOpenResource={openPaperResource}
+            onOpenResource={openResourcePreview}
+            onPermanentlyDeletePaper={permanentlyDeletePaper}
             onRefreshResources={refreshResourceOverview}
+            onRefreshTrash={refreshTrashPapers}
+            onRestorePaper={restorePaperFromTrash}
             onSaveResourceLayout={handleSaveResourceLayout}
             onRenameFolder={renameFolder}
             onResolveImportConflict={resolveImportConflict}
@@ -1667,6 +1692,7 @@ function App() {
             recentReadings={recentReadings}
             readingStats={readingStats}
             resourceOverview={resourceOverview}
+            trashPapers={trashPapers}
             uncategorizedFolderId={uncategorizedFolderId}
           />
         </div>
@@ -1853,6 +1879,13 @@ function App() {
           )}
         </div>
       </main>
+
+      {resourcePreview ? (
+        <ResourcePreviewModal
+          preview={resourcePreview}
+          onClose={closeResourcePreview}
+        />
+      ) : null}
     </div>
   )
 }

@@ -21,6 +21,34 @@ function toRgba(color, alpha) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`
 }
 
+function drawHighlightCanvas(canvas, annotations, width, height) {
+  if (!canvas) return
+  const outputScale = getRenderScale()
+  const canvasWidth = Math.floor(width * outputScale)
+  const canvasHeight = Math.floor(height * outputScale)
+
+  canvas.width = canvasWidth
+  canvas.height = canvasHeight
+  canvas.style.width = `${width}px`
+  canvas.style.height = `${height}px`
+
+  const context = canvas.getContext('2d')
+  context.clearRect(0, 0, canvasWidth, canvasHeight)
+
+  for (const annotation of annotations) {
+    if (annotation.type !== 'highlight') continue
+    for (const rect of annotation.rects || []) {
+      context.fillStyle = toRgba(annotation.color || '#F3B300', 0.78)
+      context.fillRect(
+        rect.left * canvasWidth,
+        rect.top * canvasHeight,
+        rect.width * canvasWidth,
+        rect.height * canvasHeight,
+      )
+    }
+  }
+}
+
 // Cache textContent per page — text parsing is expensive and text doesn't change with scale
 const MAX_CACHE_SIZE = 200
 const textContentCache = new Map()
@@ -125,6 +153,7 @@ function PdfPageComponent({
   shouldRender,
 }) {
   const canvasRef = useRef(null)
+  const highlightCanvasRef = useRef(null)
   const pageFrameRef = useRef(null)
   const textLayerRef = useRef(null)
 
@@ -136,6 +165,16 @@ function PdfPageComponent({
     pageFrameRef.current.style.width = `${pageMetric.width * scale}px`
     pageFrameRef.current.style.height = `${pageMetric.height * scale}px`
   }, [pageMetric, scale])
+
+  useEffect(() => {
+    if (!shouldRender || !pageMetric) return
+    drawHighlightCanvas(
+      highlightCanvasRef.current,
+      annotations,
+      pageMetric.width * scale,
+      pageMetric.height * scale,
+    )
+  }, [annotations, pageMetric, scale, shouldRender])
 
   useEffect(() => {
     if (
@@ -169,12 +208,13 @@ function PdfPageComponent({
         return
       }
 
-      const canvasContext = canvas.getContext('2d', { alpha: false })
+      const canvasContext = canvas.getContext('2d', { alpha: true })
 
       canvas.width = Math.floor(viewport.width * outputScale)
       canvas.height = Math.floor(viewport.height * outputScale)
       canvas.style.width = `${viewport.width}px`
       canvas.style.height = `${viewport.height}px`
+      canvasContext.clearRect(0, 0, canvas.width, canvas.height)
 
       textLayerElement.innerHTML = ''
       textLayerElement.style.width = `${viewport.width}px`
@@ -186,6 +226,7 @@ function PdfPageComponent({
         transform:
           outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0],
         viewport,
+        background: 'rgba(255, 255, 255, 0)',
       })
 
       await renderTask.promise
@@ -262,7 +303,8 @@ function PdfPageComponent({
     <div className="pdf-page-frame" data-page-number={pageNumber} ref={pageFrameRef}>
       {shouldRender ? (
         <>
-          <canvas ref={canvasRef} />
+          <canvas className="pdf-highlight-canvas" ref={highlightCanvasRef} aria-hidden="true" />
+          <canvas className="pdf-page-canvas" ref={canvasRef} />
           <div className="textLayer" ref={textLayerRef} />
           <InkOverlay
             drawingStroke={drawingStroke}
@@ -275,7 +317,7 @@ function PdfPageComponent({
             onInkErase={onInkErase}
           />
           <div className="pdf-annotation-overlay">
-            {annotations.map((annotation) => {
+            {annotations.filter((annotation) => annotation.type !== 'highlight').map((annotation) => {
               const renderRects =
                 annotation.type === 'underline' || annotation.type === 'wavy_underline'
                   ? (annotation.decorationRects?.length ? annotation.decorationRects : annotation.rects || [])
@@ -292,7 +334,7 @@ function PdfPageComponent({
                     width: `${rect.width * 100}%`,
                     height: `${rect.height * 100}%`,
                     backgroundColor: annotation.type === 'highlight'
-                      ? toRgba(annotation.color || '#F2B800', 0.58)
+                      ? toRgba(annotation.color || '#F3B300', 0.32)
                       : 'transparent',
                     borderBottomColor: annotation.color || '#2563EB',
                     color: annotation.color || '#2563EB',

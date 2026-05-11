@@ -24,6 +24,17 @@ class PaperSummarySection(BaseModel):
     evidence: list[PaperSummaryEvidence] = Field(default_factory=list)
 
 
+class ReviewStructuredFields(BaseModel):
+    research_question: str = ""
+    core_metrics: list[str] = Field(default_factory=list)
+    method_route: str = ""
+    data_sample: str = ""
+    main_findings: str = ""
+    innovations: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    comparison_tags: list[str] = Field(default_factory=list)
+
+
 class PaperSummaryAssistantPanel(BaseModel):
     title: str = ""
     intent: str = ""
@@ -52,6 +63,8 @@ class PaperSummaryContent(BaseModel):
     title: str = ""
     preview: str = ""
     highlights: list[str] = Field(default_factory=list)
+    structured_fields: ReviewStructuredFields | None = None
+    narrative_sections: list[PaperSummarySection] = Field(default_factory=list)
     sections: list[PaperSummarySection] = Field(default_factory=list)
     annotation_groups: list[PaperSummaryAnnotationGroup] = Field(default_factory=list)
     assistant_panels: list[PaperSummaryAssistantPanel] = Field(default_factory=list)
@@ -100,6 +113,21 @@ def normalize_summary_content(value: dict[str, Any] | None, summary_type: str, t
     content.setdefault("title", title)
     content.setdefault("preview", "")
     content.setdefault("highlights", [])
+    if summary_type == "review":
+        content.setdefault("structured_fields", {
+            "research_question": "",
+            "core_metrics": [],
+            "method_route": "",
+            "data_sample": "",
+            "main_findings": "",
+            "innovations": [],
+            "limitations": [],
+            "comparison_tags": [],
+        })
+        content.setdefault("narrative_sections", content.get("sections") or [])
+    else:
+        content.setdefault("structured_fields", None)
+        content.setdefault("narrative_sections", [])
     content.setdefault("sections", [])
     content.setdefault("annotation_groups", [])
     content.setdefault("assistant_panels", [])

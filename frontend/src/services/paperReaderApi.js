@@ -124,8 +124,84 @@ export async function deletePaper(id) {
   return null
 }
 
+export async function fetchTrashPapers() {
+  const response = await fetch(`${PAPERS_BASE}/trash`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function restorePaperFromTrash(id) {
+  const response = await fetch(`${PAPERS_BASE}/trash/${id}/restore`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function permanentlyDeletePaper(id) {
+  const response = await fetch(`${PAPERS_BASE}/trash/${id}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  if (!response.ok) {
+    let detail = '彻底删除失败'
+    try {
+      const payload = await response.json()
+      if (typeof payload?.detail === 'string') detail = payload.detail
+    } catch {}
+    throw new Error(detail)
+  }
+  return null
+}
+
+export async function emptyTrash() {
+  const response = await fetch(`${PAPERS_BASE}/trash`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
 export function getPaperFileUrl(paperId) {
   return `${PAPERS_BASE}/${paperId}/file`
+}
+
+function parseDownloadFileName(contentDisposition, fallbackName) {
+  const value = String(contentDisposition || '')
+  const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch {
+      return utf8Match[1]
+    }
+  }
+  const quotedMatch = value.match(/filename="([^"]+)"/i)
+  if (quotedMatch?.[1]) return quotedMatch[1]
+  const plainMatch = value.match(/filename=([^;]+)/i)
+  if (plainMatch?.[1]) return plainMatch[1].trim()
+  return fallbackName
+}
+
+export async function downloadPaperExport(paperId, format, fallbackName) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/download/${format}`, {
+    headers: authHeaders(),
+  })
+  if (!response.ok) {
+    let detail = '下载失败，请稍后再试。'
+    try {
+      const payload = await response.json()
+      if (typeof payload?.detail === 'string') detail = payload.detail
+    } catch {
+      // ignore parse error
+    }
+    throw new Error(detail)
+  }
+  return {
+    blob: await response.blob(),
+    fileName: parseDownloadFileName(response.headers.get('Content-Disposition'), fallbackName),
+  }
 }
 
 export async function fetchFullTranslation(paperId) {
@@ -195,6 +271,87 @@ export async function fetchReadingStats() {
 export async function fetchResourceOverview() {
   const response = await fetch('/api/resources/overview', {
     headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchResearchDashboard() {
+  const response = await fetch('/api/research-matrix/dashboard', {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchResearchMatrixRuns() {
+  const response = await fetch('/api/research-matrix/runs', {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function createResearchMatrixRun(payload) {
+  const response = await fetch('/api/research-matrix/runs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchResearchMatrixRun(runId) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function refreshResearchMatrixRun(runId, payload = {}) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function updateResearchMatrixRunPaper(runId, paperId, payload = {}) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}/papers/${paperId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function retryPendingResearchMatrixRun(runId) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}/retry-pending`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function deleteResearchMatrixRun(runId) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  if (!response.ok) {
+    let detail = '删除矩阵记录失败'
+    try {
+      const payload = await response.json()
+      if (typeof payload?.detail === 'string') detail = payload.detail
+    } catch {}
+    throw new Error(detail)
+  }
+  return null
+}
+
+export async function generateMissingReviewSummaries(payload) {
+  const response = await fetch('/api/research-matrix/generate-missing', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
   })
   return parseJsonResponse(response)
 }
@@ -311,6 +468,20 @@ export async function generatePaperSummary(paperId, summaryType, payload = {}) {
 
 export async function fetchPaperSummaryStatus(paperId, summaryType) {
   const response = await fetch(`${PAPERS_BASE}/${paperId}/summaries/${summaryType}/status`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchPaperAnnotations(paperId) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/annotations`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchPaperNotebooks(paperId) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/notebooks`, {
     headers: authHeaders(),
   })
   return parseJsonResponse(response)

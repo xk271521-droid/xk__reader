@@ -1,4 +1,4 @@
-INFO:     Started server process [32888]
+INFO:     Started server process [32752]
 INFO:     Waiting for application startup.
 C:\Users\xk\Desktop\codexwork\backend\app\main.py:21: SAWarning: relationship 'PaperNoteNode.notebook' will copy column paper_notebooks.id to column paper_note_nodes.notebook_id, which conflicts with relationship(s): 'PaperNotebook.nodes' (copies paper_notebooks.id to paper_note_nodes.notebook_id). If this is not the intention, consider if these relationships should be linked with back_populates, or if viewonly=True should be applied to one or more if they are read-only. For the less common case that foreign key constraints are partially overlapping, the orm.foreign() annotation can be used to isolate the columns that should be written towards.   To silence this warning, add the parameter 'overlaps="nodes"' to the 'PaperNoteNode.notebook' relationship. (Background on this warning at: https://sqlalche.me/e/20/qzyx) (This warning originated from the `configure_mappers()` process, which was invoked automatically in response to a user-initiated operation.)
   existing = db.scalar(

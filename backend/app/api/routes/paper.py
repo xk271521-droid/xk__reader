@@ -4,21 +4,23 @@ import json
 import re
 from copy import deepcopy
 from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 from time import time_ns
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import PlainTextResponse
-from sqlalchemy import select, update as sql_update
+from fastapi.responses import PlainTextResponse, Response
+from sqlalchemy import delete as sql_delete, select, update as sql_update
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import AiProvider, Folder, Paper, PaperFullTranslation, User
+from app.models import AiProvider, Annotation, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperSummary, User
 from app.schemas.paper import (
     FolderCreate,
     FullTranslationResponse,
@@ -27,6 +29,7 @@ from app.schemas.paper import (
     FolderUpdate,
     PaperMetadata,
     PaperResponse,
+    PaperTrashResponse,
     PaperUpdate,
 )
 from app.services.crypto import decrypt_api_key
@@ -35,6 +38,7 @@ from app.services.translate import translate_title
 router = APIRouter(prefix="/papers", tags=["papers"])
 
 ALLOWED_PDF_TYPES = {"application/pdf"}
+TRASH_RETENTION = timedelta(days=7)
 
 
 def build_folder_response(folder: Folder) -> FolderResponse:
@@ -65,6 +69,62 @@ def build_paper_response(paper: Paper) -> PaperResponse:
         last_viewed_at=paper.last_viewed_at.isoformat() if paper.last_viewed_at else None,
         created_at=paper.created_at.isoformat() if paper.created_at else None,
     )
+
+
+def build_trash_response(paper: Paper, folder_name: str = "未分类") -> PaperTrashResponse:
+    deleted_at = paper.deleted_at or datetime.now(timezone.utc)
+    expires_at = deleted_at + TRASH_RETENTION
+    return PaperTrashResponse(
+        id=paper.id,
+        folder_id=paper.deleted_original_folder_id or paper.folder_id,
+        folder_name=folder_name,
+        file_name=paper.file_name,
+        file_size=paper.file_size,
+        title=paper.title or paper.file_name,
+        author=paper.author,
+        page_count=paper.page_count or 0,
+        deleted_at=deleted_at.isoformat(),
+        expires_at=expires_at.isoformat(),
+    )
+
+
+def active_paper_query(paper_id: int, user_id: int):
+    return select(Paper).where(
+        Paper.id == paper_id,
+        Paper.user_id == user_id,
+        Paper.deleted_at.is_(None),
+    )
+
+
+def _clear_generated_content(db: Session, paper_id: int, user_id: int) -> None:
+    db.execute(sql_delete(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
+    db.execute(
+        sql_delete(PaperSummary).where(
+            PaperSummary.paper_id == paper_id,
+            PaperSummary.user_id == user_id,
+        )
+    )
+
+
+def _permanently_delete_paper(db: Session, paper: Paper) -> None:
+    actual_file = _resolve_paper_file(paper.file_path)
+    if actual_file and actual_file.exists():
+        try:
+            actual_file.unlink()
+        except OSError:
+            pass
+    db.delete(paper)
+
+
+def _purge_expired_trashed_papers(db: Session, user_id: int | None = None) -> int:
+    cutoff = datetime.now(timezone.utc) - TRASH_RETENTION
+    query = select(Paper).where(Paper.deleted_at.is_not(None), Paper.deleted_at < cutoff)
+    if user_id is not None:
+        query = query.where(Paper.user_id == user_id)
+    papers = db.scalars(query).all()
+    for paper in papers:
+        _permanently_delete_paper(db, paper)
+    return len(papers)
 
 
 def build_full_translation_response(item: PaperFullTranslation | None) -> FullTranslationResponse:
@@ -261,6 +321,235 @@ def get_download_translation_text(block: dict) -> str:
     if source:
         return f"[未译] {source}"
     return ""
+
+
+def _json_list(raw: str | None) -> list:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _download_base_name(paper: Paper, fallback: str = "paper") -> str:
+    value = str(paper.title or paper.file_name or fallback)
+    value = re.sub(r"\.pdf$", "", value, flags=re.I)
+    value = re.sub(r'[\\/:*?"<>|]+', " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:90] or fallback
+
+
+def _attachment_headers(filename: str) -> dict[str, str]:
+    ascii_name = re.sub(r"[^A-Za-z0-9._ -]+", "_", filename).strip(" .") or "download"
+    return {
+        "Content-Disposition": (
+            f'attachment; filename="{ascii_name[:120]}"; '
+            f"filename*=UTF-8''{quote(filename)}"
+        )
+    }
+
+
+def _hex_to_rgb(color: str | None, fallback: str = "#F3B300") -> tuple[float, float, float]:
+    value = (color or fallback).strip()
+    if not re.fullmatch(r"#?[0-9A-Fa-f]{3}([0-9A-Fa-f]{3})?", value):
+        value = fallback
+    value = value.lstrip("#")
+    if len(value) == 3:
+        value = "".join(ch * 2 for ch in value)
+    return (
+        int(value[0:2], 16) / 255,
+        int(value[2:4], 16) / 255,
+        int(value[4:6], 16) / 255,
+    )
+
+
+def _normalized_pdf_rect(page, rect_data: dict):
+    import fitz
+
+    page_rect = page.rect
+    left = max(0.0, min(1.0, float(rect_data.get("left", 0) or 0)))
+    top = max(0.0, min(1.0, float(rect_data.get("top", 0) or 0)))
+    width = max(0.0, min(1.0 - left, float(rect_data.get("width", 0) or 0)))
+    height = max(0.0, min(1.0 - top, float(rect_data.get("height", 0) or 0)))
+    if width <= 0 or height <= 0:
+        return None
+    x0 = page_rect.x0 + left * page_rect.width
+    y0 = page_rect.y0 + top * page_rect.height
+    x1 = page_rect.x0 + (left + width) * page_rect.width
+    y1 = page_rect.y0 + (top + height) * page_rect.height
+    return fitz.Rect(x0, y0, x1, y1)
+
+
+def _draw_wavy_line(page, rect, color: tuple[float, float, float], width: float) -> None:
+    if rect.width <= 1:
+        return
+    amplitude = max(0.8, min(2.4, rect.height * 0.16))
+    step = max(3.0, amplitude * 2.2)
+    y = rect.y1 - max(1.2, rect.height * 0.16)
+    points = []
+    x = rect.x0
+    index = 0
+    while x <= rect.x1:
+        points.append((x, y + (amplitude if index % 2 else -amplitude)))
+        x += step
+        index += 1
+    if points and points[-1][0] < rect.x1:
+        points.append((rect.x1, y))
+    if len(points) >= 2:
+        page.draw_polyline(points, color=color, width=width, overlay=True, stroke_opacity=0.95)
+
+
+def _render_annotated_pdf(
+    file_path: Path,
+    annotations: list[Annotation],
+    ink_annotations: list[InkAnnotation],
+) -> bytes:
+    import fitz
+
+    with fitz.open(file_path) as document:
+        for annotation in annotations:
+            if annotation.page_number < 1 or annotation.page_number > document.page_count:
+                continue
+            page = document[annotation.page_number - 1]
+            color = _hex_to_rgb(annotation.color, "#F3B300")
+            for rect_data in _json_list(annotation.rects_json):
+                if not isinstance(rect_data, dict):
+                    continue
+                rect = _normalized_pdf_rect(page, rect_data)
+                if not rect:
+                    continue
+                if annotation.type == "highlight":
+                    y_pad = rect.height * 0.16
+                    marker_rect = fitz.Rect(rect.x0, rect.y0 + y_pad, rect.x1, rect.y1 - rect.height * 0.08)
+                    page.draw_rect(
+                        marker_rect,
+                        color=None,
+                        fill=color,
+                        overlay=False,
+                        fill_opacity=0.78,
+                    )
+                elif annotation.type == "wavy_underline":
+                    _draw_wavy_line(page, rect, color, max(0.8, min(2.0, rect.height * 0.08)))
+                else:
+                    y = rect.y1 - max(1.0, rect.height * 0.13)
+                    page.draw_line(
+                        (rect.x0, y),
+                        (rect.x1, y),
+                        color=color,
+                        width=max(0.8, min(2.0, rect.height * 0.08)),
+                        overlay=True,
+                        stroke_opacity=0.95,
+                    )
+
+        for ink in ink_annotations:
+            if ink.page_number < 1 or ink.page_number > document.page_count:
+                continue
+            page = document[ink.page_number - 1]
+            page_rect = page.rect
+            points = []
+            for point in _json_list(ink.points_json):
+                if not isinstance(point, dict):
+                    continue
+                x = max(0.0, min(1.0, float(point.get("x", 0) or 0)))
+                y = max(0.0, min(1.0, float(point.get("y", 0) or 0)))
+                points.append((page_rect.x0 + x * page_rect.width, page_rect.y0 + y * page_rect.height))
+            if len(points) >= 2:
+                page.draw_polyline(
+                    points,
+                    color=_hex_to_rgb(ink.color, "#15803D"),
+                    width=max(0.8, min(18.0, float(ink.stroke_width or 6) * 0.75)),
+                    overlay=True,
+                    stroke_opacity=max(0.1, min(1.0, float(ink.opacity or 0.85))),
+                )
+
+        return document.tobytes(deflate=True, garbage=4)
+
+
+def _extract_pdf_text_pages(file_path: Path) -> list[tuple[int, str]]:
+    try:
+        import fitz
+
+        pages: list[tuple[int, str]] = []
+        with fitz.open(file_path) as document:
+            for index, page in enumerate(document, start=1):
+                text = re.sub(r"\s+\n", "\n", page.get_text("text") or "")
+                text = re.sub(r"\n{3,}", "\n\n", text).strip()
+                pages.append((index, text))
+        return pages
+    except Exception:
+        return []
+
+
+def _build_annotated_docx(
+    paper: Paper,
+    file_path: Path,
+    annotations: list[Annotation],
+    ink_annotations: list[InkAnnotation],
+) -> bytes:
+    from docx import Document
+    from docx.enum.text import WD_COLOR_INDEX
+    from docx.shared import Pt, RGBColor
+
+    document = Document()
+    document.core_properties.title = paper.title or paper.file_name or "Paper"
+    document.add_heading(_download_base_name(paper), 0)
+
+    meta = document.add_paragraph()
+    meta.add_run("File: ").bold = True
+    meta.add_run(paper.file_name or "")
+    if paper.author:
+        meta.add_run("\nAuthor: ").bold = True
+        meta.add_run(paper.author)
+    if paper.doi:
+        meta.add_run("\nDOI: ").bold = True
+        meta.add_run(paper.doi)
+
+    document.add_heading("Paper Text", level=1)
+    pages = _extract_pdf_text_pages(file_path)
+    if pages:
+        for page_number, text in pages:
+            document.add_heading(f"Page {page_number}", level=2)
+            if not text:
+                document.add_paragraph("[No selectable text extracted]")
+                continue
+            for paragraph in re.split(r"\n{2,}", text):
+                clean = re.sub(r"[ \t]+", " ", paragraph).strip()
+                if clean:
+                    document.add_paragraph(clean)
+    else:
+        document.add_paragraph("No selectable text could be extracted from this PDF.")
+
+    document.add_page_break()
+    document.add_heading("Annotations", level=1)
+    if not annotations and not ink_annotations:
+        document.add_paragraph("No annotations.")
+    type_labels = {
+        "highlight": "Highlight",
+        "underline": "Underline",
+        "wavy_underline": "Wavy underline",
+    }
+    for annotation in annotations:
+        paragraph = document.add_paragraph()
+        paragraph.add_run(f"Page {annotation.page_number} - {type_labels.get(annotation.type, annotation.type)}: ").bold = True
+        quote_run = paragraph.add_run((annotation.quote_text or "").strip() or "[No quote text]")
+        if annotation.type == "highlight":
+            quote_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        if annotation.type in {"underline", "wavy_underline"}:
+            quote_run.underline = True
+        if annotation.color:
+            rgb = _hex_to_rgb(annotation.color, "#F3B300")
+            quote_run.font.color.rgb = RGBColor(*(round(channel * 255) for channel in rgb))
+        quote_run.font.size = Pt(10.5)
+    for ink in ink_annotations:
+        paragraph = document.add_paragraph()
+        paragraph.add_run(f"Page {ink.page_number} - Ink annotation: ").bold = True
+        paragraph.add_run(f"{len(_json_list(ink.points_json))} points, color {ink.color or '#15803D'}")
+
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
 
 
 def detect_local_parse_quality(pages: list[dict]) -> dict:
@@ -874,11 +1163,115 @@ def list_papers(
     db: Annotated[Session, Depends(get_db)],
     folder_id: int | None = None,
 ) -> list[PaperResponse]:
-    query = select(Paper).where(Paper.user_id == current_user.id)
+    if _purge_expired_trashed_papers(db, current_user.id):
+        db.commit()
+    query = select(Paper).where(
+        Paper.user_id == current_user.id,
+        Paper.deleted_at.is_(None),
+    )
     if folder_id is not None:
         query = query.where(Paper.folder_id == folder_id)
     papers = db.scalars(query.order_by(Paper.last_viewed_at.desc(), Paper.created_at.desc())).all()
     return [build_paper_response(p) for p in papers]
+
+
+@router.get("/trash", response_model=list[PaperTrashResponse])
+def list_trash(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[PaperTrashResponse]:
+    _purge_expired_trashed_papers(db, current_user.id)
+    db.commit()
+    papers = db.scalars(
+        select(Paper)
+        .where(
+            Paper.user_id == current_user.id,
+            Paper.deleted_at.is_not(None),
+        )
+        .order_by(Paper.deleted_at.desc(), Paper.id.desc())
+    ).all()
+    folder_ids = {paper.deleted_original_folder_id or paper.folder_id for paper in papers if paper.folder_id}
+    folders = db.scalars(
+        select(Folder).where(Folder.user_id == current_user.id, Folder.id.in_(folder_ids))
+    ).all() if folder_ids else []
+    folder_names = {folder.id: folder.name for folder in folders}
+    return [
+        build_trash_response(
+            paper,
+            folder_names.get(paper.deleted_original_folder_id or paper.folder_id, "未分类"),
+        )
+        for paper in papers
+    ]
+
+
+@router.post("/trash/{paper_id}/restore", response_model=PaperResponse)
+def restore_paper_from_trash(
+    paper_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> PaperResponse:
+    _purge_expired_trashed_papers(db, current_user.id)
+    paper = db.scalar(
+        select(Paper).where(
+            Paper.id == paper_id,
+            Paper.user_id == current_user.id,
+            Paper.deleted_at.is_not(None),
+        )
+    )
+    if not paper:
+        db.commit()
+        raise HTTPException(status_code=404, detail="回收站中没有这篇文献。")
+
+    target_folder_id = paper.deleted_original_folder_id or paper.folder_id
+    target_folder = db.scalar(
+        select(Folder).where(Folder.id == target_folder_id, Folder.user_id == current_user.id)
+    ) if target_folder_id else None
+    if not target_folder:
+        target_folder_id = _get_uncategorized_id(db, current_user.id)
+
+    paper.folder_id = target_folder_id
+    paper.deleted_at = None
+    paper.deleted_original_folder_id = None
+    db.add(paper)
+    db.commit()
+    db.refresh(paper)
+    return build_paper_response(paper)
+
+
+@router.delete("/trash/{paper_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+def permanently_delete_trashed_paper(
+    paper_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    paper = db.scalar(
+        select(Paper).where(
+            Paper.id == paper_id,
+            Paper.user_id == current_user.id,
+            Paper.deleted_at.is_not(None),
+        )
+    )
+    if not paper:
+        raise HTTPException(status_code=404, detail="回收站中没有这篇文献。")
+    _permanently_delete_paper(db, paper)
+    db.commit()
+
+
+@router.delete("/trash")
+def empty_trash(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, int]:
+    papers = db.scalars(
+        select(Paper).where(
+            Paper.user_id == current_user.id,
+            Paper.deleted_at.is_not(None),
+        )
+    ).all()
+    for paper in papers:
+        _permanently_delete_paper(db, paper)
+    db.commit()
+    return {"deleted_count": len(papers)}
 
 
 @router.post("", response_model=PaperResponse)
@@ -974,7 +1367,7 @@ def get_full_translation(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FullTranslationResponse:
-    paper = db.scalar(select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id))
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
     item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
@@ -989,7 +1382,7 @@ def start_full_translation(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FullTranslationResponse:
-    paper = db.scalar(select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id))
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
 
@@ -1069,7 +1462,7 @@ def cancel_full_translation(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FullTranslationResponse:
-    paper = db.scalar(select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id))
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
     item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
@@ -1091,7 +1484,7 @@ def stream_full_translation(
     db: Annotated[Session, Depends(get_db)],
 ) -> FullTranslationResponse:
     # v1 uses lightweight polling with the stream-shaped endpoint name.
-    paper = db.scalar(select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id))
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
     item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
@@ -1104,7 +1497,7 @@ def download_full_translation(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ):
-    paper = db.scalar(select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id))
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
     item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
@@ -1130,9 +1523,7 @@ def get_paper(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> PaperResponse:
-    paper = db.scalar(
-        select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id)
-    )
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
     return build_paper_response(paper)
@@ -1144,9 +1535,7 @@ async def get_paper_file(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ):
-    paper = db.scalar(
-        select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id)
-    )
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
 
@@ -1162,6 +1551,91 @@ async def get_paper_file(
     )
 
 
+@router.get("/{paper_id}/download/pdf")
+def download_paper_pdf(
+    paper_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    actual_file = _resolve_paper_file(paper.file_path)
+    if not actual_file or not actual_file.exists():
+        raise HTTPException(status_code=404, detail="Paper file is missing")
+
+    annotations = db.scalars(
+        select(Annotation)
+        .where(Annotation.paper_id == paper_id, Annotation.user_id == current_user.id)
+        .order_by(Annotation.page_number, Annotation.start_char, Annotation.id)
+    ).all()
+    ink_annotations = db.scalars(
+        select(InkAnnotation)
+        .where(InkAnnotation.paper_id == paper_id, InkAnnotation.user_id == current_user.id)
+        .order_by(InkAnnotation.page_number, InkAnnotation.id)
+    ).all()
+
+    if not annotations and not ink_annotations:
+        from fastapi.responses import FileResponse
+
+        return FileResponse(
+            path=str(actual_file),
+            filename=paper.file_name,
+            media_type="application/pdf",
+        )
+
+    try:
+        content = _render_annotated_pdf(actual_file, annotations, ink_annotations)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to export annotated PDF: {exc}") from exc
+
+    filename = f"{_download_base_name(paper)}-annotated.pdf"
+    return Response(
+        content,
+        media_type="application/pdf",
+        headers=_attachment_headers(filename),
+    )
+
+
+@router.get("/{paper_id}/download/word")
+def download_paper_word(
+    paper_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    actual_file = _resolve_paper_file(paper.file_path)
+    if not actual_file or not actual_file.exists():
+        raise HTTPException(status_code=404, detail="Paper file is missing")
+
+    annotations = db.scalars(
+        select(Annotation)
+        .where(Annotation.paper_id == paper_id, Annotation.user_id == current_user.id)
+        .order_by(Annotation.page_number, Annotation.start_char, Annotation.id)
+    ).all()
+    ink_annotations = db.scalars(
+        select(InkAnnotation)
+        .where(InkAnnotation.paper_id == paper_id, InkAnnotation.user_id == current_user.id)
+        .order_by(InkAnnotation.page_number, InkAnnotation.id)
+    ).all()
+
+    try:
+        content = _build_annotated_docx(paper, actual_file, annotations, ink_annotations)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to export Word document: {exc}") from exc
+
+    filename = f"{_download_base_name(paper)}-annotated.docx"
+    return Response(
+        content,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers=_attachment_headers(filename),
+    )
+
+
 @router.patch("/{paper_id}", response_model=PaperResponse)
 def update_paper(
     paper_id: int,
@@ -1169,9 +1643,7 @@ def update_paper(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> PaperResponse:
-    paper = db.scalar(
-        select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id)
-    )
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
 
@@ -1214,21 +1686,16 @@ def delete_paper(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> None:
-    paper = db.scalar(
-        select(Paper).where(Paper.id == paper_id, Paper.user_id == current_user.id)
-    )
+    _purge_expired_trashed_papers(db, current_user.id)
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
+        db.commit()
         raise HTTPException(status_code=404, detail="论文不存在。")
 
-    # 删除磁盘文件
-    actual_file = _resolve_paper_file(paper.file_path)
-    if actual_file and actual_file.exists():
-        try:
-            actual_file.unlink()
-        except OSError:
-            pass
-
-    db.delete(paper)
+    _clear_generated_content(db, paper.id, current_user.id)
+    paper.deleted_at = datetime.now(timezone.utc)
+    paper.deleted_original_folder_id = paper.folder_id
+    db.add(paper)
     db.commit()
 
 

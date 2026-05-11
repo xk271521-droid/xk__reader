@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models import AiProvider, Annotation, Paper, PaperFullTranslation, PaperSummary
+from app.schemas.paper_summary import normalize_summary_content
 from app.services.crypto import decrypt_api_key
 
 
@@ -76,12 +77,227 @@ ANNOTATION_TYPE_LABELS = {
     "underline": "下划线",
     "wavy_underline": "波浪线",
 }
+REVIEW_STRUCTURED_FIELD_ORDER = [
+    "research_question",
+    "core_metrics",
+    "method_route",
+    "data_sample",
+    "main_findings",
+    "innovations",
+    "limitations",
+    "comparison_tags",
+]
+
+REVIEW_FIELD_TO_SECTION = {
+    "research_question": "研究问题与对象",
+    "core_metrics": "关键变量/指标",
+    "method_route": "方法路线",
+    "data_sample": "数据与样本",
+    "main_findings": "核心发现",
+    "innovations": "创新点",
+    "limitations": "局限与风险",
+    "comparison_tags": "可对比标签",
+}
+
+REVIEW_SECTION_ALIASES = {
+    "research_question": ["研究问题与对象", "研究问题", "对象"],
+    "core_metrics": ["关键变量/指标", "变量", "指标"],
+    "method_route": ["方法路线", "方法与模型", "方法", "模型"],
+    "data_sample": ["数据与样本", "数据", "样本"],
+    "main_findings": ["核心发现", "核心结论与发现", "核心结论", "发现"],
+    "innovations": ["创新点与局限性", "创新点", "创新"],
+    "limitations": ["局限与风险", "创新点与局限性", "局限", "不足"],
+    "comparison_tags": ["可对比标签", "标签"],
+}
 
 
 @dataclass
 class PageText:
     page: int
     text: str
+
+
+def get_review_summary_content(content: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = normalize_summary_content(content, "review", summary_title("review"))
+    structured = normalize_review_structured_fields(
+        normalized.get("structured_fields"),
+        normalized.get("narrative_sections") or normalized.get("sections"),
+    )
+    narrative_sections = normalize_review_narrative_sections(
+        normalized.get("narrative_sections") or normalized.get("sections"),
+        structured,
+    )
+    normalized["structured_fields"] = structured
+    normalized["narrative_sections"] = narrative_sections
+    normalized["sections"] = narrative_sections
+    normalized.setdefault("structured_field_meta", {})
+    return normalized
+
+
+def section_lookup(sections: list[dict[str, Any]], aliases: list[str]) -> dict[str, Any] | None:
+    alias_set = [str(alias).strip().lower() for alias in aliases if str(alias).strip()]
+    for section in sections:
+        heading = str(section.get("heading") or "").strip().lower()
+        if any(alias in heading for alias in alias_set):
+            return section
+    return None
+
+
+def parse_compound_list(value: Any, *, limit: int = 6) -> list[str]:
+    if isinstance(value, list):
+        items = [clean_text(str(item)) for item in value]
+        return [item[:220] for item in items if item][:limit]
+    text = clean_text(str(value or ""))
+    if not text:
+        return []
+    parts = [
+        part.strip(" \t-•·;；,，/|")
+        for part in re.split(r"[\n;；,，/|]+", text)
+    ]
+    items = [part for part in parts if part]
+    if items:
+        return items[:limit]
+    return [text[:220]]
+
+
+def split_innovation_and_limitations(text: str) -> tuple[list[str], list[str]]:
+    cleaned = clean_text(text)
+    if not cleaned:
+        return [], []
+    pieces = re.split(r"(?<=[。；;])\s*", cleaned)
+    innovations: list[str] = []
+    limitations: list[str] = []
+    for piece in pieces:
+        item = piece.strip(" 。；;")
+        if not item:
+            continue
+        lowered = item.lower()
+        if (
+            item.startswith(("但", "但是", "然而"))
+            or any(token in lowered for token in ["局限", "不足", "风险", "缺点", "限制", "未说明", "依赖", "有限"])
+        ):
+            limitations.append(item)
+        else:
+            innovations.append(item)
+    if not innovations:
+        innovations = [cleaned]
+    return innovations[:4], limitations[:4]
+
+
+def normalize_review_structured_fields(value: Any, sections_value: Any = None) -> dict[str, Any]:
+    sections = sections_value if isinstance(sections_value, list) else []
+    raw = value if isinstance(value, dict) else {}
+    combined_text = ""
+    combined_section = section_lookup(sections, REVIEW_SECTION_ALIASES["innovations"])
+    if combined_section:
+        combined_text = str(combined_section.get("body") or "")
+    innovations, limitations = split_innovation_and_limitations(combined_text)
+    structured = {
+        "research_question": clean_text(raw.get("research_question") or (section_lookup(sections, REVIEW_SECTION_ALIASES["research_question"]) or {}).get("body") or "")[:360],
+        "core_metrics": parse_compound_list(raw.get("core_metrics") or (section_lookup(sections, REVIEW_SECTION_ALIASES["core_metrics"]) or {}).get("keywords") or (section_lookup(sections, REVIEW_SECTION_ALIASES["core_metrics"]) or {}).get("body")),
+        "method_route": clean_text(raw.get("method_route") or (section_lookup(sections, REVIEW_SECTION_ALIASES["method_route"]) or {}).get("body") or "")[:420],
+        "data_sample": clean_text(raw.get("data_sample") or (section_lookup(sections, REVIEW_SECTION_ALIASES["data_sample"]) or {}).get("body") or "")[:420],
+        "main_findings": clean_text(raw.get("main_findings") or (section_lookup(sections, REVIEW_SECTION_ALIASES["main_findings"]) or {}).get("body") or "")[:420],
+        "innovations": parse_compound_list(raw.get("innovations") or innovations),
+        "limitations": parse_compound_list(raw.get("limitations") or limitations),
+        "comparison_tags": parse_compound_list(raw.get("comparison_tags") or (section_lookup(sections, REVIEW_SECTION_ALIASES["comparison_tags"]) or {}).get("keywords") or (section_lookup(sections, REVIEW_SECTION_ALIASES["comparison_tags"]) or {}).get("body")),
+    }
+    return structured
+
+
+def format_structured_field_text(field_key: str, structured_fields: dict[str, Any]) -> str:
+    value = structured_fields.get(field_key)
+    if field_key in {"core_metrics", "innovations", "limitations", "comparison_tags"}:
+        return "；".join(parse_compound_list(value, limit=8))
+    return clean_text(str(value or ""))
+
+
+def update_review_section_evidence_map(sections: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    mapping: dict[str, list[dict[str, Any]]] = {}
+    for field_key, aliases in REVIEW_SECTION_ALIASES.items():
+        section = section_lookup(sections, aliases)
+        if section and isinstance(section.get("evidence"), list):
+            mapping[field_key] = section.get("evidence") or []
+    return mapping
+
+
+def normalize_review_narrative_sections(value: Any, structured_fields: dict[str, Any]) -> list[dict[str, Any]]:
+    sections = value if isinstance(value, list) else []
+    evidence_map = update_review_section_evidence_map(sections)
+    keywords_map = {
+        "research_question": parse_compound_list(structured_fields.get("comparison_tags"), limit=4),
+        "core_metrics": parse_compound_list(structured_fields.get("core_metrics"), limit=6),
+        "method_route": [],
+        "data_sample": [],
+        "main_findings": [],
+        "innovations": parse_compound_list(structured_fields.get("comparison_tags"), limit=4),
+        "limitations": [],
+        "comparison_tags": parse_compound_list(structured_fields.get("comparison_tags"), limit=6),
+    }
+    normalized: list[dict[str, Any]] = []
+    for field_key in REVIEW_STRUCTURED_FIELD_ORDER:
+        body = format_structured_field_text(field_key, structured_fields)
+        if not body:
+            continue
+        normalized.append({
+            "heading": REVIEW_FIELD_TO_SECTION[field_key],
+            "body": body,
+            "keywords": keywords_map.get(field_key, []),
+            "evidence": evidence_map.get(field_key, []),
+        })
+    return normalized
+
+
+def merge_manual_review_fields(existing_content: dict[str, Any] | None, next_content: dict[str, Any]) -> dict[str, Any]:
+    if not existing_content:
+        next_content.setdefault("structured_field_meta", {})
+        return next_content
+    existing_review = get_review_summary_content(existing_content)
+    meta = existing_review.get("structured_field_meta") if isinstance(existing_review.get("structured_field_meta"), dict) else {}
+    merged = dict(next_content)
+    merged_fields = dict(merged.get("structured_fields") or {})
+    existing_fields = dict(existing_review.get("structured_fields") or {})
+    for field_key, field_meta in meta.items():
+        if not isinstance(field_meta, dict) or not field_meta.get("is_manual"):
+            continue
+        if field_key in existing_fields:
+            merged_fields[field_key] = existing_fields[field_key]
+    merged["structured_fields"] = merged_fields
+    merged["structured_field_meta"] = meta
+    merged_sections = normalize_review_narrative_sections(merged.get("narrative_sections") or merged.get("sections"), merged_fields)
+    merged["narrative_sections"] = merged_sections
+    merged["sections"] = merged_sections
+    return merged
+
+
+def mark_review_fields_manual(content: dict[str, Any], field_keys: list[str]) -> dict[str, Any]:
+    normalized = get_review_summary_content(content)
+    meta = dict(normalized.get("structured_field_meta") or {})
+    for field_key in field_keys:
+        meta[field_key] = {
+            "is_manual": True,
+        }
+    normalized["structured_field_meta"] = meta
+    return normalized
+
+
+def apply_review_field_updates(content: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    normalized = get_review_summary_content(content)
+    structured = dict(normalized.get("structured_fields") or {})
+    changed_keys: list[str] = []
+    for field_key, raw_value in updates.items():
+        if field_key not in REVIEW_STRUCTURED_FIELD_ORDER:
+            continue
+        changed_keys.append(field_key)
+        if field_key in {"core_metrics", "innovations", "limitations", "comparison_tags"}:
+            structured[field_key] = parse_compound_list(raw_value, limit=8)
+        else:
+            structured[field_key] = clean_text(str(raw_value or ""))[:420]
+    normalized["structured_fields"] = structured
+    sections = normalize_review_narrative_sections(normalized.get("narrative_sections") or normalized.get("sections"), structured)
+    normalized["narrative_sections"] = sections
+    normalized["sections"] = sections
+    return mark_review_fields_manual(normalized, changed_keys)
 
 
 def summary_title(summary_type: str) -> str:
@@ -145,9 +361,9 @@ def build_summary_response_payload(
             "updated_at": item.updated_at.isoformat() if item.updated_at else None,
             "model": item.model or "",
         }
-    content = dict(item.content_json or {})
-    content.setdefault("type", summary_type)
-    content.setdefault("title", title)
+    content = normalize_summary_content(item.content_json, summary_type, title)
+    if summary_type == "review":
+        content = get_review_summary_content(content)
     preview = str(content.get("preview") or "")
     return {
         "type": summary_type,
@@ -214,7 +430,7 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
             source_hash = compute_source_hash(paper, item.summary_type, [], annotations)
             if len(annotations) < 3:
                 content = build_sparse_annotation_summary(item.summary_type, annotations)
-                content = normalize_generated_summary(content, item.summary_type, [], annotations)
+                content = normalize_generated_summary(content, item.summary_type, [], annotations, existing_content=item.content_json)
                 _mark_generated(db, item, content, source_hash, provider)
                 return
 
@@ -235,7 +451,7 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
             )
 
             update_summary_progress(summary_id, stage="checking_coverage", progress=90)
-            content = normalize_generated_summary(content, item.summary_type, [], annotations)
+            content = normalize_generated_summary(content, item.summary_type, [], annotations, existing_content=item.content_json)
             _mark_generated(db, item, content, source_hash, provider)
             return
 
@@ -280,7 +496,7 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
         )
 
         update_summary_progress(summary_id, stage="checking_coverage", progress=90)
-        content = normalize_generated_summary(content, item.summary_type, pages, annotations)
+        content = normalize_generated_summary(content, item.summary_type, pages, annotations, existing_content=item.content_json)
         _mark_generated(db, item, content, source_hash, provider)
     except Exception as exc:
         fresh = db.get(PaperSummary, summary_id)
@@ -702,6 +918,8 @@ def normalize_generated_summary(
     summary_type: str,
     pages: list[PageText],
     annotations: list[dict[str, Any]],
+    *,
+    existing_content: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     config = SUMMARY_TYPES[summary_type]
     missing_items = normalize_string_list(content.get("missing_items"), 8)
@@ -725,6 +943,8 @@ def normalize_generated_summary(
         normalized["highlights"] = [section["body"][:80] for section in normalized["sections"][:3]]
     if not normalized["preview"] and normalized["highlights"]:
         normalized["preview"] = "；".join(normalized["highlights"])[:180]
+    if summary_type == "review":
+        normalized = merge_manual_review_fields(existing_content, get_review_summary_content(normalized))
     return normalized
 
 

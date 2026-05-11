@@ -8,7 +8,7 @@ from sqlalchemy import inspect, select, text
 from app.api.router import api_router
 from app.core.config import settings
 from app.db.session import Base, SessionLocal, engine
-from app.models import Annotation, AiProvider, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, User, UserAgreement, UserProfile  # noqa: F401
+from app.models import Annotation, AiProvider, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, ResearchMatrixRun, ResearchMatrixRunPaper, User, UserAgreement, UserProfile  # noqa: F401
 
 
 def _ensure_system_providers() -> None:
@@ -110,6 +110,67 @@ def _ensure_full_translation_parse_columns() -> None:
                     )
 
 
+def _ensure_paper_trash_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("papers")}
+    except Exception:
+        return
+
+    with engine.begin() as connection:
+        if "deleted_at" not in columns:
+            connection.execute(text("ALTER TABLE papers ADD COLUMN deleted_at DATETIME NULL"))
+        if "deleted_original_folder_id" not in columns:
+            connection.execute(text("ALTER TABLE papers ADD COLUMN deleted_original_folder_id INTEGER NULL"))
+
+
+def _ensure_research_matrix_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        run_columns = {column["name"] for column in inspector.get_columns("research_matrix_runs")}
+        run_paper_columns = {column["name"] for column in inspector.get_columns("research_matrix_run_papers")}
+    except Exception:
+        return
+
+    run_additions = [
+        ("stage", "VARCHAR(48)", "'idle'"),
+        ("total_count", "INTEGER", "0"),
+        ("ready_count", "INTEGER", "0"),
+        ("failed_count", "INTEGER", "0"),
+        ("progress_percent", "INTEGER", "0"),
+    ]
+    run_paper_additions = [
+        ("review_role", "VARCHAR(120)", "''"),
+        ("batch_note", "TEXT", None),
+    ]
+    with engine.begin() as connection:
+        for name, column_type, default in run_additions:
+            if name in run_columns:
+                continue
+            connection.execute(
+                text(
+                    f"ALTER TABLE research_matrix_runs ADD COLUMN {name} {column_type} "
+                    f"NOT NULL DEFAULT {default}"
+                )
+            )
+        for name, column_type, default in run_paper_additions:
+            if name in run_paper_columns:
+                continue
+            if default is None:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE research_matrix_run_papers ADD COLUMN {name} {column_type} NULL"
+                    )
+                )
+            else:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE research_matrix_run_papers ADD COLUMN {name} {column_type} "
+                        f"NOT NULL DEFAULT {default}"
+                    )
+                )
+
+
 def create_app() -> FastAPI:
     application = FastAPI(title=settings.app_name)
     application.add_middleware(
@@ -131,6 +192,8 @@ def create_app() -> FastAPI:
         Base.metadata.create_all(bind=engine)
         _ensure_annotation_geometry_version_column()
         _ensure_full_translation_parse_columns()
+        _ensure_paper_trash_columns()
+        _ensure_research_matrix_columns()
         _ensure_system_providers()
 
     return application

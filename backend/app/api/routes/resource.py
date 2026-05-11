@@ -125,7 +125,7 @@ def get_resource_overview(
 ) -> dict[str, Any]:
     papers = db.scalars(
         select(Paper)
-        .where(Paper.user_id == current_user.id)
+        .where(Paper.user_id == current_user.id, Paper.deleted_at.is_(None))
         .order_by(Paper.last_viewed_at.desc(), Paper.created_at.desc())
     ).all()
     if not papers:
@@ -312,6 +312,7 @@ def save_resource_layout(
         select(Paper).where(
             Paper.id == paper_id,
             Paper.user_id == current_user.id,
+            Paper.deleted_at.is_(None),
         )
     )
     if not paper:

@@ -33,10 +33,8 @@ const eraserModeItems = [
 const inkColors = ['#15803D', '#2563EB', '#DC2626', '#F59E0B', '#111827', '#7C3AED', '#DB2777', '#0F766E']
 
 const downloadItems = [
-  { id: 'pdf', label: 'PDF 文件' },
-  { id: 'gbt7714', label: 'GB/T 7714-2015 引文' },
-  { id: 'cajcd', label: 'CAJ-CD 引文' },
-  { id: 'mla', label: 'MLA 引文' },
+  { id: 'pdf', label: 'PDF' },
+  { id: 'word', label: 'Word' },
 ]
 
 const parseModeItems = [

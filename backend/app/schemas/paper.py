@@ -53,6 +53,19 @@ class PaperResponse(BaseModel):
     created_at: str | None = None
 
 
+class PaperTrashResponse(BaseModel):
+    id: int
+    folder_id: int
+    folder_name: str = "未分类"
+    file_name: str
+    file_size: str
+    title: str
+    author: str | None = None
+    page_count: int = 0
+    deleted_at: str
+    expires_at: str
+
+
 class PaperUpdate(BaseModel):
     folder_id: int | None = Field(default=None)
     last_viewed_at: bool = False

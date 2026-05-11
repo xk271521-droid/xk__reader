@@ -871,7 +871,12 @@ export function getVisualBandsForRange(pageIndex, startChar, endChar, mode = 'se
       const previousLine = getNeighborLineInColumn(pageIndex, line, 'previous')
       const nextLine = getNeighborLineInColumn(pageIndex, line, 'next')
       const metrics = line.metrics || buildLineMetrics(chars, line.rect)
-      const widthRect = getSegmentWidthRect(line, pageIndex, chars, mode === 'decoration' ? 'decoration' : 'selection')
+      const widthMode = mode === 'decoration'
+        ? 'decoration'
+        : mode === 'search'
+          ? 'search'
+          : 'selection'
+      const widthRect = getSegmentWidthRect(line, pageIndex, chars, widthMode)
       if (!widthRect) return null
       const band = getLineVisualBand({ ...line, metrics })
       const topLimit = previousLine
@@ -881,8 +886,27 @@ export function getVisualBandsForRange(pageIndex, startChar, endChar, mode = 'se
         ? getLineVisualTop(nextLine) - LINE_SAFETY_GAP
         : 1
       const isHighlight = mode === 'highlight'
-      const idealTop = band.top + (isHighlight ? band.height * 0.12 : 0)
-      const idealBottom = band.bottom - (isHighlight ? band.height * 0.03 : 0)
+      const isSearch = mode === 'search'
+      const selectedRect = isHighlight ? unionRects(chars.map((char) => char.rect)) : null
+      const raisedChars = isHighlight
+        ? chars.filter((char) =>
+          char.charRole === 'superscript' ||
+          (metrics?.superscriptThreshold && char.rect.top < metrics.superscriptThreshold),
+        )
+        : []
+      const hasRaisedChars = raisedChars.length > 0
+      const charHeight = metrics?.medianHeight || selectedRect?.height || band.height || 0
+      const topInset = isSearch ? 0.06 : isHighlight ? (hasRaisedChars ? 0.06 : 0.14) : 0
+      const bottomInset = isSearch ? 0.02 : isHighlight ? 0.07 : 0
+      let idealTop = band.top + band.height * topInset
+      let idealBottom = band.bottom - band.height * bottomInset
+      if (hasRaisedChars) {
+        const raisedTop = Math.min(...raisedChars.map((char) => char.rect.top))
+        idealTop = Math.min(idealTop, raisedTop - Math.max(0.0008, charHeight * 0.04))
+      }
+      if (selectedRect) {
+        idealBottom = Math.max(idealBottom, selectedRect.top + selectedRect.height - Math.max(0.0004, charHeight * 0.02))
+      }
       const clampedTop = clamp(idealTop, topLimit, Math.max(topLimit, bottomLimit - 0.002))
       const clampedBottom = clamp(
         idealBottom,
@@ -908,54 +932,11 @@ export function getLineRectsForRange(pageIndex, startChar, endChar) {
 }
 
 export function getHighlightRectsForRange(pageIndex, startChar, endChar) {
-  return getVisualBandsForRange(pageIndex, startChar, endChar, 'highlight')
+  return getLineRectsForRange(pageIndex, startChar, endChar)
 }
 
 export function getSearchRectsForRange(pageIndex, startChar, endChar) {
-  if (!pageIndex) return []
-  const ordered = getOrderedRange(startChar, endChar)
-  const touchedLines = pageIndex.lines.filter(
-    (line) => line.endChar > ordered.startChar && line.startChar < ordered.endChar,
-  )
-
-  return touchedLines
-    .map((line) => {
-      const chars = line.charIndices
-        .map((index) => pageIndex.chars[index])
-        .filter(
-          (char) =>
-            char &&
-            char.index >= ordered.startChar &&
-            char.index < ordered.endChar &&
-            char.rect &&
-            isWordChar(char.char),
-        )
-      if (!chars.length) return null
-
-      const orderedChars = [...chars].sort((left, right) => {
-        if (Math.abs(left.rect.left - right.rect.left) > 0.0001) {
-          return left.rect.left - right.rect.left
-        }
-        return left.index - right.index
-      })
-      const heights = orderedChars
-        .map((char) => char.rect.height)
-        .filter((height) => typeof height === 'number' && height > 0)
-      const medianHeight = getMedian(heights) || line.rect?.height || 0.01
-      const top = Math.min(...orderedChars.map((char) => char.rect.top))
-      const bottom = Math.max(...orderedChars.map((char) => getRectBottom(char.rect)))
-      const widthRect = getSegmentWidthRect(line, pageIndex, orderedChars, 'search')
-      if (!widthRect) return null
-
-      const yPad = Math.max(0.0012, medianHeight * 0.13)
-      return {
-        left: widthRect.left,
-        top: clamp(top - yPad, 0, 1),
-        width: widthRect.width,
-        height: Math.max(VISUAL_BAND_MIN_HEIGHT, clamp(bottom + yPad, 0, 1) - clamp(top - yPad, 0, 1)),
-      }
-    })
-    .filter(Boolean)
+  return getVisualBandsForRange(pageIndex, startChar, endChar, 'search')
 }
 
 export function getDecorationRectsForRange(pageIndex, startChar, endChar) {
@@ -996,16 +977,16 @@ export function getDecorationRectsForRange(pageIndex, startChar, endChar) {
       )
       const charHeight = medianHeight || metrics.medianHeight || lineTextRect.height || line.rect.height
       const baseline = metrics.baseline || metrics.textBottom || getRectBottom(lineTextRect)
-      const baselineOffset = charHeight * (hasCjkChar(metricChars) ? 0.018 : 0.021)
+      const baselineOffset = charHeight * (hasCjkChar(metricChars) ? 0.004 : 0.006)
       const strokeHeight = Math.max(0.0018, Math.min(0.0042, charHeight * 0.085))
       const nextLine = getNeighborLineInColumn(pageIndex, line, 'next')
       const nextLineTop = nextLine ? getLineVisualTop(nextLine) : 1
-      const minTop = baseline + charHeight * 0.001
+      const minTop = baseline - strokeHeight * 0.45
       const maxTop = Math.max(
         minTop,
         nextLineTop - strokeHeight - Math.max(0.003, charHeight * 0.05),
       )
-      const preferredTop = baseline + baselineOffset
+      const preferredTop = baseline + baselineOffset - strokeHeight * 0.35
       const top = clamp(preferredTop, minTop, maxTop)
 
       return {

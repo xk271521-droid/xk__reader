@@ -5,14 +5,18 @@ import {
   createFolder as apiCreateFolder,
   deleteFolder as apiDeleteFolder,
   deletePaper as apiDeletePaper,
+  emptyTrash as apiEmptyTrash,
   fetchFolders,
   fetchPapers,
   fetchAiProviders,
   fetchPaperSummary,
   fetchReadingStats,
+  fetchTrashPapers,
   getPaperFileUrl,
+  permanentlyDeletePaper as apiPermanentlyDeletePaper,
   recordReadingEvent,
   renameFolder as apiRenameFolder,
+  restorePaperFromTrash as apiRestorePaperFromTrash,
   syncReadingRecords,
   updatePaper as apiUpdatePaper,
   uploadPaper,
@@ -191,6 +195,21 @@ function createEmptyPaperFromServer(serverPaper) {
   }
 }
 
+function normalizeTrashPaper(serverPaper) {
+  return {
+    id: String(serverPaper.id),
+    fileName: serverPaper.file_name,
+    folderId: String(serverPaper.folder_id),
+    folderName: serverPaper.folder_name || '未分类',
+    title: serverPaper.title || serverPaper.file_name?.replace(/\.pdf$/i, '') || '',
+    author: serverPaper.author || '',
+    fileSize: serverPaper.file_size || '',
+    pageCount: serverPaper.page_count || 0,
+    deletedAt: serverPaper.deleted_at ? Date.parse(serverPaper.deleted_at) : Date.now(),
+    expiresAt: serverPaper.expires_at ? Date.parse(serverPaper.expires_at) : Date.now() + 7 * 24 * 60 * 60 * 1000,
+  }
+}
+
 async function extractFirstPagesText(documentProxy, maxPages = 5) {
   const pageCount = Math.min(documentProxy.numPages, maxPages)
   const chunks = []
@@ -271,6 +290,7 @@ export function usePdfReader({ currentUser } = {}) {
   const [activeView, setActiveView] = useState('home')
   const [papers, setPapers] = useState([])
   const [folders, setFolders] = useState([])
+  const [trashPapers, setTrashPapers] = useState([])
   const [openTabIds, setOpenTabIds] = useState([])
   const openTabIdsRef = useRef(openTabIds)
   openTabIdsRef.current = openTabIds
@@ -298,9 +318,10 @@ export function usePdfReader({ currentUser } = {}) {
     if (!token) return
 
     try {
-      const [serverFolders, serverPapers] = await Promise.all([
+      const [serverFolders, serverPapers, serverTrash] = await Promise.all([
         fetchFolders(),
         fetchPapers(),
+        fetchTrashPapers(),
       ])
 
       const allFolders = serverFolders.map((f) => ({
@@ -324,6 +345,7 @@ export function usePdfReader({ currentUser } = {}) {
 
       setFolders(userFolders)
       setPapers(localPapers)
+      setTrashPapers(serverTrash.map(normalizeTrashPaper))
       // Close tabs that came from previous session
       setOpenTabIds([])
       setActiveView('home')
@@ -399,6 +421,7 @@ export function usePdfReader({ currentUser } = {}) {
       if (lastSyncUserRef.current) {
         setFolders([])
         setPapers([])
+        setTrashPapers([])
         setOpenTabIds([])
         setActiveView('home')
         setUncategorizedFolderId('')
@@ -494,6 +517,18 @@ export function usePdfReader({ currentUser } = {}) {
     if (resource) {
       paperResourcesRef.current.delete(oldId)
       paperResourcesRef.current.set(newId, resource)
+    }
+  }
+
+  async function refreshTrashPapers() {
+    if (!getStoredAuthToken()) return []
+    try {
+      const serverTrash = await fetchTrashPapers()
+      const normalized = serverTrash.map(normalizeTrashPaper)
+      setTrashPapers(normalized)
+      return normalized
+    } catch {
+      return []
     }
   }
 
@@ -662,11 +697,32 @@ export function usePdfReader({ currentUser } = {}) {
   function deletePaper(paperId) {
     summaryMapRef.current.delete(paperId)
     fullTextMapRef.current.delete(paperId)
+    const paper = paperMap.get(paperId)
+    if (paper) {
+      const deletedAt = Date.now()
+      setTrashPapers((current) => [
+        {
+          id: paper.id,
+          fileName: paper.fileName,
+          folderId: paper.folderId,
+          folderName: folderMap.get(paper.folderId)?.name || '未分类',
+          title: paper.metadata.title || paper.fileName.replace(/\.pdf$/i, ''),
+          author: paper.metadata.author || '',
+          fileSize: paper.metadata.fileSize || '',
+          pageCount: paper.metadata.pageCount || paper.totalPages || 0,
+          deletedAt,
+          expiresAt: deletedAt + 7 * 24 * 60 * 60 * 1000,
+        },
+        ...current.filter((item) => item.id !== paper.id),
+      ])
+    }
     // Call API first
     if (getStoredAuthToken()) {
       const serverId = Number(paperId)
       if (!Number.isNaN(serverId)) {
-        apiDeletePaper(serverId).catch(() => {})
+        apiDeletePaper(serverId)
+          .then(() => refreshTrashPapers())
+          .catch(() => refreshTrashPapers())
       }
     }
 
@@ -706,6 +762,47 @@ export function usePdfReader({ currentUser } = {}) {
       localStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(updated))
       return updated
     })
+  }
+
+  async function restorePaperFromTrash(paperId) {
+    if (!getStoredAuthToken()) return { ok: false, message: '请先登录' }
+    try {
+      const serverPaper = await apiRestorePaperFromTrash(Number(paperId))
+      const restored = createEmptyPaperFromServer(serverPaper)
+      setPapers((current) => {
+        const withoutDuplicate = current.filter((paper) => paper.id !== restored.id)
+        return [restored, ...withoutDuplicate]
+      })
+      setTrashPapers((current) => current.filter((paper) => paper.id !== String(paperId)))
+      return { ok: true, paper: restored }
+    } catch (error) {
+      refreshTrashPapers()
+      return { ok: false, message: error instanceof Error ? error.message : '恢复失败' }
+    }
+  }
+
+  async function permanentlyDeletePaper(paperId) {
+    if (!getStoredAuthToken()) return { ok: false, message: '请先登录' }
+    try {
+      await apiPermanentlyDeletePaper(Number(paperId))
+      setTrashPapers((current) => current.filter((paper) => paper.id !== String(paperId)))
+      return { ok: true }
+    } catch (error) {
+      refreshTrashPapers()
+      return { ok: false, message: error instanceof Error ? error.message : '彻底删除失败' }
+    }
+  }
+
+  async function emptyTrash() {
+    if (!getStoredAuthToken()) return { ok: false, message: '请先登录' }
+    try {
+      await apiEmptyTrash()
+      setTrashPapers([])
+      return { ok: true }
+    } catch (error) {
+      refreshTrashPapers()
+      return { ok: false, message: error instanceof Error ? error.message : '清空失败' }
+    }
   }
 
   // ── Folder actions ─────────────────────────────────────
@@ -1065,6 +1162,7 @@ export function usePdfReader({ currentUser } = {}) {
     deletePaper,
     deleteFolder,
     error: activePaper?.error ?? '',
+    emptyTrash,
     fileInputRef,
     fileName: activePaper?.fileName ?? '',
     fitToWidth,
@@ -1089,12 +1187,16 @@ export function usePdfReader({ currentUser } = {}) {
     recentPapers,
     readingStats,
     recentReadings,
+    refreshTrashPapers,
     renameFolder,
     resolveImportConflict,
+    restorePaperFromTrash,
     scale: activePaper?.scale ?? DEFAULT_SCALE,
     setCurrentPage,
     switchToPaper: activatePaper,
+    permanentlyDeletePaper,
     totalPages: activePaper?.totalPages ?? 0,
+    trashPapers,
     uncategorizedFolderId,
     zoomIn,
     zoomOut,

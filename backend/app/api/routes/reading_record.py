@@ -78,6 +78,7 @@ def record_reading(
         select(Paper).where(
             Paper.id == payload.paper_id,
             Paper.user_id == current_user.id,
+            Paper.deleted_at.is_(None),
         )
     )
     if not paper:
@@ -119,26 +120,30 @@ def get_reading_stats(
 
     # Weekly opens count
     weekly_opens = db.scalar(
-        select(func.count(ReadingRecord.id)).where(
+        select(func.count(ReadingRecord.id)).join(Paper, Paper.id == ReadingRecord.paper_id).where(
             ReadingRecord.user_id == current_user.id,
             ReadingRecord.opened_at >= week_start,
+            Paper.deleted_at.is_(None),
         )
     ) or 0
 
     # Weekly distinct papers
     weekly_distinct = db.scalar(
-        select(func.count(func.distinct(ReadingRecord.paper_id))).where(
+        select(func.count(func.distinct(ReadingRecord.paper_id))).join(Paper, Paper.id == ReadingRecord.paper_id).where(
             ReadingRecord.user_id == current_user.id,
             ReadingRecord.opened_at >= week_start,
+            Paper.deleted_at.is_(None),
         )
     ) or 0
 
     # All records within 30 days for time distribution and sync
     recent_records_query = (
         select(ReadingRecord)
+        .join(Paper, Paper.id == ReadingRecord.paper_id)
         .where(
             ReadingRecord.user_id == current_user.id,
             ReadingRecord.opened_at >= cutoff,
+            Paper.deleted_at.is_(None),
         )
         .order_by(ReadingRecord.opened_at.desc())
         .limit(200)
@@ -174,7 +179,7 @@ def sync_reading_records(
     user_paper_ids = {
         row[0]
         for row in db.execute(
-            select(Paper.id).where(Paper.user_id == current_user.id)
+            select(Paper.id).where(Paper.user_id == current_user.id, Paper.deleted_at.is_(None))
         ).all()
     }
 

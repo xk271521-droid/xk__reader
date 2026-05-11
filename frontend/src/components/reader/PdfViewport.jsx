@@ -24,7 +24,7 @@ import {
 
 const PAGE_OVERSCAN = 2
 const DRAG_START_DISTANCE = 2
-const DEFAULT_ANNOTATION_COLOR = '#F2B800'
+const DEFAULT_ANNOTATION_COLOR = '#F3B300'
 const DEFAULT_INK_OPTIONS = { color: '#15803D', opacity: 0.85, strokeWidth: 6 }
 
 function getPageFrameFromElement(element) {

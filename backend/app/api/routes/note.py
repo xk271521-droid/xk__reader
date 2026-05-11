@@ -26,7 +26,9 @@ def _is_persisted_id(value: int | str | None) -> bool:
 
 
 def _ensure_owned_paper(paper_id: int, user: User, db: Session) -> Paper:
-    paper = db.scalar(select(Paper).where(Paper.id == paper_id, Paper.user_id == user.id))
+    paper = db.scalar(
+        select(Paper).where(Paper.id == paper_id, Paper.user_id == user.id, Paper.deleted_at.is_(None))
+    )
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在或无权访问")
     return paper

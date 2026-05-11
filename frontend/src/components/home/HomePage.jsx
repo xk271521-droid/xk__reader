@@ -9,19 +9,23 @@ import {
   FolderClosed,
   FolderPlus,
   LibraryBig,
+  Network,
   Moon,
   MoreHorizontal,
   Package2,
+  RotateCcw,
   Search,
   Sun,
   Sunrise,
   TimerReset,
   Trash2,
 } from 'lucide-react'
+import { ResearchMatrixPage } from './ResearchMatrixPage'
 
 const homeSections = [
   { id: 'recent', label: '最近阅读', icon: Clock3 },
   { id: 'library', label: '我的文献', icon: LibraryBig },
+  { id: 'matrix', label: '文献矩阵', icon: Network },
   { id: 'trash', label: '回收站', icon: Trash2 },
 ]
 
@@ -33,6 +37,13 @@ function formatDateTime(timestamp) {
     minute: '2-digit',
     hour12: false,
   }).format(timestamp)
+}
+
+function formatDaysLeft(timestamp) {
+  const ms = Number(timestamp) - Date.now()
+  const days = Math.max(0, Math.ceil(ms / (24 * 60 * 60 * 1000)))
+  if (days <= 0) return '今天到期'
+  return `还剩 ${days} 天`
 }
 
 function classifyRecentGroup(timestamp) {
@@ -325,7 +336,7 @@ function PaperResourceMap({ paper, resources = [], onOpenResource, onSaveResourc
                 suppressClickRef.current = ''
                 return
               }
-              onOpenResource?.(paper, item.resource)
+              onOpenResource?.(paper, item.resource, event.currentTarget)
             }}
             onPointerDown={(event) => handlePointerDown(event, item)}
             onPointerMove={handlePointerMove}
@@ -674,16 +685,115 @@ function CategorySection({
   )
 }
 
-function TrashSection() {
-  return (
-    <div className="home-panel-grid">
-      <div className="home-feature-card">
-        <p className="panel-label">回收区域</p>
-        <h3>回收站</h3>
-        <p>后续这里会接入删除恢复、批量清理和保留期策略。</p>
+function TrashSection({
+  onEmptyTrash,
+  onPermanentlyDeletePaper,
+  onRestorePaper,
+  trashPapers = [],
+}) {
+  const [message, setMessage] = useState('')
+  const [busyId, setBusyId] = useState('')
+  const [isClearing, setIsClearing] = useState(false)
+
+  async function handleRestore(paperId) {
+    setBusyId(`restore:${paperId}`)
+    const result = await onRestorePaper?.(paperId)
+    setBusyId('')
+    setMessage(result?.ok ? '已恢复到原来的分类。' : (result?.message || '恢复失败。'))
+  }
+
+  async function handleDelete(paperId) {
+    if (!window.confirm('确定要彻底删除这篇文献吗？PDF、标注和笔记都会一起删除。')) return
+    setBusyId(`delete:${paperId}`)
+    const result = await onPermanentlyDeletePaper?.(paperId)
+    setBusyId('')
+    setMessage(result?.ok ? '已彻底删除。' : (result?.message || '彻底删除失败。'))
+  }
+
+  async function handleEmpty() {
+    if (!trashPapers.length) return
+    if (!window.confirm('确定清空回收站吗？这些文献会被永久删除，不能恢复。')) return
+    setIsClearing(true)
+    const result = await onEmptyTrash?.()
+    setIsClearing(false)
+    setMessage(result?.ok ? '回收站已清空。' : (result?.message || '清空失败。'))
+  }
+
+  if (trashPapers.length === 0) {
+    return (
+      <div className="home-panel-grid">
+        <div className="home-feature-card">
+          <p className="panel-label">7 天保留</p>
+          <h3>回收站为空</h3>
+          <p>删除后的文献会在这里保留 7 天，恢复时回到原来的分类；总结和全文翻译不会保留。</p>
+        </div>
       </div>
-      <div className="home-list-card">
-        <p>当前回收站为空。</p>
+    )
+  }
+
+  return (
+    <div className="home-trash-panel">
+      <div className="home-trash-panel__header">
+        <div>
+          <p className="panel-label">7 天内可恢复</p>
+          <h3>{trashPapers.length} 篇已删除文献</h3>
+          <p>恢复会回到原分类；只保留 PDF、标注、笔迹和笔记，总结与全文翻译已清理。</p>
+        </div>
+        <button
+          type="button"
+          className="home-ghost-button home-ghost-button--danger"
+          disabled={isClearing}
+          onClick={handleEmpty}
+        >
+          <Trash2 />
+          <span>{isClearing ? '清空中' : '清空回收站'}</span>
+        </button>
+      </div>
+
+      {message ? <div className="home-inline-message">{message}</div> : null}
+
+      <div className="home-trash-list">
+        {trashPapers.map((paper) => (
+          <article key={paper.id} className="home-trash-row">
+            <div className="home-trash-row__main">
+              <div className="home-paper-icon">
+                <FileText />
+              </div>
+              <div className="home-paper-copy">
+                <h3>{paper.title}</h3>
+                <p>
+                  原分类：{paper.folderName}
+                  {paper.author ? ` / 作者：${paper.author}` : ''}
+                </p>
+              </div>
+            </div>
+
+            <div className="home-trash-row__meta">
+              <span>{formatDateTime(paper.deletedAt)}</span>
+              <strong>{formatDaysLeft(paper.expiresAt)}</strong>
+            </div>
+
+            <div className="home-trash-row__actions">
+              <button
+                type="button"
+                className="home-secondary-button"
+                disabled={busyId === `restore:${paper.id}`}
+                onClick={() => handleRestore(paper.id)}
+              >
+                <RotateCcw />
+                <span>{busyId === `restore:${paper.id}` ? '恢复中' : '恢复'}</span>
+              </button>
+              <button
+                type="button"
+                className="home-ghost-button home-ghost-button--danger"
+                disabled={busyId === `delete:${paper.id}`}
+                onClick={() => handleDelete(paper.id)}
+              >
+                <Trash2 />
+              </button>
+            </div>
+          </article>
+        ))}
       </div>
     </div>
   )
@@ -697,11 +807,15 @@ export function HomePage({
   onCreateFolder,
   onDeleteFolder,
   onDeletePaper,
+  onEmptyTrash,
   onMovePaper,
   onOpenFilePicker,
   onOpenPaper,
   onOpenResource,
+  onPermanentlyDeletePaper,
   onRefreshResources,
+  onRefreshTrash,
+  onRestorePaper,
   onSaveResourceLayout,
   onRenameFolder,
   onResolveImportConflict,
@@ -709,6 +823,7 @@ export function HomePage({
   recentReadings = [],
   readingStats = null,
   resourceOverview = null,
+  trashPapers = [],
   uncategorizedFolderId,
 }) {
   const [activeSection, setActiveSection] = useState('recent')
@@ -763,10 +878,19 @@ export function HomePage({
     return next
   }, [resourceOverview])
 
-  function handleOpenResource(paper, resource) {
+  function handleOpenResource(paper, resource, trigger) {
     const paperId = paper?.id ?? paper?.paper_id
     if (!paperId) return
-    onOpenResource?.(paperId, resource)
+    onOpenResource?.({
+      paperId,
+      paperTitle: paper?.title || paper?.fileName || paper?.file_name || '未命名论文',
+      resourceType: resource?.type || '',
+      resourceLabel: resource?.label || '资源预览',
+      resourceColor: resource?.color || '#2563EB',
+      resourceStatus: resource?.status || 'ready',
+      updatedAt: resource?.updated_at || '',
+      trigger: trigger || null,
+    })
   }
 
   const weeklyStats = useMemo(() => {
@@ -857,6 +981,9 @@ export function HomePage({
 
   function handleSelectSection(sectionId) {
     setActiveSection(sectionId)
+    if (sectionId === 'trash') {
+      onRefreshTrash?.()
+    }
   }
 
   return (
@@ -994,8 +1121,8 @@ export function HomePage({
         </div>
       </aside>
 
-      <div className="home-content">
-        {activeSection !== 'trash' ? (
+      <div className={`home-content${activeSection === 'matrix' ? ' is-matrix' : ''}`}>
+        {activeSection !== 'trash' && activeSection !== 'matrix' ? (
         <div className={`home-toolbar${activeSection === 'library' ? ' is-library' : ''}`}>
           <div className="home-toolbar__actions">
             <button
@@ -1101,6 +1228,7 @@ export function HomePage({
           </>
         ) : null}
 
+        {activeSection !== 'matrix' ? (
         <div className={`home-section-head${activeSection === 'library' ? ' is-library' : ''}`}>
           <h3>
             {activeSection === 'recent' && '最近阅读'}
@@ -1110,10 +1238,11 @@ export function HomePage({
           {activeSection !== 'library' ? (
             <span>
               {activeSection === 'recent' && '按最近访问时间排序'}
-              {activeSection === 'trash' && '后续可接恢复与彻底删除'}
+              {activeSection === 'trash' && '仅保留最近 7 天删除内容'}
             </span>
           ) : null}
         </div>
+        ) : null}
 
         {activeSection === 'recent' ? (
           <RecentSection groupedPapers={groupedReadings} onOpenPaper={onOpenPaper} />
@@ -1138,7 +1267,22 @@ export function HomePage({
           />
         ) : null}
 
-        {activeSection === 'trash' ? <TrashSection /> : null}
+        {activeSection === 'matrix' ? (
+          <ResearchMatrixPage
+            folders={folders}
+            recentPapers={recentPapers}
+            uncategorizedFolderId={uncategorizedFolderId}
+          />
+        ) : null}
+
+        {activeSection === 'trash' ? (
+          <TrashSection
+            onEmptyTrash={onEmptyTrash}
+            onPermanentlyDeletePaper={onPermanentlyDeletePaper}
+            onRestorePaper={onRestorePaper}
+            trashPapers={trashPapers}
+          />
+        ) : null}
       </div>
 
       {isImporting || importConflict ? (
