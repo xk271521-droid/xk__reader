@@ -1,0 +1,1128 @@
+INFO:     Started server process [7984]
+INFO:     Waiting for application startup.
+C:\Users\xk\Desktop\codexwork\backend\app\main.py:21: SAWarning: relationship 'PaperNoteNode.notebook' will copy column paper_notebooks.id to column paper_note_nodes.notebook_id, which conflicts with relationship(s): 'PaperNotebook.nodes' (copies paper_notebooks.id to paper_note_nodes.notebook_id). If this is not the intention, consider if these relationships should be linked with back_populates, or if viewonly=True should be applied to one or more if they are read-only. For the less common case that foreign key constraints are partially overlapping, the orm.foreign() annotation can be used to isolate the columns that should be written towards.   To silence this warning, add the parameter 'overlaps="nodes"' to the 'PaperNoteNode.notebook' relationship. (Background on this warning at: https://sqlalche.me/e/20/qzyx) (This warning originated from the `configure_mappers()` process, which was invoked automatically in response to a user-initiated operation.)
+  existing = db.scalar(
+C:\Users\xk\Desktop\codexwork\backend\app\main.py:21: SAWarning: relationship 'PaperNoteBlock.node' will copy column paper_note_nodes.id to column paper_note_blocks.node_id, which conflicts with relationship(s): 'PaperNoteNode.blocks' (copies paper_note_nodes.id to paper_note_blocks.node_id). If this is not the intention, consider if these relationships should be linked with back_populates, or if viewonly=True should be applied to one or more if they are read-only. For the less common case that foreign key constraints are partially overlapping, the orm.foreign() annotation can be used to isolate the columns that should be written towards.   To silence this warning, add the parameter 'overlaps="blocks"' to the 'PaperNoteBlock.node' relationship. (Background on this warning at: https://sqlalche.me/e/20/qzyx) (This warning originated from the `configure_mappers()` process, which was invoked automatically in response to a user-initiated operation.)
+  existing = db.scalar(
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+overview.monthly_duration_hours.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+overview.monthly_duration_hours.str
+  Input should be a valid string [type=string_type, input_value=0.1, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+insight_cards.2.value.str
+  Input should be a valid string [type=string_type, input_value=0.3, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+insight_cards.2.value.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.3, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+insight_cards.2.value.str
+  Input should be a valid string [type=string_type, input_value=0.3, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+insight_cards.2.value.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.3, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+insight_cards.2.value.str
+  Input should be a valid string [type=string_type, input_value=0.7, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+insight_cards.2.value.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.7, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\python12\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\applications.py", line 112, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 714, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 734, in app
+    await route.handle(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\python12\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\python12\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\starlette\concurrency.py", line 37, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\anyio\_backends\_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\xk\Desktop\codexwork\backend\app\api\routes\reading_record.py", line 483, in get_reading_dashboard
+    return ReadingDashboardResponse(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\python12\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ReadingDashboardResponse
+insight_cards.2.value.str
+  Input should be a valid string [type=string_type, input_value=0.7, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+insight_cards.2.value.int
+  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=0.7, input_type=float]
+    For further information visit https://errors.pydantic.dev/2.13/v/int_from_float

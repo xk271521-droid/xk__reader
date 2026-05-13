@@ -13,6 +13,7 @@ import {
   Moon,
   MoreHorizontal,
   Package2,
+  Radar,
   RotateCcw,
   Search,
   Sun,
@@ -20,11 +21,14 @@ import {
   TimerReset,
   Trash2,
 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { ReadingInsightSection } from './ReadingInsightSection'
 import { ResearchMatrixPage } from './ResearchMatrixPage'
 
 const homeSections = [
-  { id: 'recent', label: '最近阅读', icon: Clock3 },
+  { id: 'recent', label: '阅读记录', icon: Clock3 },
   { id: 'library', label: '我的文献', icon: LibraryBig },
+  { id: 'insights', label: '阅读信息站', icon: Radar },
   { id: 'matrix', label: '文献矩阵', icon: Network },
   { id: 'trash', label: '回收站', icon: Trash2 },
 ]
@@ -820,6 +824,9 @@ export function HomePage({
   onRenameFolder,
   onResolveImportConflict,
   recentPapers,
+  readingDashboard = null,
+  insightTimeframe = 'month',
+  onInsightTimeframeChange,
   recentReadings = [],
   readingStats = null,
   resourceOverview = null,
@@ -1122,7 +1129,7 @@ export function HomePage({
       </aside>
 
       <div className={`home-content${activeSection === 'matrix' ? ' is-matrix' : ''}`}>
-        {activeSection !== 'trash' && activeSection !== 'matrix' ? (
+        {activeSection !== 'trash' && activeSection !== 'matrix' && activeSection !== 'insights' ? (
         <div className={`home-toolbar${activeSection === 'library' ? ' is-library' : ''}`}>
           <div className="home-toolbar__actions">
             <button
@@ -1195,12 +1202,12 @@ export function HomePage({
           <>
             <div className="home-heading">
               <div>
-                <p className="panel-label">个人阅读工作台</p>
-                <h2>这一周的阅读节奏</h2>
+                <p className="panel-label">阅读轨迹</p>
+                <h2>最近打开过的文献</h2>
               </div>
               <div className="home-heading__meta">
                 <LibraryBig />
-                <span>{recentPapers.length} 篇会话文献</span>
+                <span>{recentPapers.length} 篇阅读中的文献</span>
               </div>
             </div>
 
@@ -1228,16 +1235,26 @@ export function HomePage({
           </>
         ) : null}
 
-        {activeSection !== 'matrix' ? (
+        {activeSection === 'insights' ? (
+          <ReadingInsightSection
+            dashboard={readingDashboard}
+            recentPapers={recentPapers}
+            resourceOverview={resourceOverview}
+            timeframe={insightTimeframe}
+            onTimeframeChange={onInsightTimeframeChange}
+          />
+        ) : null}
+
+        {activeSection !== 'matrix' && activeSection !== 'insights' ? (
         <div className={`home-section-head${activeSection === 'library' ? ' is-library' : ''}`}>
           <h3>
-            {activeSection === 'recent' && '最近阅读'}
+            {activeSection === 'recent' && '阅读记录'}
             {activeSection === 'library' && '我的文献'}
             {activeSection === 'trash' && '回收站'}
           </h3>
           {activeSection !== 'library' ? (
             <span>
-              {activeSection === 'recent' && '按最近访问时间排序'}
+              {activeSection === 'recent' && '按最近打开时间排序'}
               {activeSection === 'trash' && '仅保留最近 7 天删除内容'}
             </span>
           ) : null}

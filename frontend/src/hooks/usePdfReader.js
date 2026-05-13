@@ -18,6 +18,7 @@ import {
   renameFolder as apiRenameFolder,
   restorePaperFromTrash as apiRestorePaperFromTrash,
   syncReadingRecords,
+  updateReadingDuration,
   updatePaper as apiUpdatePaper,
   uploadPaper,
 } from '../services/paperReaderApi'
@@ -130,6 +131,15 @@ function createFileFingerprint(file) {
 
 function createPaperId() {
   return `paper-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function createReadingSession(now = Date.now()) {
+  return {
+    recordId: null,
+    lastResumedAt: now,
+    accumulatedMs: 0,
+    running: true,
+  }
 }
 
 function createEmptyPaperState(file, paperId, folderId, extra = {}) {
@@ -287,6 +297,7 @@ export function usePdfReader({ currentUser } = {}) {
   const fullTextMapRef = useRef(new Map())
   const uncategorizedFolderIdRef = useRef('')
   const lastSyncUserRef = useRef(null)
+  const readingSessionsRef = useRef(new Map())
   const [activeView, setActiveView] = useState('home')
   const [papers, setPapers] = useState([])
   const [folders, setFolders] = useState([])
@@ -298,6 +309,7 @@ export function usePdfReader({ currentUser } = {}) {
   const [recentReadings, setRecentReadings] = useState(getStoredRecentReadings())
   const [importConflict, setImportConflict] = useState(null)
   const [readingStats, setReadingStats] = useState(null)
+  const [readingDurationVersion, setReadingDurationVersion] = useState(0)
 
   // ── Cleanup on unmount ──────────────────────────────────
 
@@ -310,6 +322,17 @@ export function usePdfReader({ currentUser } = {}) {
     },
     [],
   )
+
+  useEffect(() => {
+    function handleBeforeUnload() {
+      if (activeView !== 'home') {
+        flushReadingDuration(activeView, { finalize: true })
+      }
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [activeView])
 
   // ── Sync with backend ──────────────────────────────────
 
@@ -492,6 +515,58 @@ export function usePdfReader({ currentUser } = {}) {
     )
   }
 
+  function flushReadingDuration(paperId, options = {}) {
+    const { finalize = true } = options
+    if (!getStoredAuthToken()) return
+    const session = readingSessionsRef.current.get(paperId)
+    if (!session) return
+    const totalMs = session.accumulatedMs + (session.running ? Math.max(0, Date.now() - session.lastResumedAt) : 0)
+    const durationSeconds = Math.floor(totalMs / 1000)
+    if (durationSeconds < 15) {
+      if (finalize) {
+        readingSessionsRef.current.delete(paperId)
+      }
+      return
+    }
+    if (!session.recordId) {
+      if (finalize) {
+        readingSessionsRef.current.delete(paperId)
+      }
+      return
+    }
+    updateReadingDuration(session.recordId, durationSeconds)
+      .then(() => {
+        setReadingDurationVersion((current) => current + 1)
+      })
+      .catch(() => {})
+    if (finalize) {
+      readingSessionsRef.current.delete(paperId)
+    } else {
+      session.accumulatedMs = totalMs
+      session.running = false
+    }
+  }
+
+  function pauseReadingSession(paperId) {
+    const session = readingSessionsRef.current.get(paperId)
+    if (!session || !session.running) return
+    session.accumulatedMs += Math.max(0, Date.now() - session.lastResumedAt)
+    session.running = false
+    flushReadingDuration(paperId, { finalize: false })
+  }
+
+  function resumeReadingSession(paperId) {
+    const existing = readingSessionsRef.current.get(paperId)
+    if (existing) {
+      if (!existing.running) {
+        existing.lastResumedAt = Date.now()
+        existing.running = true
+      }
+      return
+    }
+    readingSessionsRef.current.set(paperId, createReadingSession())
+  }
+
   function replacePaperId(oldId, newId) {
     setPapers((currentPapers) =>
       currentPapers.map((paper) =>
@@ -537,6 +612,9 @@ export function usePdfReader({ currentUser } = {}) {
   function activatePaper(paperId) {
     const paper = paperMap.get(paperId)
     if (!paper) return
+    if (activeView !== 'home' && activeView !== paperId) {
+      pauseReadingSession(activeView)
+    }
 
     setOpenTabIds((currentIds) =>
       currentIds.includes(paperId) ? currentIds : [...currentIds, paperId],
@@ -567,12 +645,21 @@ export function usePdfReader({ currentUser } = {}) {
         // Only record a new reading event if not already open in tabs
         if (!isAlreadyOpen) {
           recordReadingEvent(serverId, Date.now())
-            .then(() => fetchReadingStats())
+            .then((record) => {
+              const session = readingSessionsRef.current.get(paperId) || createReadingSession()
+              session.recordId = record?.id ?? null
+              session.lastResumedAt = Date.now()
+              session.running = true
+              readingSessionsRef.current.set(paperId, session)
+              return fetchReadingStats()
+            })
             .then((stats) => { if (stats) setReadingStats(stats) })
             .catch(() => {})
         }
       }
     }
+
+    resumeReadingSession(paperId)
 
     // Lazy-load PDF from server if not yet loaded
     if (!paper.pdfDocument && !paper.isLoading && paper._serverFileUrl) {
@@ -667,10 +754,14 @@ export function usePdfReader({ currentUser } = {}) {
   }
 
   function goHome() {
+    if (activeView !== 'home') {
+      pauseReadingSession(activeView)
+    }
     setActiveView('home')
   }
 
   function closePaper(paperId) {
+    flushReadingDuration(paperId, { finalize: true })
     summaryMapRef.current.delete(paperId)
     fullTextMapRef.current.delete(paperId)
     setOpenTabIds((currentIds) => {
@@ -695,6 +786,7 @@ export function usePdfReader({ currentUser } = {}) {
   }
 
   function deletePaper(paperId) {
+    flushReadingDuration(paperId, { finalize: true })
     summaryMapRef.current.delete(paperId)
     fullTextMapRef.current.delete(paperId)
     const paper = paperMap.get(paperId)
@@ -1187,6 +1279,7 @@ export function usePdfReader({ currentUser } = {}) {
     recentPapers,
     readingStats,
     recentReadings,
+    readingDurationVersion,
     refreshTrashPapers,
     renameFolder,
     resolveImportConflict,

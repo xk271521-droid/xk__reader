@@ -18,14 +18,17 @@ from app.schemas.research_matrix import (
     ResearchMatrixRunListResponse,
     ResearchMatrixRunPaperUpdateRequest,
     ResearchMatrixRunResponse,
+    ResearchMatrixRunUpdateRequest,
 )
 from app.services.paper_summary import is_summary_stale, run_paper_summary_task
 from app.services.research_matrix import (
+    DELETED_SOURCE_PAPER_MESSAGE,
     build_dashboard_snapshot,
     create_matrix_run,
     ensure_unique_paper_ids,
     get_owned_papers,
-    load_run_with_papers,
+    inspect_run_source_state,
+    rename_matrix_run,
     retry_pending_run,
     run_matrix_run_task,
     serialize_run_detail,
@@ -48,6 +51,12 @@ def _load_run(db: Session, run_id: int, user_id: int) -> ResearchMatrixRun:
     if not run:
         raise HTTPException(status_code=404, detail="文献矩阵记录不存在")
     return run
+
+
+def _raise_if_run_source_deleted(db: Session, run: ResearchMatrixRun, user_id: int) -> None:
+    source_state = inspect_run_source_state(db, run, user_id)
+    if source_state["has_deleted_papers"]:
+        raise HTTPException(status_code=409, detail=DELETED_SOURCE_PAPER_MESSAGE)
 
 
 @router.get("/dashboard", response_model=ResearchDashboardResponse)
@@ -112,6 +121,19 @@ def get_matrix_run(
     return ResearchMatrixRunResponse(**serialize_run_detail(db, run, current_user.id))
 
 
+@router.patch("/runs/{run_id}", response_model=ResearchMatrixRunResponse)
+def update_matrix_run(
+    run_id: int,
+    payload: ResearchMatrixRunUpdateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ResearchMatrixRunResponse:
+    run = _load_run(db, run_id, current_user.id)
+    run = rename_matrix_run(db, run, title=payload.title)
+    run = _load_run(db, run.id, current_user.id)
+    return ResearchMatrixRunResponse(**serialize_run_detail(db, run, current_user.id))
+
+
 @router.patch("/runs/{run_id}/papers/{paper_id}", response_model=ResearchMatrixRunResponse)
 def update_matrix_run_paper_endpoint(
     run_id: int,
@@ -121,6 +143,7 @@ def update_matrix_run_paper_endpoint(
     db: Annotated[Session, Depends(get_db)],
 ) -> ResearchMatrixRunResponse:
     run = _load_run(db, run_id, current_user.id)
+    _raise_if_run_source_deleted(db, run, current_user.id)
     try:
         updated = update_matrix_run_paper(
             db,
@@ -132,6 +155,7 @@ def update_matrix_run_paper_endpoint(
         )
     except ValueError as exc:
         mapping = {
+            "paper_source_deleted": (409, DELETED_SOURCE_PAPER_MESSAGE),
             "run_not_completed": (409, "当前批次尚未完成，暂不能编辑"),
             "paper_not_found": (404, "当前批次中没有这篇论文"),
             "invalid_paper_fields": (400, "没有可保存的单篇综述字段"),
@@ -152,6 +176,7 @@ def refresh_matrix_run(
     db: Annotated[Session, Depends(get_db)],
 ) -> ResearchMatrixRunResponse:
     run = _load_run(db, run_id, current_user.id)
+    _raise_if_run_source_deleted(db, run, current_user.id)
     paper_ids = [item.paper_id for item in run.papers if item.paper_id]
     if not paper_ids:
         raise HTTPException(status_code=400, detail="当前矩阵没有可刷新的文献")
@@ -177,6 +202,7 @@ def retry_pending_matrix_run(
     db: Annotated[Session, Depends(get_db)],
 ) -> ResearchMatrixRunResponse:
     run = _load_run(db, run_id, current_user.id)
+    _raise_if_run_source_deleted(db, run, current_user.id)
     run = retry_pending_run(db, run)
     background_tasks.add_task(run_matrix_run_task, run.id, None)
     run = _load_run(db, run.id, current_user.id)

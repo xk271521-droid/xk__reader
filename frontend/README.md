@@ -1,16 +1,27 @@
-# React + Vite
+# Frontend Foundation
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This frontend now uses a shared `shadcn/ui` foundation on top of `Vite + React + Tailwind v4`.
 
-Currently, two official plugins are available:
+## UI Rules
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- New pages and new shared UI should prefer `@/components/ui/*`.
+- Do not introduce `Ant Design` or `MUI`.
+- Keep business logic out of shared primitives under `src/components/ui`.
+- Prefer semantic theme tokens like `bg-background`, `text-foreground`, `border-border`.
+- Do not hardcode new brand colors when a semantic token already exists.
+- Keep icons on `lucide-react`.
+- Keep charts on `recharts`, wrapped with `@/components/ui/chart` when useful.
 
-## React Compiler
+## Project Conventions
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- Import aliases are available through `@/*`.
+- Shared helpers live in `@/lib`.
+- Theme infrastructure is provided by `src/components/theme-provider.jsx`.
+- Light and dark tokens are both defined, but the app currently defaults to light mode.
 
-## Expanding the ESLint configuration
+## Common Paths
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+- Theme tokens: `src/styles/index.css`
+- Shared UI primitives: `src/components/ui`
+- Utility helpers: `src/lib/utils.js`
+- shadcn config: `components.json`

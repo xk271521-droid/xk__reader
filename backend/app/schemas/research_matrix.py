@@ -22,6 +22,10 @@ class ResearchMatrixRefreshRequest(BaseModel):
     provider_id: int | None = Field(default=None, ge=1)
 
 
+class ResearchMatrixRunUpdateRequest(BaseModel):
+    title: str = Field(default="", max_length=160)
+
+
 class ResearchMatrixRunPaperUpdateRequest(BaseModel):
     paper_field_updates: dict[str, Any] = Field(default_factory=dict)
     run_field_updates: dict[str, Any] = Field(default_factory=dict)
@@ -51,6 +55,9 @@ class ResearchMatrixRunListItem(BaseModel):
     version: int = 1
     refreshed_from_id: int | None = None
     has_updates: bool = False
+    has_deleted_papers: bool = False
+    deleted_paper_count: int = 0
+    deleted_paper_message: str | None = None
     missing_count: int = 0
     stale_count: int = 0
     progress_percent: int = 0
@@ -68,6 +75,14 @@ class ResearchMatrixRunResponse(ResearchMatrixRunListItem):
     dashboard: dict[str, Any] = Field(default_factory=dict)
     papers: list[ResearchMatrixRunPaperResponse] = Field(default_factory=list)
     refresh_available: bool = False
+    draft_status: str = "idle"
+    draft_stage: str = "idle"
+    draft_stage_label: str = ""
+    draft_progress_percent: int = 0
+    draft_ready_count: int = 0
+    draft_total_count: int = 0
+    draft_failed_count: int = 0
+    draft_error_message: str | None = None
 
 
 class ResearchMatrixRunListResponse(BaseModel):

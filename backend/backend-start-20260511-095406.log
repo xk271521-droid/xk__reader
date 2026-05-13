@@ -657,3 +657,27 @@ INFO:     127.0.0.1:53033 - "POST /api/suggest-questions HTTP/1.1" 200 OK
 INFO:     127.0.0.1:56042 - "GET /api/research-matrix/runs HTTP/1.1" 200 OK
 INFO:     127.0.0.1:52503 - "GET /api/research-matrix/runs HTTP/1.1" 200 OK
 INFO:     127.0.0.1:57454 - "GET /api/research-matrix/runs/10 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50527 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50530 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50529 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50528 - "GET /api/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50531 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50532 - "GET /api/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64758 - "GET /api/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50209 - "GET /uploads/avatars/4054764383_1777628521838.jpg HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:62055 - "GET /api/papers/folders HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58905 - "GET /api/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62054 - "GET /api/papers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62056 - "GET /api/papers/trash HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62057 - "GET /api/resources/overview HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55591 - "GET /api/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52566 - "POST /api/reading-records/sync HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52567 - "GET /api/reading-records/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54100 - "GET /api/resources/overview HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64165 - "GET /api/research-matrix/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55589 - "GET /api/research-matrix/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61835 - "GET /api/research-matrix/runs/10 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55541 - "GET /api/research-matrix/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50119 - "GET /api/research-matrix/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57335 - "GET /api/research-matrix/runs/10 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53144 - "GET /api/health HTTP/1.1" 200 OK

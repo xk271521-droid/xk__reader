@@ -1,0 +1,9 @@
+{
+  "id": "yushi-cat",
+  "displayName": "Yushi Cat",
+  "description": "A tiny white cat wearing a tan flowerpot helmet with orange rim and a blue star on its belly.",
+  "spritesheetPath": "spritesheet.webp",
+  "kind": "creature",
+  "source": "codex-pets.net",
+  "sourceId": "yushi-cat"
+}

@@ -13,7 +13,9 @@ async function parseJsonResponse(response) {
     } catch {
       // ignore parse error
     }
-    throw new Error(detail)
+    const error = new Error(detail)
+    error.status = response.status
+    throw error
   }
 
   return response.json()
@@ -250,9 +252,10 @@ export function getFullTranslationDownloadUrl(paperId) {
 
 // ── Reading Records ──────────────────────────────────────
 
-export async function recordReadingEvent(paperId, openedAt) {
+export async function recordReadingEvent(paperId, openedAt, durationSeconds = 0) {
   const body = { paper_id: Number(paperId) }
   if (openedAt != null) body.opened_at = new Date(openedAt).toISOString()
+  if (durationSeconds > 0) body.duration_seconds = Math.round(durationSeconds)
   const response = await fetch('/api/reading-records', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -261,8 +264,25 @@ export async function recordReadingEvent(paperId, openedAt) {
   return parseJsonResponse(response)
 }
 
+export async function updateReadingDuration(recordId, durationSeconds) {
+  const response = await fetch(`/api/reading-records/${recordId}/duration`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ duration_seconds: Math.max(0, Math.round(durationSeconds || 0)) }),
+  })
+  return parseJsonResponse(response)
+}
+
 export async function fetchReadingStats() {
   const response = await fetch('/api/reading-records/stats', {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchReadingDashboard(timeframe = 'month') {
+  const query = new URLSearchParams({ timeframe })
+  const response = await fetch(`/api/reading-records/dashboard?${query.toString()}`, {
     headers: authHeaders(),
   })
   return parseJsonResponse(response)
@@ -301,6 +321,15 @@ export async function createResearchMatrixRun(payload) {
 export async function fetchResearchMatrixRun(runId) {
   const response = await fetch(`/api/research-matrix/runs/${runId}`, {
     headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function updateResearchMatrixRun(runId, payload = {}) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
   })
   return parseJsonResponse(response)
 }

@@ -38,6 +38,7 @@ import {
   cancelFullTranslation,
   downloadPaperExport,
   fetchFullTranslation,
+  fetchReadingDashboard,
   fetchResourceOverview,
   retryFullTranslation,
   saveResourceLayout,
@@ -209,6 +210,8 @@ function App() {
   const [fullTranslationParseMode, setFullTranslationParseMode] = useState('auto')
   const [isFullTranslationOpen, setIsFullTranslationOpen] = useState(false)
   const [resourceOverview, setResourceOverview] = useState({ stats: {}, papers: [] })
+  const [readingDashboard, setReadingDashboard] = useState(null)
+  const [insightTimeframe, setInsightTimeframe] = useState('month')
   const [resourcePreview, setResourcePreview] = useState(null)
   const chatMessageCounterRef = useRef(0)
   const chatRequestCounterRef = useRef(0)
@@ -265,6 +268,7 @@ function App() {
     recentPapers,
     readingStats,
     recentReadings,
+    readingDurationVersion,
     refreshTrashPapers,
     renameFolder,
     resolveImportConflict,
@@ -406,6 +410,56 @@ function App() {
       cancelled = true
     }
   }, [currentUser, recentPapers.length])
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!currentUser) {
+      setReadingDashboard(null)
+      return undefined
+    }
+
+    async function loadReadingDashboard() {
+      try {
+        const payload = await fetchReadingDashboard(insightTimeframe)
+        if (!cancelled) {
+          setReadingDashboard(payload || null)
+        }
+      } catch {
+        if (!cancelled) {
+          setReadingDashboard(null)
+        }
+      }
+    }
+
+    loadReadingDashboard()
+    return () => {
+      cancelled = true
+    }
+  }, [
+    currentUser,
+    recentPapers.length,
+    recentReadings?.[0]?.openedAt ?? null,
+    readingStats?.weekly_opens ?? 0,
+    readingStats?.weekly_distinct_papers ?? 0,
+    readingStats?.dominant_period ?? '',
+    readingDurationVersion,
+    resourceOverview?.stats?.annotation_count ?? 0,
+    resourceOverview?.stats?.note_count ?? 0,
+    resourceOverview?.stats?.summary_count ?? 0,
+    resourceOverview?.stats?.translation_count ?? 0,
+    insightTimeframe,
+  ])
+
+  async function refreshReadingDashboard() {
+    if (!currentUser) return
+    try {
+      const payload = await fetchReadingDashboard(insightTimeframe)
+      setReadingDashboard(payload || null)
+    } catch {
+      // Reading dashboard is non-blocking.
+    }
+  }
 
   async function refreshResourceOverview() {
     if (!currentUser) return
@@ -1341,14 +1395,15 @@ function App() {
 
   async function handleSaveAllNotebooks(nextNotebooks) {
     if (!activePaperId) return null
-    const saved = await saveNotebooks(nextNotebooks || notebooks)
-    if (saved) {
-      const prepared = ensureInsertTarget(saved, activeNoteTarget)
-      setActiveNoteTarget(prepared.target)
-      refreshResourceOverview()
+      const saved = await saveNotebooks(nextNotebooks || notebooks)
+      if (saved) {
+        const prepared = ensureInsertTarget(saved, activeNoteTarget)
+        setActiveNoteTarget(prepared.target)
+        refreshResourceOverview()
+        refreshReadingDashboard()
+      }
+      return saved
     }
-    return saved
-  }
 
   function handleJumpToNoteAnchor(note) {
     if (!note?.page_number || note.start_char == null || note.end_char == null) return
@@ -1386,7 +1441,10 @@ function App() {
     const before = snapshotAnnotations(annotations)
     const result = await createAnnotation(payload)
     if (result) pushAnnotationUndo(activePaperId, before)
-    if (result) refreshResourceOverview()
+    if (result) {
+      refreshResourceOverview()
+      refreshReadingDashboard()
+    }
     return result
   }
 
@@ -1395,7 +1453,10 @@ function App() {
     const before = snapshotAnnotations(annotations)
     const result = await deleteAnnotation(annotationId)
     if (result) pushAnnotationUndo(activePaperId, before)
-    if (result) refreshResourceOverview()
+    if (result) {
+      refreshResourceOverview()
+      refreshReadingDashboard()
+    }
     return result
   }
 
@@ -1405,7 +1466,10 @@ function App() {
     const before = snapshotAnnotations(annotations)
     const result = await clearAnnotations()
     if (result) pushAnnotationUndo(activePaperId, before)
-    if (result) refreshResourceOverview()
+    if (result) {
+      refreshResourceOverview()
+      refreshReadingDashboard()
+    }
     return result
   }
 
@@ -1423,6 +1487,7 @@ function App() {
       if (sessionKey) eraseUndoSessionsRef.current.add(sessionKey)
     }
     refreshResourceOverview()
+    refreshReadingDashboard()
     return result
   }
 
@@ -1439,6 +1504,28 @@ function App() {
       ...prev,
       [activePaperId]: (prev[activePaperId] || []).slice(0, -1),
     }))
+    refreshResourceOverview()
+    refreshReadingDashboard()
+  }
+
+  async function handleCreateInkAnnotation(payload) {
+    if (!activePaperId) return null
+    const result = await createInkAnnotation(payload)
+    if (result) {
+      refreshResourceOverview()
+      refreshReadingDashboard()
+    }
+    return result
+  }
+
+  async function handleDeleteInkAnnotation(inkId) {
+    if (!activePaperId) return null
+    const result = await deleteInkAnnotation(inkId)
+    if (result) {
+      refreshResourceOverview()
+      refreshReadingDashboard()
+    }
+    return result
   }
 
   function handleClosePaper(paperId) {
@@ -1689,6 +1776,9 @@ function App() {
             onRenameFolder={renameFolder}
             onResolveImportConflict={resolveImportConflict}
             recentPapers={recentPapers}
+            readingDashboard={readingDashboard}
+            insightTimeframe={insightTimeframe}
+            onInsightTimeframeChange={setInsightTimeframe}
             recentReadings={recentReadings}
             readingStats={readingStats}
             resourceOverview={resourceOverview}
@@ -1756,8 +1846,8 @@ function App() {
                 onCreateAnnotation={handleCreateAnnotation}
                 onDeleteAnnotation={handleDeleteAnnotation}
                 onEraseAnnotationRange={handleEraseAnnotationRange}
-                onCreateInkAnnotation={createInkAnnotation}
-                onDeleteInkAnnotation={deleteInkAnnotation}
+                onCreateInkAnnotation={handleCreateInkAnnotation}
+                onDeleteInkAnnotation={handleDeleteInkAnnotation}
                 onInsertSelectionNote={handleInsertSelectionNote}
                 onAskAI={function () { if (selectionCard.text) handleAskAIText(selectionCard.text) }}
                 onScreenshotTranslate={handleScreenshotTranslate}

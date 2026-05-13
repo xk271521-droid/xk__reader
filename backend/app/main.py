@@ -171,6 +171,22 @@ def _ensure_research_matrix_columns() -> None:
                 )
 
 
+def _ensure_reading_record_duration_column() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("reading_records")}
+    except Exception:
+        return
+
+    if "duration_seconds" in columns:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE reading_records ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 0")
+        )
+
+
 def create_app() -> FastAPI:
     application = FastAPI(title=settings.app_name)
     application.add_middleware(
@@ -194,6 +210,7 @@ def create_app() -> FastAPI:
         _ensure_full_translation_parse_columns()
         _ensure_paper_trash_columns()
         _ensure_research_matrix_columns()
+        _ensure_reading_record_duration_column()
         _ensure_system_providers()
 
     return application
