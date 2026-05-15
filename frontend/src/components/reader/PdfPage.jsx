@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef } from 'react'
 import { loadPdfJs } from '../../services/pdfjsClient'
 import { InkOverlay } from './InkOverlay'
-import { buildRenderedPageIndex } from './pdfSelectionModel'
+import { PDF_TEXT_GEOMETRY_VERSION, buildRenderedPageIndex } from './pdfSelectionModel'
 
 function getRenderScale() {
   return Math.min(window.devicePixelRatio || 1, 1.5)
@@ -130,7 +130,7 @@ function cacheKey(pdfDocument, pageNumber) {
     pdfDocument?._pdfInfo?.fingerprints?.[0] ||
     'doc'
 
-  return `${fp}:${pageNumber}`
+  return `${fp}:${pageNumber}:${PDF_TEXT_GEOMETRY_VERSION}`
 }
 
 function PdfPageComponent({
@@ -297,7 +297,7 @@ function PdfPageComponent({
         pageFrameRef.current.__lineRects = []
       }
     }
-  }, [pageMetric, pageNumber, pdfDocument, scale, shouldRender])
+  }, [pageMetric, pageNumber, pdfDocument, scale, shouldRender, PDF_TEXT_GEOMETRY_VERSION])
 
   return (
     <div className="pdf-page-frame" data-page-number={pageNumber} ref={pageFrameRef}>

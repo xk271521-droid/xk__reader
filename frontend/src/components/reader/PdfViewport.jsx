@@ -6,17 +6,13 @@ import { ScreenshotFloatingMenu } from './ScreenshotFloatingMenu'
 import { SelectionFloatingMenu } from './SelectionFloatingMenu'
 import {
   buildSelectionFromWordRange,
-  findCharAtPoint,
   findCharBoundaryAtPoint,
   findCharInRangeAtPoint,
   findErasePreviewRangeAtPoint,
   findLineAtPoint,
   findSelectionBoundaryAtPoint,
   findWordAtPoint,
-  formatRangeTextForCopy,
-  getDecorationRectsForRange,
-  getHighlightRectsForRange,
-  getPageTextSlice,
+  getTextRangeGeometry,
   getLineRectsForRange,
   getSearchRectsForRange,
   isPointInsideRect,
@@ -64,10 +60,10 @@ function buildSelectionFromChars(pageIndex, pageNumber, startChar, endChar) {
   if (orderedStart === orderedEnd) {
     orderedEnd = Math.min(pageIndex.length, orderedStart + 1)
   }
-  const text = getPageTextSlice(pageIndex, orderedStart, orderedEnd)
-  const copyText = formatRangeTextForCopy(pageIndex, orderedStart, orderedEnd)
-  const rects = getLineRectsForRange(pageIndex, orderedStart, orderedEnd)
-  if (!text.trim() || rects.length === 0) {
+  const geometry = getTextRangeGeometry(pageIndex, orderedStart, orderedEnd, {
+    visualMode: 'selection-overlay',
+  })
+  if (!geometry.text.trim() || geometry.rects.length === 0) {
     return createEmptySelection()
   }
 
@@ -76,10 +72,10 @@ function buildSelectionFromChars(pageIndex, pageNumber, startChar, endChar) {
     pageNumber,
     startChar: orderedStart,
     endChar: orderedEnd,
-    text,
-    copyText,
-    rects,
-    anchorRect: rects[0] || null,
+    text: geometry.text,
+    copyText: geometry.copyText,
+    rects: geometry.rects,
+    anchorRect: geometry.rects[0] || null,
     contextBefore: pageIndex.fullText.slice(Math.max(0, orderedStart - 120), orderedStart),
     contextAfter: pageIndex.fullText.slice(orderedEnd, Math.min(pageIndex.length, orderedEnd + 120)),
   }
@@ -241,7 +237,10 @@ function buildEraserPreview(pageIndex, pageNumber, startChar, endChar) {
     return createEmptyEraserPreview()
   }
 
-  const rects = getLineRectsForRange(pageIndex, orderedStart, orderedEnd)
+  const geometry = getTextRangeGeometry(pageIndex, orderedStart, orderedEnd, {
+    visualMode: 'eraser-preview',
+  })
+  const rects = geometry.rects
   if (rects.length === 0) {
     return createEmptyEraserPreview()
   }
@@ -428,20 +427,28 @@ export function PdfViewport({
     const pageIndex = pageIndexesRef.current.get(pageNum)
     const pageAnnotations = annotationsByPage.get(pageNum) || []
     const renderSourceAnnotations = mergeRenderableAnnotationRanges(pageAnnotations)
-    const renderedAnnotations = renderSourceAnnotations.map((annotation) => ({
-      ...annotation,
-      rects: pageIndex && ['v2', 'v3'].includes(annotation.geometry_version || 'v1')
-        ? annotation.type === 'highlight'
-          ? getHighlightRectsForRange(pageIndex, annotation.start_char, annotation.end_char)
-          : getLineRectsForRange(pageIndex, annotation.start_char, annotation.end_char)
-        : (annotation.rects || []),
-      decorationRects:
-        pageIndex &&
-        ['v2', 'v3'].includes(annotation.geometry_version || 'v1') &&
-        (annotation.type === 'underline' || annotation.type === 'wavy_underline')
-        ? getDecorationRectsForRange(pageIndex, annotation.start_char, annotation.end_char)
-        : [],
-    }))
+    const renderedAnnotations = renderSourceAnnotations.map((annotation) => {
+      const canUseTextGeometry =
+        pageIndex && ['v2', 'v3'].includes(annotation.geometry_version || 'v1')
+      const visualMode = annotation.type === 'highlight' ? 'highlight' : 'eraser-preview'
+      const textGeometry = canUseTextGeometry
+        ? getTextRangeGeometry(pageIndex, annotation.start_char, annotation.end_char, {
+          visualMode,
+        })
+        : null
+
+      return {
+        ...annotation,
+        rects: textGeometry?.rects || (annotation.rects || []),
+        decorationRects:
+          canUseTextGeometry &&
+          (annotation.type === 'underline' || annotation.type === 'wavy_underline')
+            ? getTextRangeGeometry(pageIndex, annotation.start_char, annotation.end_char, {
+              visualMode: annotation.type === 'wavy_underline' ? 'wavy-underline' : 'underline',
+            }).rects
+            : [],
+      }
+    })
 
     const renderedSearchMatches = (searchMatchesByPage.get(pageNum) || []).map((match, index) => {
       const isCurrent =
@@ -860,15 +867,18 @@ export function PdfViewport({
       return [...(annotation.rects || [])]
     }
 
-    const rects = annotation.type === 'highlight'
-      ? getHighlightRectsForRange(pageIndex, annotation.start_char, annotation.end_char)
-      : getLineRectsForRange(pageIndex, annotation.start_char, annotation.end_char)
+    const visualMode = annotation.type === 'highlight' ? 'highlight' : 'eraser-preview'
+    const rects = getTextRangeGeometry(pageIndex, annotation.start_char, annotation.end_char, {
+      visualMode,
+    }).rects
 
     if (
       (annotation.type === 'underline' || annotation.type === 'wavy_underline')
     ) {
       rects.push(
-        ...getDecorationRectsForRange(pageIndex, annotation.start_char, annotation.end_char),
+        ...getTextRangeGeometry(pageIndex, annotation.start_char, annotation.end_char, {
+          visualMode: annotation.type === 'wavy_underline' ? 'wavy-underline' : 'underline',
+        }).rects,
       )
     }
     return rects
@@ -888,7 +898,9 @@ export function PdfViewport({
       return true
     }
 
-    const rangeRects = getLineRectsForRange(pageIndex, range.startChar, range.endChar)
+    const rangeRects = getTextRangeGeometry(pageIndex, range.startChar, range.endChar, {
+      visualMode: 'eraser-preview',
+    }).rects
     return getAnnotationHitRects(annotation, pageIndex).some((annotationRect) =>
       rangeRects.some((rangeRect) => rectsIntersect(annotationRect, rangeRect, 0.002)),
     )
@@ -1065,7 +1077,9 @@ export function PdfViewport({
 
     const previewRanges = expandRangesForPreview(resolved.pageIndex, currentPageRanges)
     const previewRects = previewRanges.flatMap((range) =>
-      getLineRectsForRange(resolved.pageIndex, range.startChar, range.endChar),
+      getTextRangeGeometry(resolved.pageIndex, range.startChar, range.endChar, {
+        visualMode: 'eraser-preview',
+      }).rects,
     )
     setEraserPreview({
       visible: previewRects.length > 0,
@@ -1317,7 +1331,11 @@ export function PdfViewport({
         const pageIndex = pageIndexesRef.current.get(current.pageNum)
         const ranges = getRangeFromBoxSelection(pageIndex, current.pageNum, rect, pageAnnotations)
         const previewRects = ranges?.length
-          ? ranges.flatMap((range) => getLineRectsForRange(pageIndex, range.startChar, range.endChar))
+          ? ranges.flatMap((range) =>
+            getTextRangeGeometry(pageIndex, range.startChar, range.endChar, {
+              visualMode: 'eraser-preview',
+            }).rects,
+          )
           : []
         setEraserPreview({
           visible: previewRects.length > 0,

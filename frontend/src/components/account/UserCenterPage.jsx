@@ -14,6 +14,13 @@ import {
   UserRound,
   X,
 } from 'lucide-react'
+import {
+  formatUiFontSizeLabel,
+  normalizeUiFontSize,
+  UI_FONT_SIZE_MAX,
+  UI_FONT_SIZE_MIN,
+  UI_FONT_SIZE_STEP,
+} from '../../services/uiPreferences'
 
 const NAV_ITEMS = [
   { key: 'profile', label: '个人信息', icon: UserRound },
@@ -62,6 +69,8 @@ export function UserCenterPage({
   onBack,
   onSaveProfile,
   onSectionChange,
+  uiFontSize = 110,
+  onUiFontSizeChange,
   onUploadAvatar,
 }) {
   const [editing, setEditing] = useState(false)
@@ -79,8 +88,9 @@ export function UserCenterPage({
 
   const initials = useMemo(
     () => (currentUser?.nickname || 'xk').slice(0, 2).toLowerCase(),
-    [currentUser?.nickname]
+    [currentUser?.nickname],
   )
+  const fontSizeValue = normalizeUiFontSize(uiFontSize)
 
   function handleChange(key, value) {
     setForm((previous) => ({
@@ -99,7 +109,7 @@ export function UserCenterPage({
     }
 
     if (Object.values(payload).some((item) => !item)) {
-      setError('请把可编辑信息填写完整后再保存。')
+      setError('请先把可编辑信息填写完整后再保存。')
       return
     }
 
@@ -146,6 +156,10 @@ export function UserCenterPage({
     } finally {
       setIsUploadingAvatar(false)
     }
+  }
+
+  function handleFontSliderChange(event) {
+    onUiFontSizeChange?.(Number(event.target.value))
   }
 
   return (
@@ -280,18 +294,46 @@ export function UserCenterPage({
               <BarChart3 />
               <div>
                 <h2>阅读报告</h2>
-                <p>这里后面接你的阅读时长、阅读篇数、重点论文分布和阶段性阅读节奏。</p>
+                <p>这里后面会接你的阅读时长、阅读篇数、重点论文分布和阶段性阅读节奏。</p>
               </div>
             </div>
           ) : null}
 
           {activeSection === 'settings' ? (
-            <div className="account-placeholder-card">
-              <Settings2 />
-              <div>
+            <div className="account-settings-panel">
+              <div className="account-panel__header">
                 <h2>个性化设置</h2>
-                <p>这里后面接默认翻译引擎、阅读偏好、通知设置和工作区布局记忆。</p>
               </div>
+
+              <section className="account-settings-row">
+                <div className="account-settings-row__main">
+                  <div className="account-settings-row__icon">
+                    <Settings2 />
+                  </div>
+                  <div className="account-settings-row__copy">
+                    <strong>字体大小</strong>
+                    <span>拖动后立即作用到首页和顶部状态栏。</span>
+                  </div>
+                </div>
+
+                <div className="account-font-slider">
+                  <span className="account-font-slider__value">{formatUiFontSizeLabel(fontSizeValue)}</span>
+                  <input
+                    type="range"
+                    min={UI_FONT_SIZE_MIN}
+                    max={UI_FONT_SIZE_MAX}
+                    step={UI_FONT_SIZE_STEP}
+                    value={fontSizeValue}
+                    onInput={handleFontSliderChange}
+                    onChange={handleFontSliderChange}
+                    aria-label="字体大小"
+                  />
+                  <div className="account-font-slider__scale" aria-hidden="true">
+                    <span>小</span>
+                    <span>大</span>
+                  </div>
+                </div>
+              </section>
             </div>
           ) : null}
         </div>

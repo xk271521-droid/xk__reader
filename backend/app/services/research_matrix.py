@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -31,6 +33,7 @@ from app.services.paper_summary import (
     get_review_summary_content,
     is_summary_stale,
     load_available_provider,
+    normalize_summary_terminal_state,
     parse_json_object,
     parse_compound_list,
     run_paper_summary_task,
@@ -78,9 +81,25 @@ RESOURCE_LABELS = {
     "notes": "笔记",
 }
 
+WORKER_HEARTBEAT_TIMEOUT_SECONDS = 90
+WORKER_HEARTBEAT_INTERVAL_SECONDS = 5
+WORKER_MAX_RETRIES = 2
+
 
 def iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def normalize_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def ensure_unique_paper_ids(paper_ids: list[int]) -> list[int]:
@@ -93,6 +112,60 @@ def ensure_unique_paper_ids(paper_ids: list[int]) -> list[int]:
         seen.add(value)
         result.append(value)
     return result[:50]
+
+
+def mark_run_worker_started(db: Session, run: ResearchMatrixRun) -> None:
+    run.worker_status = "running"
+    run.worker_started_at = utcnow()
+    run.worker_heartbeat_at = run.worker_started_at
+    run.worker_pid = os.getpid()
+    run.last_worker_error = None
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+
+def heartbeat_run_worker(db: Session, run: ResearchMatrixRun) -> None:
+    run.worker_status = "running"
+    run.worker_heartbeat_at = utcnow()
+    if not run.worker_started_at:
+        run.worker_started_at = run.worker_heartbeat_at
+    if not run.worker_pid:
+        run.worker_pid = os.getpid()
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+
+def mark_run_worker_finished(db: Session, run: ResearchMatrixRun) -> None:
+    run.worker_status = "completed"
+    run.worker_heartbeat_at = utcnow()
+    run.worker_pid = None
+    run.last_worker_error = None
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+
+def mark_run_worker_failed(db: Session, run: ResearchMatrixRun, message: str) -> None:
+    run.worker_status = "failed"
+    run.worker_heartbeat_at = utcnow()
+    run.worker_pid = None
+    run.last_worker_error = compact_text(message, 600)
+    run.worker_retry_count = int(run.worker_retry_count or 0) + 1
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+
+def is_run_worker_stale(run: ResearchMatrixRun) -> bool:
+    heartbeat = normalize_utc_datetime(run.worker_heartbeat_at)
+    if not heartbeat:
+        return False
+    now = normalize_utc_datetime(utcnow())
+    if not now:
+        return False
+    return (now - heartbeat).total_seconds() > WORKER_HEARTBEAT_TIMEOUT_SECONDS
 
 
 def compact_text(value: Any, limit: int = 220) -> str:
@@ -268,7 +341,6 @@ def build_matrix_payload(
             "row": row,
         })
 
-    dashboard = build_dashboard_snapshot(db, user_id, rows, missing, stale)
     matrix = {
         "fields": [{"key": key, "label": label} for key, label in MATRIX_FIELDS],
         "rows": rows,
@@ -282,7 +354,7 @@ def build_matrix_payload(
         "run_papers": run_papers,
         "matrix": matrix,
         "drafts": build_rule_drafts(rows),
-        "dashboard": dashboard,
+        "dashboard": {},
     }
 
 
@@ -378,6 +450,8 @@ DRAFT_SECTION_TITLES = {
     "method_compare": "方法对比",
     "result_analysis": "实验结果分析",
     "limitations_future": "局限与未来方向",
+    "review_outline": "综述大纲",
+    "topic_diagnostic": "主题一致性诊断",
     "quotable_sentences": "可直接引用句",
     "final_integrated_review": "综述终稿整合",
 }
@@ -411,6 +485,21 @@ def empty_draft_section(key: str, content: str = "当前还没有足够证据生
         "fallback_used": False,
     }
 
+
+def mark_draft_section_pending(
+    section: dict[str, Any],
+    message: str,
+    *,
+    source_titles: list[str] | None = None,
+) -> dict[str, Any]:
+    section["paragraphs"] = []
+    section["items"] = []
+    section["content"] = compact_text(message, 1200)
+    section["source_titles"] = list(source_titles or [])
+    section["copy_ready"] = False
+    section["ai_generated"] = False
+    section["fallback_used"] = True
+    return section
 
 
 def build_empty_drafts_payload(message: str) -> dict[str, Any]:
@@ -544,6 +633,43 @@ def build_draft_source_map(db: Session, run: ResearchMatrixRun) -> tuple[dict[in
     }
 
 
+def draft_progress_from_counters(counters: dict[str, int]) -> dict[str, int]:
+    total_count = int(counters.get("total_count", 0) or 0)
+    ready_count = int(counters.get("ready_count", 0) or 0)
+    failed_count = int(counters.get("failed_count", 0) or 0)
+    running_count = int(counters.get("running_count", 0) or 0)
+    progress = round((ready_count / total_count) * 100) if total_count else 0
+    return {
+        "ready_count": ready_count,
+        "failed_count": failed_count,
+        "running_count": running_count,
+        "total_count": total_count,
+        "progress": progress,
+    }
+
+
+def sync_run_draft_progress(db: Session, run: ResearchMatrixRun) -> None:
+    source_map, counters = build_draft_source_map(db, run)
+    missing = collect_missing_draft_sources(source_map)
+    progress_meta = draft_progress_from_counters(counters)
+    status = "failed" if progress_meta["failed_count"] else ("completed" if not missing else "running")
+    stage = "completed" if not missing else "generating_sources"
+    error_message = build_draft_pending_message(run, source_map) if progress_meta["failed_count"] else None
+    set_run_draft_state(
+        run,
+        status=status,
+        stage=stage,
+        progress=progress_meta["progress"],
+        ready_count=progress_meta["ready_count"],
+        total_count=progress_meta["total_count"],
+        failed_count=progress_meta["failed_count"],
+        error_message=error_message,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+
 def collect_missing_draft_sources(source_map: dict[int, dict[str, Any]]) -> list[tuple[int, str]]:
     missing: list[tuple[int, str]] = []
     for paper_id, payload in source_map.items():
@@ -663,6 +789,367 @@ def normalize_text_list(value: Any, *, limit: int = 6) -> list[str]:
         seen.add(text)
         result.append(text)
     return result[:limit]
+
+
+def tokenize_topic_text(value: Any) -> list[str]:
+    text = " ".join(str(value or "").split()).lower()
+    if not text:
+        return []
+    raw_tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9][a-z0-9_-]{2,}", text)
+    stopwords = {
+        "研究", "方法", "结果", "数据", "模型", "实验", "分析", "问题", "工作", "文献", "论文",
+        "以及", "相关", "基于", "一种", "进行", "采用", "通过", "对于", "现有", "main", "findings",
+        "method", "route", "research", "question", "study", "using", "based", "approach",
+    }
+    canonical_map = {
+        "convolutional": "cnn",
+        "convolution": "cnn",
+        "convolutional_neural_network": "cnn",
+        "convolutional-neural-network": "cnn",
+        "cnn-based": "cnn",
+        "cnn_gwo": "cnn",
+        "gwo-cnn": "cnn",
+        "卷积神经网络": "cnn",
+        "卷积网络": "cnn",
+        "深度卷积网络": "cnn",
+        "multi-modal": "multimodal",
+        "multi_modal": "multimodal",
+        "multimodal": "multimodal",
+        "多模态": "multimodal",
+    }
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in raw_tokens:
+        token = canonical_map.get(token, token)
+        if token in stopwords or len(token) < 2:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    priority = ["cnn", "multimodal"]
+    ordered = [token for token in priority if token in tokens]
+    ordered.extend(token for token in tokens if token not in ordered)
+    return ordered[:24]
+
+
+def summarize_bundle_topics(bundle: dict[str, Any]) -> dict[str, Any]:
+    topic_tokens: list[str] = []
+    for value in [
+        bundle["review_fields"].get("research_question"),
+        bundle["review_fields"].get("method_route"),
+        bundle["review_fields"].get("main_findings"),
+        bundle["review_fields"].get("comparison_tags"),
+        bundle["overview_preview"],
+    ]:
+        topic_tokens.extend(tokenize_topic_text(value))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for token in topic_tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    method_text = " ".join(
+        str(value or "")
+        for value in [
+            bundle["review_fields"].get("research_question"),
+            bundle["review_fields"].get("method_route"),
+            bundle["overview_preview"],
+        ]
+    ).lower()
+    anchors: list[str] = []
+    if any(flag in method_text for flag in ["cnn", "convolution", "卷积"]):
+        anchors.append("cnn")
+    if any(flag in method_text for flag in ["multimodal", "multi-modal", "multi modal", "多模态"]):
+        anchors.append("multimodal")
+    ordered = anchors + [token for token in deduped if token not in anchors]
+    return {
+        "paper_title": bundle["paper_title"],
+        "tokens": ordered[:16],
+        "method_text": method_text,
+    }
+
+
+def overlap_score(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    common = len(left & right)
+    return common / max(1, min(len(left), len(right)))
+
+
+def analyze_bundle_cohesion(bundles: list[dict[str, Any]], *, grouping_mode: str = "topic_first") -> dict[str, Any]:
+    topic_rows = [summarize_bundle_topics(bundle) for bundle in bundles]
+    if len(topic_rows) <= 1:
+        return {
+            "is_cohesive": True,
+            "mode": "single_topic",
+            "message": "",
+            "groups": [
+                {
+                    "label": "当前主题",
+                    "paper_titles": [row["paper_title"] for row in topic_rows if row["paper_title"]],
+                }
+            ],
+        }
+
+    all_tokens = [set(row["tokens"]) for row in topic_rows]
+    if grouping_mode == "method_first" and all_tokens:
+        common_tokens = set.intersection(*all_tokens)
+        if common_tokens & {"cnn", "multimodal", "transformer", "rnn", "lstm", "gcn", "gan"}:
+            shared = next(iter(common_tokens & {"cnn", "multimodal", "transformer", "rnn", "lstm", "gcn", "gan"}))
+            label_map = {
+                "cnn": "CNN 相关研究",
+                "multimodal": "多模态相关研究",
+                "transformer": "Transformer 相关研究",
+                "rnn": "RNN 相关研究",
+                "lstm": "LSTM 相关研究",
+                "gcn": "GCN 相关研究",
+                "gan": "GAN 相关研究",
+            }
+            label = label_map.get(shared, f"{shared.upper()} 相关研究")
+            return {
+                "is_cohesive": True,
+                "mode": "shared_method_anchor",
+                "message": "",
+                "groups": [
+                    {
+                        "label": label,
+                        "paper_titles": [row["paper_title"] for row in topic_rows if row["paper_title"]],
+                        "topic_tokens": sorted(common_tokens)[:4],
+                    }
+                ],
+            }
+
+    groups: list[dict[str, Any]] = []
+    threshold = 0.18 if grouping_mode == "method_first" else 0.24
+    for row in topic_rows:
+        tokens = set(row["tokens"])
+        matched = None
+        best_score = 0.0
+        for group in groups:
+            score = overlap_score(tokens, group["tokens"])
+            if score > best_score:
+                best_score = score
+                matched = group
+        if matched and best_score >= threshold:
+            matched["rows"].append(row)
+            matched["tokens"].update(tokens)
+        else:
+            groups.append(
+                {
+                    "rows": [row],
+                    "tokens": set(tokens),
+                }
+            )
+
+    normalized_groups: list[dict[str, Any]] = []
+    for index, group in enumerate(groups, start=1):
+        token_examples = [token for token in group["tokens"] if token][:3]
+        label = " / ".join(token_examples) if token_examples else f"主题 {index}"
+        normalized_groups.append(
+            {
+                "label": label,
+                "paper_titles": [row["paper_title"] for row in group["rows"] if row["paper_title"]],
+                "topic_tokens": token_examples,
+            }
+        )
+
+    largest_group = max((len(group["paper_titles"]) for group in normalized_groups), default=0)
+    group_count = len(normalized_groups)
+    cohesive = group_count == 1 or largest_group >= max(2, len(topic_rows) - 1)
+    if cohesive:
+        return {
+            "is_cohesive": True,
+            "mode": "single_topic",
+            "message": "",
+            "groups": normalized_groups,
+        }
+
+    group_summaries = [
+        f"{group['label']}：{'、'.join(group['paper_titles'][:3])}"
+        for group in normalized_groups[:3]
+    ]
+    return {
+        "is_cohesive": False,
+        "mode": "multi_topic",
+        "message": (
+            "当前批次论文的共同主题较弱，更适合按子主题分别整理，而不是硬生成单一综述："
+            if grouping_mode != "method_first"
+            else "当前批次论文按方法路线看仍有明显分化，建议先分组整理："
+        ) + "；".join(group_summaries),
+        "groups": normalized_groups,
+    }
+
+
+def infer_outline_points(section_key: str, groups: list[dict[str, Any]]) -> list[str]:
+    labels = [group["label"] for group in groups[:3] if group.get("label")]
+    if section_key == "research_background":
+        return [
+            "交代该批文献共同关注的问题域与研究动机",
+            "说明现有研究为何在这些主题上持续展开",
+            *( [f"可结合主题簇：{'、'.join(labels)}"] if labels else [] ),
+        ]
+    if section_key == "research_status":
+        return [
+            "按研究路线或任务目标归纳现有工作版图",
+            "指出当前文献的主要共识与阶段性分化",
+            *( [f"优先比较主题簇之间的差异：{'、'.join(labels)}"] if labels else [] ),
+        ]
+    if section_key == "core_innovations":
+        return [
+            "总结各主题簇最突出的创新切入点",
+            "区分方法创新、数据创新与任务设定创新",
+        ]
+    if section_key == "method_compare":
+        return [
+            "按方法路线对比技术路径、输入特征与评估抓手",
+            "突出不同主题簇之间可比与不可比之处",
+        ]
+    if section_key == "result_analysis":
+        return [
+            "总结不同研究在实验结果上的一致结论与差异表现",
+            "说明这些结果是否受数据、场景或评价口径影响",
+        ]
+    if section_key == "limitations_future":
+        return [
+            "归纳现有工作的共性局限",
+            "提炼后续研究可进入的空白点与扩展方向",
+        ]
+    return []
+
+
+def build_outline_section(
+    key: str,
+    title: str,
+    paragraphs: list[dict[str, Any]],
+    groups: list[dict[str, Any]],
+) -> dict[str, Any]:
+    source_titles = collect_source_titles_from_paragraphs(paragraphs)
+    summary = compact_text(" ".join(paragraph.get("text") or "" for paragraph in paragraphs), 420)
+    return {
+        "key": key,
+        "title": title,
+        "goal": {
+            "research_background": "交代研究背景与问题缘起",
+            "research_status": "梳理现有研究版图与进展",
+            "core_innovations": "概括主要创新方向",
+            "method_compare": "比较不同方法路线",
+            "result_analysis": "总结结果表现与证据差异",
+            "limitations_future": "提炼局限与未来方向",
+        }.get(key, title),
+        "summary": summary,
+        "points": infer_outline_points(key, groups),
+        "source_titles": source_titles[:8],
+        "support_count": len(source_titles),
+    }
+
+
+def build_outline_insights(drafts: dict[str, Any]) -> dict[str, list[str]]:
+    method_section = drafts.get("method_compare") or {}
+    result_section = drafts.get("result_analysis") or {}
+    limit_section = drafts.get("limitations_future") or {}
+    innovation_section = drafts.get("core_innovations") or {}
+
+    consensus: list[str] = []
+    divergence: list[str] = []
+    gaps: list[str] = []
+
+    method_paragraphs = list(method_section.get("paragraphs") or [])
+    result_paragraphs = list(result_section.get("paragraphs") or [])
+    limit_paragraphs = list(limit_section.get("paragraphs") or [])
+    innovation_paragraphs = list(innovation_section.get("paragraphs") or [])
+
+    if method_paragraphs:
+        consensus.append("现有工作已经能够围绕方法路线形成可比框架，可优先按技术路径组织相关工作。")
+    if result_paragraphs:
+        consensus.append("实验结果层面已经积累出一批可归纳的结论，可在综述中单独整理共识判断。")
+    if len(method_paragraphs) > 1 or len(innovation_paragraphs) > 1:
+        divergence.append("不同论文在方法抓手与创新切入点上存在明显分化，适合用“路线 A / 路线 B”方式展开对比。")
+    if len(result_paragraphs) > 1:
+        divergence.append("不同研究的结果表述并不完全一致，正文中应强调比较口径和适用场景，而不是简单并列结论。")
+    if limit_paragraphs:
+        gaps.append("现有文献已经暴露出一批共性局限，后续写作可把这些局限转化为研究空白或选题切入点。")
+    else:
+        gaps.append("当前局限信息仍偏少，正式成文前建议回原文补足研究边界、数据限制和实验条件。")
+    if not consensus:
+        consensus.append("当前批次的显性共识还不够强，建议先用文献矩阵核对方法路线和核心发现后再写共识段。")
+    if not divergence:
+        divergence.append("当前批次尚未抽出足够多的差异点，可补充更多方法或结果字段后再强化分歧分析。")
+    return {
+        "consensus": consensus[:3],
+        "divergence": divergence[:3],
+        "gaps": gaps[:3],
+    }
+
+
+def build_review_outline(
+    drafts: dict[str, Any],
+    cohesion: dict[str, Any],
+) -> dict[str, Any]:
+    groups = cohesion.get("groups") or []
+    sections: list[dict[str, Any]] = []
+    for key in DRAFT_SECTION_ORDER[:6]:
+        draft = drafts.get(key) or {}
+        paragraphs = list(draft.get("paragraphs") or [])
+        if not paragraphs:
+            continue
+        sections.append(
+            build_outline_section(
+                key,
+                draft.get("title") or DRAFT_SECTION_TITLES.get(key, key),
+                paragraphs,
+                groups,
+            )
+        )
+    grouped_outlines: list[dict[str, Any]] = []
+    for index, group in enumerate(groups, start=1):
+        paper_titles = list(group.get("paper_titles") or [])
+        group_sections: list[dict[str, Any]] = []
+        for section in sections:
+            support_titles = [title for title in list(section.get("source_titles") or []) if title in paper_titles]
+            if not support_titles:
+                continue
+            group_sections.append(
+                {
+                    **section,
+                    "source_titles": support_titles[:8],
+                    "support_count": len(support_titles),
+                }
+            )
+        grouped_outlines.append(
+            {
+                "group_id": f"group_{index}",
+                "label": group.get("label") or f"主题 {index}",
+                "paper_titles": paper_titles,
+                "section_count": len(group_sections),
+                "sections": group_sections,
+            }
+        )
+    intro = (
+        "当前批次主题较集中，可先按以下大纲组织综述写作。"
+        if cohesion.get("is_cohesive", True)
+        else "当前批次更适合先按主题分组，再分别按以下大纲整理各组小综述。"
+    )
+    insights = build_outline_insights(drafts)
+    return {
+        "key": "review_outline",
+        "title": DRAFT_SECTION_TITLES["review_outline"],
+        "paragraphs": [paragraph_item(intro, [], "weak")],
+        "items": [],
+        "content": intro,
+        "source_titles": [],
+        "copy_ready": bool(sections),
+        "ai_generated": False,
+        "fallback_used": False,
+        "outline_sections": sections,
+        "topic_groups": groups,
+        "grouped_outlines": grouped_outlines,
+        "consensus_points": insights["consensus"],
+        "divergence_points": insights["divergence"],
+        "gap_points": insights["gaps"],
+        "diagnostic": not cohesion.get("is_cohesive", True),
+    }
 
 
 def join_sentences(parts: list[str], *, limit: int = 520) -> str:
@@ -791,6 +1278,312 @@ def build_paper_draft_bundle(run_paper: ResearchMatrixRunPaper, summary_bundle: 
         "reproduction_sections": reproduction_sections,
         "reproduction_missing_items": extract_summary_missing_items(summary_bundle.get("reproduction")),
     }
+
+
+def append_section_entry(
+    entries: list[dict[str, Any]],
+    *,
+    text: str,
+    paper_title: str,
+    citations: list[dict[str, Any]] | None = None,
+) -> None:
+    normalized = " ".join(str(text or "").split()).strip("；。;，, ")
+    if not normalized:
+        return
+    entries.append(
+        {
+            "text": compact_text(normalized, 260),
+            "paper_title": paper_title,
+            "citations": dedupe_citations(list(citations or [])),
+        }
+    )
+
+
+def group_section_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    ordered: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        key = str(entry.get("text") or "").strip().lower()
+        if not key:
+            continue
+        group = grouped.get(key)
+        if not group:
+            group = {
+                "text": entry["text"],
+                "titles": [],
+                "citations": [],
+                "index": index,
+            }
+            grouped[key] = group
+            ordered.append(group)
+        title = str(entry.get("paper_title") or "").strip()
+        if title and title not in group["titles"]:
+            group["titles"].append(title)
+        group["citations"] = dedupe_citations(group["citations"] + list(entry.get("citations") or []))
+    ordered.sort(key=lambda item: (-len(item["titles"]), item["index"]))
+    for item in ordered:
+        item.pop("index", None)
+    return ordered
+
+
+def format_group_examples(titles: list[str], *, limit: int = 2) -> str:
+    unique_titles: list[str] = []
+    for title in titles:
+        value = str(title or "").strip()
+        if value and value not in unique_titles:
+            unique_titles.append(value)
+    if not unique_titles:
+        return ""
+    examples = "、".join(unique_titles[:limit])
+    if len(unique_titles) > limit:
+        examples += "等"
+    return examples
+
+
+def build_grouped_review_paragraph(
+    prefix: str,
+    groups: list[dict[str, Any]],
+    *,
+    limit: int = 3,
+    text_limit: int = 560,
+) -> dict[str, Any] | None:
+    selected = list(groups[:limit])
+    if not selected:
+        return None
+    clauses: list[str] = []
+    citations: list[dict[str, Any]] = []
+    for group in selected:
+        clause = str(group.get("text") or "").strip("；。;，, ")
+        if not clause:
+            continue
+        examples = format_group_examples(list(group.get("titles") or []))
+        if examples:
+            clause = f"{clause}（如{examples}）"
+        clauses.append(clause)
+        citations.extend(list(group.get("citations") or []))
+    if not clauses:
+        return None
+    merged_citations = dedupe_citations(citations)
+    text = compact_text(f"{prefix}{'；'.join(clauses)}。", text_limit)
+    return paragraph_item(text, merged_citations, paragraph_confidence(merged_citations))
+
+
+def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: str) -> list[dict[str, Any]]:
+    paragraphs: list[dict[str, Any]] = []
+
+    if section_key == "research_background":
+        question_entries: list[dict[str, Any]] = []
+        background_entries: list[dict[str, Any]] = []
+        for bundle in bundles:
+            paper_title = bundle["paper_title"]
+            review_sections = bundle["review_sections"]
+            overview_sections = bundle["overview_sections"]
+            append_section_entry(
+                question_entries,
+                text=compact_text(bundle["review_fields"].get("research_question"), 220),
+                paper_title=paper_title,
+                citations=citations_from_sections(
+                    paper_title,
+                    "review",
+                    review_sections_for_field(review_sections, "research_question"),
+                ),
+            )
+            background_sections = find_sections_by_hints(overview_sections, OVERVIEW_BACKGROUND_HINTS, limit=2)
+            append_section_entry(
+                background_entries,
+                text=join_sentences([section.get("body") or "" for section in background_sections], limit=280),
+                paper_title=paper_title,
+                citations=citations_from_sections(paper_title, "overview", background_sections),
+            )
+        for paragraph in [
+            build_grouped_review_paragraph("本批文献的研究背景主要围绕以下问题展开：", group_section_entries(question_entries)),
+            build_grouped_review_paragraph("从问题动机和应用场景看，相关研究大致延伸出以下主线：", group_section_entries(background_entries)),
+        ]:
+            if paragraph:
+                paragraphs.append(paragraph)
+
+    elif section_key == "research_status":
+        method_entries: list[dict[str, Any]] = []
+        finding_entries: list[dict[str, Any]] = []
+        for bundle in bundles:
+            paper_title = bundle["paper_title"]
+            review_sections = bundle["review_sections"]
+            append_section_entry(
+                method_entries,
+                text=compact_text(bundle["review_fields"].get("method_route"), 240),
+                paper_title=paper_title,
+                citations=citations_from_sections(
+                    paper_title,
+                    "review",
+                    review_sections_for_field(review_sections, "method_route"),
+                ),
+            )
+            append_section_entry(
+                finding_entries,
+                text=compact_text(bundle["review_fields"].get("main_findings"), 240),
+                paper_title=paper_title,
+                citations=citations_from_sections(
+                    paper_title,
+                    "review",
+                    review_sections_for_field(review_sections, "main_findings"),
+                ),
+            )
+        for paragraph in [
+            build_grouped_review_paragraph("从现有研究路径看，相关工作大致可以归为以下几类：", group_section_entries(method_entries)),
+            build_grouped_review_paragraph("就当前文献给出的结论而言，已有研究主要呈现出以下共识或差异：", group_section_entries(finding_entries)),
+        ]:
+            if paragraph:
+                paragraphs.append(paragraph)
+
+    elif section_key == "core_innovations":
+        innovation_entries: list[dict[str, Any]] = []
+        method_entries: list[dict[str, Any]] = []
+        for bundle in bundles:
+            paper_title = bundle["paper_title"]
+            review_sections = bundle["review_sections"]
+            for item in normalize_text_list(bundle["review_fields"].get("innovations"), limit=5):
+                append_section_entry(
+                    innovation_entries,
+                    text=item,
+                    paper_title=paper_title,
+                    citations=citations_from_sections(
+                        paper_title,
+                        "review",
+                        review_sections_for_field(review_sections, "innovations"),
+                    ),
+                )
+            append_section_entry(
+                method_entries,
+                text=compact_text(bundle["review_fields"].get("method_route"), 220),
+                paper_title=paper_title,
+                citations=citations_from_sections(
+                    paper_title,
+                    "review",
+                    review_sections_for_field(review_sections, "method_route"),
+                ),
+            )
+        for paragraph in [
+            build_grouped_review_paragraph("综合现有文献，核心创新主要体现在：", group_section_entries(innovation_entries), limit=4),
+            build_grouped_review_paragraph("这些创新通常依托以下技术路线展开：", group_section_entries(method_entries)),
+        ]:
+            if paragraph:
+                paragraphs.append(paragraph)
+
+    elif section_key == "method_compare":
+        method_entries: list[dict[str, Any]] = []
+        metric_entries: list[dict[str, Any]] = []
+        for bundle in bundles:
+            paper_title = bundle["paper_title"]
+            review_sections = bundle["review_sections"]
+            append_section_entry(
+                method_entries,
+                text=compact_text(bundle["review_fields"].get("method_route"), 240),
+                paper_title=paper_title,
+                citations=citations_from_sections(
+                    paper_title,
+                    "review",
+                    review_sections_for_field(review_sections, "method_route"),
+                ),
+            )
+            for item in normalize_text_list(bundle["review_fields"].get("core_metrics"), limit=5):
+                append_section_entry(
+                    metric_entries,
+                    text=item,
+                    paper_title=paper_title,
+                    citations=citations_from_sections(
+                        paper_title,
+                        "review",
+                        review_sections_for_field(review_sections, "core_metrics"),
+                    ),
+                )
+        for paragraph in [
+            build_grouped_review_paragraph("方法对比上，现有工作主要采用以下路线：", group_section_entries(method_entries)),
+            build_grouped_review_paragraph("用于比较的方法抓手和评价指标主要集中在：", group_section_entries(metric_entries), limit=4),
+        ]:
+            if paragraph:
+                paragraphs.append(paragraph)
+
+    elif section_key == "result_analysis":
+        finding_entries: list[dict[str, Any]] = []
+        evaluation_entries: list[dict[str, Any]] = []
+        for bundle in bundles:
+            paper_title = bundle["paper_title"]
+            review_sections = bundle["review_sections"]
+            reproduction_sections = bundle["reproduction_sections"]
+            append_section_entry(
+                finding_entries,
+                text=compact_text(bundle["review_fields"].get("main_findings"), 240),
+                paper_title=paper_title,
+                citations=citations_from_sections(
+                    paper_title,
+                    "review",
+                    review_sections_for_field(review_sections, "main_findings"),
+                ),
+            )
+            append_section_entry(
+                evaluation_entries,
+                text=compact_text(bundle["review_fields"].get("data_sample"), 220),
+                paper_title=paper_title,
+                citations=citations_from_sections(
+                    paper_title,
+                    "review",
+                    review_sections_for_field(review_sections, "data_sample"),
+                ),
+            )
+            result_sections = find_sections_by_hints(reproduction_sections, REPRO_RESULT_HINTS, limit=2)
+            append_section_entry(
+                evaluation_entries,
+                text=join_sentences([section.get("body") or "" for section in result_sections], limit=260),
+                paper_title=paper_title,
+                citations=citations_from_sections(paper_title, "reproduction", result_sections),
+            )
+        for paragraph in [
+            build_grouped_review_paragraph("从实验结果看，现有文献主要支持以下判断：", group_section_entries(finding_entries)),
+            build_grouped_review_paragraph("在数据、样本与评估设置上，常见安排包括：", group_section_entries(evaluation_entries), limit=4),
+        ]:
+            if paragraph:
+                paragraphs.append(paragraph)
+
+    elif section_key == "limitations_future":
+        limitation_entries: list[dict[str, Any]] = []
+        future_entries: list[dict[str, Any]] = []
+        for bundle in bundles:
+            paper_title = bundle["paper_title"]
+            review_sections = bundle["review_sections"]
+            reproduction_sections = bundle["reproduction_sections"]
+            for item in normalize_text_list(bundle["review_fields"].get("limitations"), limit=5):
+                append_section_entry(
+                    limitation_entries,
+                    text=item,
+                    paper_title=paper_title,
+                    citations=citations_from_sections(
+                        paper_title,
+                        "review",
+                        review_sections_for_field(review_sections, "limitations"),
+                    ),
+                )
+            limit_sections = find_sections_by_hints(reproduction_sections, REPRO_LIMIT_HINTS, limit=2)
+            append_section_entry(
+                future_entries,
+                text=join_sentences([section.get("body") or "" for section in limit_sections], limit=240),
+                paper_title=paper_title,
+                citations=citations_from_sections(paper_title, "reproduction", limit_sections),
+            )
+            for item in list(bundle.get("reproduction_missing_items") or [])[:4]:
+                append_section_entry(
+                    future_entries,
+                    text=item,
+                    paper_title=paper_title,
+                    citations=citations_from_sections(paper_title, "reproduction", limit_sections),
+                )
+        for paragraph in [
+            build_grouped_review_paragraph("现有研究的共性局限主要集中在：", group_section_entries(limitation_entries), limit=4),
+            build_grouped_review_paragraph("从后续研究与复现需求看，仍值得继续补齐的方向包括：", group_section_entries(future_entries), limit=4),
+        ]:
+            if paragraph:
+                paragraphs.append(paragraph)
+
+    return paragraphs
 
 
 def build_section_paragraph(bundle: dict[str, Any], section_key: str) -> dict[str, Any] | None:
@@ -970,16 +1763,17 @@ def build_ai_integrated_review(db: Session, run: ResearchMatrixRun, drafts: dict
 
     quote_items = list((drafts.get("quotable_sentences") or {}).get("items") or [])[:6]
     prompt = f"""
-你是一个严谨的中文学术综述助手。请把给定的分块草稿整合成一份可直接复制的“综述终稿整合”。
+你是一个严谨的中文学术综述助手。请把给定的分块草稿整合成一份真正像“文献综述正文”的终稿，而不是逐篇论文摘要拼接。
 
 硬性规则：
 1. 只能使用输入里已经出现的事实、判断和限定语，不能新增事实。
 2. 每段都必须引用 source_refs，source_refs 只能引用输入里的段落 id。
 3. 如果引用到任何 weak 段落，输出段落的 confidence 必须为 weak，且语气必须降调，明确保留不确定性。
 4. 不要重复“见上文”“本节”等元话语，不要输出 Markdown。
-5. 输出 4-8 段，优先组织成连续的单列综述正文。
-6. 若输入证据不足，请照样整合，但不要把弱证据写成确定结论。
-7. 输出必须是 JSON，不要代码块。
+5. 输出 4-8 段，优先组织成连续的综述正文，段落之间应体现“研究主题、方法分化、结果差异、局限与趋势”的归纳关系。
+6. 不要按“某篇论文提出了……”逐篇串讲；优先使用“现有研究”“相关工作”“一类方法”“另一类研究”这类综述口吻，只有在确有必要区分证据来源时才点论文名举例。
+7. 若输入证据不足，请照样整合，但不要把弱证据写成确定结论。
+8. 输出必须是 JSON，不要代码块。
 
 输出格式：
 {{
@@ -1044,21 +1838,10 @@ def build_ai_integrated_review(db: Session, run: ResearchMatrixRun, drafts: dict
     }
 
 
-def build_structured_drafts_from_sources(
-    db: Session,
-    run: ResearchMatrixRun,
-    source_map: dict[int, dict[str, Any]],
-) -> dict[str, Any]:
-    paper_title_by_id = {item.paper_id: item.title_snapshot for item in run.papers if item.paper_id}
-    drafts: dict[str, Any] = {}
-    for key in DRAFT_SECTION_ORDER:
-        drafts[key] = empty_draft_section(key)
-    bundles = [
-        build_paper_draft_bundle(run_paper, source_map.get(run_paper.paper_id, {}))
-        for run_paper in run.papers
-        if run_paper.paper_id
-    ]
-
+def populate_structured_review_sections(
+    drafts: dict[str, Any],
+    bundles: list[dict[str, Any]],
+) -> None:
     for key in [
         "research_background",
         "research_status",
@@ -1067,12 +1850,103 @@ def build_structured_drafts_from_sources(
         "result_analysis",
         "limitations_future",
     ]:
-        paragraphs = [paragraph for bundle in bundles if (paragraph := build_section_paragraph(bundle, key))]
+        paragraphs = build_review_section_paragraphs(bundles, key)
+        if not paragraphs:
+            paragraphs = [paragraph for bundle in bundles if (paragraph := build_section_paragraph(bundle, key))]
         drafts[key]["paragraphs"] = paragraphs
         drafts[key]["copy_ready"] = bool(paragraphs)
         drafts[key]["content"] = "\n\n".join(item.get("text") or "" for item in paragraphs)
         drafts[key]["source_titles"] = collect_source_titles_from_paragraphs(paragraphs)
         drafts[key]["ai_generated"] = False
+
+
+def filter_source_map_by_titles(
+    source_map: dict[int, dict[str, Any]],
+    paper_title_by_id: dict[int, str],
+    allowed_titles: set[str],
+) -> dict[int, dict[str, Any]]:
+    if not allowed_titles:
+        return {}
+    return {
+        paper_id: payload
+        for paper_id, payload in source_map.items()
+        if paper_title_by_id.get(paper_id) in allowed_titles
+    }
+
+
+def build_topic_diagnostic_section(
+    cohesion: dict[str, Any],
+    bundles: list[dict[str, Any]],
+) -> tuple[dict[str, Any], str]:
+    group_lines = [
+        f"{group['label']}：{'、'.join(group['paper_titles'][:4])}"
+        for group in cohesion["groups"][:4]
+    ]
+    guidance = "\n".join(group_lines)
+    return {
+        "key": "topic_diagnostic",
+        "title": "主题一致性诊断",
+        "paragraphs": [
+            paragraph_item(
+                cohesion["message"],
+                [],
+                "weak",
+            ),
+            paragraph_item(
+                f"建议按以下子主题分别整理小综述：{guidance}",
+                [],
+                "weak",
+            ),
+        ],
+        "items": [],
+        "content": f"{cohesion['message']}\n\n建议按以下子主题分别整理小综述：\n{guidance}",
+        "source_titles": [bundle["paper_title"] for bundle in bundles[:8] if bundle.get("paper_title")],
+        "copy_ready": True,
+        "ai_generated": False,
+        "fallback_used": False,
+        "diagnostic": True,
+    }, guidance
+
+
+def build_structured_drafts_for_bundles(
+    db: Session,
+    run: ResearchMatrixRun,
+    bundles: list[dict[str, Any]],
+    source_map: dict[int, dict[str, Any]],
+    paper_title_by_id: dict[int, str],
+    *,
+    allow_ai_integrated_review: bool = True,
+    grouping_mode: str = "topic_first",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    drafts: dict[str, Any] = {}
+    for key in DRAFT_SECTION_ORDER:
+        drafts[key] = empty_draft_section(key)
+
+    cohesion = analyze_bundle_cohesion(bundles, grouping_mode=grouping_mode)
+    populate_structured_review_sections(drafts, bundles)
+
+    if not cohesion["is_cohesive"]:
+        drafts["topic_diagnostic"], guidance = build_topic_diagnostic_section(cohesion, bundles)
+        drafts["review_outline"] = build_review_outline(drafts, cohesion)
+        drafts["final_integrated_review"] = {
+            "key": "final_integrated_review",
+            "title": DRAFT_SECTION_TITLES["final_integrated_review"],
+            "paragraphs": [
+                paragraph_item(
+                    "当前批次论文缺少足够稳定的共同主题，不建议直接合成为单一综述正文。更合理的做法是先按子主题拆分，再分别生成小综述。",
+                    [],
+                    "weak",
+                )
+            ],
+            "items": [],
+            "content": f"当前批次论文缺少足够稳定的共同主题，不建议直接合成为单一综述正文。\n\n建议拆分主题：\n{guidance}",
+            "source_titles": [bundle["paper_title"] for bundle in bundles[:8] if bundle.get("paper_title")],
+            "copy_ready": True,
+            "ai_generated": False,
+            "fallback_used": False,
+            "diagnostic": True,
+        }
+        return drafts, cohesion
 
     quotable_items = collect_quotable_items(source_map, paper_title_by_id)
     drafts["quotable_sentences"]["items"] = quotable_items
@@ -1083,24 +1957,157 @@ def build_structured_drafts_from_sources(
     )
     drafts["quotable_sentences"]["source_titles"] = [item["paper_title"] for item in quotable_items[:8] if item.get("paper_title")]
     drafts["quotable_sentences"]["ai_generated"] = False
-    drafts["final_integrated_review"] = build_ai_integrated_review(db, run, drafts)
+    drafts["review_outline"] = build_review_outline(drafts, cohesion)
+    drafts["final_integrated_review"] = build_ai_integrated_review(db, run, drafts) if allow_ai_integrated_review else fallback_integrated_review(drafts)
+    return drafts, cohesion
+
+
+def build_structured_drafts_from_sources(
+    db: Session,
+    run: ResearchMatrixRun,
+    source_map: dict[int, dict[str, Any]],
+    *,
+    allow_ai_integrated_review: bool = True,
+) -> dict[str, Any]:
+    paper_title_by_id = {item.paper_id: item.title_snapshot for item in run.papers if item.paper_id}
+    grouping_mode = str((run.config_json or {}).get("grouping_mode") or "topic_first")
+    bundles = [
+        build_paper_draft_bundle(run_paper, source_map.get(run_paper.paper_id, {}))
+        for run_paper in run.papers
+        if run_paper.paper_id
+    ]
+    drafts, cohesion = build_structured_drafts_for_bundles(
+        db,
+        run,
+        bundles,
+        source_map,
+        paper_title_by_id,
+        allow_ai_integrated_review=allow_ai_integrated_review,
+        grouping_mode=grouping_mode,
+    )
+    if not cohesion["is_cohesive"]:
+        grouped_outlines: list[dict[str, Any]] = []
+        for index, group in enumerate(cohesion["groups"], start=1):
+            group_titles = set(group.get("paper_titles") or [])
+            if not group_titles:
+                continue
+            group_bundles = [bundle for bundle in bundles if bundle.get("paper_title") in group_titles]
+            if not group_bundles:
+                continue
+            group_source_map = filter_source_map_by_titles(source_map, paper_title_by_id, group_titles)
+            group_drafts, group_cohesion = build_structured_drafts_for_bundles(
+                db,
+                run,
+                group_bundles,
+                group_source_map,
+                paper_title_by_id,
+                allow_ai_integrated_review=False,
+                grouping_mode=grouping_mode,
+            )
+            group_outline = dict(group_drafts.get("review_outline") or {})
+            grouped_outlines.append(
+                {
+                    "group_id": f"group_{index}",
+                    "label": group.get("label") or f"主题 {index}",
+                    "paper_titles": list(group.get("paper_titles") or []),
+                    "section_count": len(list(group_outline.get("outline_sections") or [])),
+                    "sections": list(group_outline.get("outline_sections") or []),
+                    "review_outline": group_outline,
+                    "drafts": {
+                        key: value
+                        for key, value in group_drafts.items()
+                        if key in DRAFT_SECTION_ORDER or key == "topic_diagnostic"
+                    },
+                    "diagnostic": not group_cohesion.get("is_cohesive", True),
+                }
+            )
+        review_outline = dict(drafts.get("review_outline") or {})
+        review_outline["grouped_outlines"] = grouped_outlines
+        drafts["review_outline"] = review_outline
     return drafts
 
 
-def build_run_drafts_payload(db: Session, run: ResearchMatrixRun) -> tuple[dict[str, Any], dict[str, Any], list[tuple[int, str]]]:
+def apply_pending_messages_to_drafts(
+    run: ResearchMatrixRun,
+    drafts: dict[str, Any],
+    source_map: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    pending_message = build_draft_pending_message(run, source_map)
+    pending_titles: list[str] = []
+    seen_titles: set[str] = set()
+    for run_paper in run.papers:
+        if not run_paper.paper_id:
+            continue
+        states = source_map.get(run_paper.paper_id) or {}
+        is_ready = all(
+            (states.get(summary_type) or {}).get("status") == "generated"
+            for summary_type in DRAFT_REQUIRED_SUMMARY_TYPES
+        )
+        if is_ready:
+            continue
+        title = str(run_paper.title_snapshot or "").strip()
+        if not title or title in seen_titles:
+            continue
+        seen_titles.add(title)
+        pending_titles.append(title)
+
+    for key in DRAFT_SECTION_ORDER[:6]:
+        section = drafts.get(key) or empty_draft_section(key)
+        if section.get("paragraphs"):
+            section["fallback_used"] = False
+            drafts[key] = section
+            continue
+        drafts[key] = mark_draft_section_pending(section, pending_message, source_titles=pending_titles[:4])
+
+    quotable = drafts.get("quotable_sentences") or empty_draft_section("quotable_sentences")
+    if not (quotable.get("items") or []):
+        drafts["quotable_sentences"] = mark_draft_section_pending(
+            quotable,
+            "当前可直接引用句仍在整理中，待来源卡片补齐后会自动补充页码与引用语句。",
+            source_titles=pending_titles[:4],
+        )
+
+    final_section = drafts.get("final_integrated_review") or empty_draft_section("final_integrated_review")
+    if not (final_section.get("paragraphs") or []):
+        fallback_content = final_section.get("content") or pending_message
+        drafts["final_integrated_review"] = mark_draft_section_pending(
+            final_section,
+            fallback_content,
+            source_titles=pending_titles[:4],
+        )
+
+    return drafts
+
+
+def build_run_drafts_payload(
+    db: Session,
+    run: ResearchMatrixRun,
+    *,
+    allow_ai_integrated_review: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any], list[tuple[int, str]]]:
     source_map, counters = build_draft_source_map(db, run)
     missing = collect_missing_draft_sources(source_map)
-    total_count = counters["total_count"]
-    ready_count = counters["ready_count"]
-    failed_count = counters["failed_count"]
-    running_count = counters.get("running_count", 0)
-    progress = round((ready_count / total_count) * 100) if total_count else 0
+    progress_meta = draft_progress_from_counters(counters)
+    total_count = progress_meta["total_count"]
+    ready_count = progress_meta["ready_count"]
+    failed_count = progress_meta["failed_count"]
+    running_count = progress_meta["running_count"]
+    progress = progress_meta["progress"]
 
-    if ready_count == 0:
+    if missing:
         message = build_draft_pending_message(run, source_map)
-        status = "failed" if failed_count else ("running" if running_count else "idle")
-        stage = "generating_sources" if running_count or total_count else "preparing_sources"
-        payload = build_empty_drafts_payload(message)
+        payload = apply_pending_messages_to_drafts(
+            run,
+            build_structured_drafts_from_sources(
+                db,
+                run,
+                source_map,
+                allow_ai_integrated_review=allow_ai_integrated_review,
+            ),
+            source_map,
+        )
+        status = "failed" if failed_count else ("running" if running_count or ready_count or run.status in {"queued", "running"} else "idle")
+        stage = "generating_sources" if running_count or ready_count or run.status in {"queued", "running"} else "preparing_sources"
         state = draft_status_payload(
             status=status,
             stage=stage,
@@ -1112,25 +2119,20 @@ def build_run_drafts_payload(db: Session, run: ResearchMatrixRun) -> tuple[dict[
         )
         return payload, state, missing
 
-    drafts = build_structured_drafts_from_sources(db, run, source_map)
-    status = "completed"
-    stage = "completed"
-    error_message = None
-    if running_count:
-        status = "running"
-        stage = "generating_sources"
-    elif failed_count:
-        status = "failed"
-        stage = "building_drafts"
-        error_message = build_draft_pending_message(run, source_map)
+    drafts = build_structured_drafts_from_sources(
+        db,
+        run,
+        source_map,
+        allow_ai_integrated_review=allow_ai_integrated_review,
+    )
     state = draft_status_payload(
-        status=status,
-        stage=stage,
-        progress=progress if progress else 100,
+        status="completed",
+        stage="completed",
+        progress=100,
         ready_count=ready_count,
         total_count=total_count,
         failed_count=failed_count,
-        error_message=error_message,
+        error_message=None,
     )
     return drafts, state, []
 
@@ -1166,7 +2168,6 @@ def sync_run_matrix_snapshot(db: Session, run: ResearchMatrixRun, user_id: int) 
         "paper_count": len(run.papers),
     }
     run.matrix_snapshot = matrix
-    run.dashboard_snapshot = build_dashboard_snapshot(db, user_id, matrix["rows"], matrix["missing"], matrix["stale"])
 
 
 def build_dashboard_snapshot(
@@ -1327,23 +2328,24 @@ def create_initial_run(
     *,
     title: str = "",
     include_reproduction: bool = True,
+    config_json: dict[str, Any] | None = None,
     refreshed_from_id: int | None = None,
 ) -> ResearchMatrixRun:
     paper_ids = [paper.id for paper in papers]
     summaries = get_summaries_by_paper(db, user_id, paper_ids)
     all_review_ready = all(summary_ready(db, paper, summaries.get((paper.id, "review"))) for paper in papers)
     all_draft_sources_ready = all(draft_sources_ready(db, paper, summaries) for paper in papers)
-    all_ready = all_review_ready and all_draft_sources_ready
     version = 1
     if refreshed_from_id:
         previous = db.get(ResearchMatrixRun, refreshed_from_id)
         if previous and previous.user_id == user_id:
             version = max(1, int(previous.version or 1) + 1)
+    next_config = {"include_reproduction": include_reproduction, **dict(config_json or {})}
     run = ResearchMatrixRun(
         user_id=user_id,
         title=title.strip() or default_run_title(papers),
-        status="completed" if all_ready else "queued",
-        stage="completed" if all_ready else "queued",
+        status="queued",
+        stage="queued",
         paper_count=len(papers),
         total_count=len(papers),
         ready_count=0,
@@ -1352,7 +2354,7 @@ def create_initial_run(
         matrix_snapshot={},
         drafts_snapshot={},
         dashboard_snapshot={},
-        config_json={"include_reproduction": include_reproduction},
+        config_json=next_config,
         version=version,
         refreshed_from_id=refreshed_from_id,
     )
@@ -1389,11 +2391,19 @@ def create_initial_run(
         )
     db.flush()
     update_run_progress(run)
-    if all_ready:
-        rebuild_run_snapshots(db, run, user_id)
-    else:
-        db.commit()
-        db.refresh(run)
+    if all_review_ready and all_draft_sources_ready:
+        set_run_draft_state(
+            run,
+            status="queued",
+            stage="preparing_sources",
+            progress=100,
+            ready_count=len(papers) * len(DRAFT_REQUIRED_SUMMARY_TYPES),
+            total_count=len(papers) * len(DRAFT_REQUIRED_SUMMARY_TYPES),
+            failed_count=0,
+            error_message=None,
+        )
+    db.commit()
+    db.refresh(run)
     return run
 
 
@@ -1431,6 +2441,7 @@ def ensure_summary_ready_for_run(
             PaperSummary.summary_type == summary_type,
         )
     )
+    summary = normalize_summary_terminal_state(db, summary)
 
     if summary and summary.status == "running":
         wait_for_summary_to_finish(summary.id)
@@ -1445,6 +2456,7 @@ def ensure_summary_ready_for_run(
                 PaperSummary.summary_type == summary_type,
             )
         )
+        summary = normalize_summary_terminal_state(db, summary)
 
     if summary and summary.status == "generated" and not is_summary_stale(db, paper, summary):
         return summary
@@ -1477,14 +2489,15 @@ def ensure_summary_ready_for_run(
             batch_note=run_paper.batch_note or "",
         )
         update_run_progress(run)
+    draft_counters = draft_progress_from_counters(build_draft_source_map(db, run)[1])
     set_run_draft_state(
         run,
         status="running",
         stage="generating_sources",
-        progress=int(run.progress_percent or 0),
-        ready_count=0,
-        total_count=len(run.papers) * len(DRAFT_REQUIRED_SUMMARY_TYPES),
-        failed_count=0,
+        progress=draft_counters["progress"],
+        ready_count=draft_counters["ready_count"],
+        total_count=draft_counters["total_count"],
+        failed_count=draft_counters["failed_count"],
         error_message=None,
     )
     db.commit()
@@ -1508,6 +2521,7 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
         run = load_run_with_papers(db, run_id)
         if not run:
             return
+        mark_run_worker_started(db, run)
         run.status = "running"
         run.stage = "preparing_reviews"
         run.error_message = None
@@ -1515,6 +2529,10 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
         db.commit()
 
         for run_paper in run.papers:
+            heartbeat_run_worker(db, run)
+            run = load_run_with_papers(db, run_id)
+            if not run:
+                return
             if not run_paper.paper_id:
                 continue
             paper = db.scalar(
@@ -1570,14 +2588,15 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
             return
         if all(item.summary_status == "generated" and not item.is_missing for item in run.papers):
             run.stage = "building_matrix"
+            draft_counters = draft_progress_from_counters(build_draft_source_map(db, run)[1])
             set_run_draft_state(
                 run,
                 status="running",
                 stage="preparing_sources",
-                progress=int(run.progress_percent or 0),
-                ready_count=0,
-                total_count=len(run.papers) * len(DRAFT_REQUIRED_SUMMARY_TYPES),
-                failed_count=0,
+                progress=draft_counters["progress"],
+                ready_count=draft_counters["ready_count"],
+                total_count=draft_counters["total_count"],
+                failed_count=draft_counters["failed_count"],
                 error_message=None,
             )
             db.commit()
@@ -1587,6 +2606,10 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
                 return
 
             for run_paper in run.papers:
+                heartbeat_run_worker(db, run)
+                run = load_run_with_papers(db, run_id)
+                if not run:
+                    return
                 if not run_paper.paper_id:
                     continue
                 paper = db.scalar(
@@ -1612,12 +2635,15 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
                     if not run:
                         return
                     run_paper = next(item for item in run.papers if item.paper_id == paper.id)
-                    sync_run_draft_snapshot(db, run)
+                    sync_run_draft_progress(db, run)
                     run = load_run_with_papers(db, run_id)
                     if not run:
                         return
 
             rebuild_run_snapshots(db, run, run.user_id)
+            run = load_run_with_papers(db, run_id)
+            if run:
+                mark_run_worker_finished(db, run)
             return
 
         failed_titles = [item.title_snapshot for item in run.papers if item.summary_status != "generated" or item.is_missing]
@@ -1629,6 +2655,12 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
         )
         update_run_progress(run)
         db.commit()
+        mark_run_worker_failed(db, run, run.error_message or "批次生成失败")
+    except Exception as exc:
+        run = load_run_with_papers(db, run_id)
+        if run:
+            mark_run_worker_failed(db, run, f"批次生成异常：{exc}")
+        raise
     finally:
         db.close()
 
@@ -1693,12 +2725,22 @@ def rebuild_run_snapshots(db: Session, run: ResearchMatrixRun, user_id: int) -> 
     run.matrix_snapshot = matrix
     drafts_payload, draft_state, _missing = build_run_drafts_payload(db, run)
     apply_draft_payload_to_run(run, drafts_payload, draft_state)
-    run.dashboard_snapshot = build_dashboard_snapshot(db, user_id, matrix["rows"], matrix["missing"], matrix["stale"])
     run.status = "completed"
-    run.stage = "completed" if draft_state["status"] == "completed" else "building_matrix"
+    run.stage = "completed"
     run.error_message = None
     update_run_progress(run)
     run.progress_percent = 100 if run.total_count else 0
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+
+def refresh_run_dashboard_snapshot(db: Session, run: ResearchMatrixRun, user_id: int) -> None:
+    matrix = run.matrix_snapshot or {}
+    rows = list(matrix.get("rows") or [])
+    missing = list(matrix.get("missing") or [])
+    stale = list(matrix.get("stale") or [])
+    run.dashboard_snapshot = build_dashboard_snapshot(db, user_id, rows, missing, stale)
     db.add(run)
     db.commit()
     db.refresh(run)
@@ -1711,6 +2753,7 @@ def create_matrix_run(
     *,
     title: str = "",
     include_reproduction: bool = True,
+    grouping_mode: str = "topic_first",
     refreshed_from_id: int | None = None,
 ) -> ResearchMatrixRun:
     papers = get_owned_papers(db, user_id, paper_ids)
@@ -1722,6 +2765,7 @@ def create_matrix_run(
         papers,
         title=title,
         include_reproduction=include_reproduction,
+        config_json={"grouping_mode": grouping_mode},
         refreshed_from_id=refreshed_from_id,
     )
 
@@ -1881,6 +2925,7 @@ def serialize_run_list_item(db: Session, run: ResearchMatrixRun, user_id: int) -
     missing_count = sum(1 for item in run.papers if item.is_missing)
     stale_count = sum(1 for item in run.papers if item.is_stale)
     source_state = inspect_run_source_state(db, run, user_id)
+    draft_state = serialize_draft_state(run)
     return {
         "id": run.id,
         "title": run.title,
@@ -1903,18 +2948,35 @@ def serialize_run_list_item(db: Session, run: ResearchMatrixRun, user_id: int) -
         "error_message": run.error_message,
         "created_at": iso(run.created_at),
         "updated_at": iso(run.updated_at),
+        "grouping_mode": str((run.config_json or {}).get("grouping_mode") or "topic_first"),
+        "worker_status": run.worker_status or "idle",
+        "worker_started_at": iso(run.worker_started_at),
+        "worker_heartbeat_at": iso(run.worker_heartbeat_at),
+        "worker_retry_count": int(run.worker_retry_count or 0),
+        "last_worker_error": run.last_worker_error,
+        **draft_state,
     }
 
 
 def serialize_run_detail(db: Session, run: ResearchMatrixRun, user_id: int) -> dict[str, Any]:
     base = serialize_run_list_item(db, run, user_id)
     draft_state = serialize_draft_state(run)
+    drafts_snapshot = run.drafts_snapshot or {}
+    dashboard_snapshot = run.dashboard_snapshot or {}
+    if not dashboard_snapshot:
+        dashboard_snapshot = build_dashboard_snapshot(
+            db,
+            user_id,
+            list((run.matrix_snapshot or {}).get("rows") or []),
+            list((run.matrix_snapshot or {}).get("missing") or []),
+            list((run.matrix_snapshot or {}).get("stale") or []),
+        )
     return {
         **base,
         **draft_state,
         "matrix": run.matrix_snapshot or {},
-        "drafts": run.drafts_snapshot or {},
-        "dashboard": run.dashboard_snapshot or {},
+        "drafts": drafts_snapshot,
+        "dashboard": dashboard_snapshot,
         "papers": [
             {
                 "paper_id": item.paper_id,

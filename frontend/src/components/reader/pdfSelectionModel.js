@@ -5,6 +5,7 @@ const BLOCK_LEFT_SHIFT = 0.08
 const LINE_SAFETY_GAP = 0.0006
 const VISUAL_BAND_MIN_HEIGHT = 0.0022
 const COLUMN_SPLIT_CENTER = 0.5
+export const PDF_TEXT_GEOMETRY_VERSION = 'visual-edge-v3'
 const SUPERSCRIPT_CHAR_MAP = new Map(Object.entries({
   0: '⁰',
   1: '¹',
@@ -74,6 +75,118 @@ function normalizeRect(rect, width, height) {
     width: clamp(rect.width / width, 0, 1),
     height: clamp(rect.height / height, 0, 1),
   }
+}
+
+let textMeasureContext = null
+const measuredOffsetCache = new WeakMap()
+
+function getTextMeasureContext() {
+  if (textMeasureContext || typeof document === 'undefined') return textMeasureContext
+  textMeasureContext = document.createElement('canvas').getContext('2d')
+  return textMeasureContext
+}
+
+function getCanvasFont(style) {
+  if (style.font) return style.font
+  return [
+    style.fontStyle || 'normal',
+    style.fontVariant || 'normal',
+    style.fontWeight || 'normal',
+    style.fontSize || '10px',
+    style.fontFamily || 'sans-serif',
+  ].join(' ')
+}
+
+function isMostlyHorizontalText(style) {
+  const transform = style.transform || ''
+  if (!transform || transform === 'none' || transform.startsWith('scale')) return true
+
+  const match = transform.match(/^matrix\(([^)]+)\)$/)
+  if (!match) return false
+
+  const values = match[1]
+    .split(',')
+    .map((value) => Number.parseFloat(value.trim()))
+  if (values.length < 4 || values.some((value) => !Number.isFinite(value))) return false
+
+  const [, skewY, skewX] = values
+  return Math.abs(skewY) < 0.02 && Math.abs(skewX) < 0.02
+}
+
+function getMeasuredTextOffsets(textDiv, text) {
+  if (!textDiv || !text || text.length <= 1) return null
+
+  const cached = measuredOffsetCache.get(textDiv)
+  if (cached?.text === text) return cached.offsets
+
+  const context = getTextMeasureContext()
+  if (!context) return null
+
+  const style = window.getComputedStyle(textDiv)
+  if (!isMostlyHorizontalText(style)) return null
+
+  context.font = getCanvasFont(style)
+  const letterSpacing = Number.parseFloat(style.letterSpacing)
+  const spacing = Number.isFinite(letterSpacing) ? letterSpacing : 0
+  const offsets = [0]
+
+  for (let offset = 1; offset <= text.length; offset += 1) {
+    const prefixWidth = context.measureText(text.slice(0, offset)).width
+    const spacingWidth = offset >= text.length
+      ? Math.max(0, text.length - 1) * spacing
+      : offset * spacing
+    offsets.push(prefixWidth + spacingWidth)
+  }
+
+  const total = offsets[offsets.length - 1]
+  if (!Number.isFinite(total) || total <= 0) return null
+
+  const normalized = offsets.map((value) => clamp(value / total, 0, 1))
+  measuredOffsetCache.set(textDiv, { text, offsets: normalized })
+  return normalized
+}
+
+function getMeasuredCharRect({
+  textDiv,
+  text,
+  offset,
+  layerRect,
+  viewportWidth,
+  viewportHeight,
+  fallbackRect,
+}) {
+  const spanRect = textDiv?.getBoundingClientRect?.()
+  if (!spanRect || spanRect.width <= 0 || spanRect.height <= 0) return null
+  if (spanRect.height > spanRect.width * 1.8 && text.length > 1) return null
+
+  const offsets = getMeasuredTextOffsets(textDiv, text)
+  if (!offsets || offsets.length <= offset + 1) return null
+
+  const style = window.getComputedStyle(textDiv)
+  const isRtl = style.direction === 'rtl'
+  const startRatio = offsets[offset]
+  const endRatio = offsets[offset + 1]
+  const spanLeft = spanRect.left - layerRect.left
+  const spanTop = spanRect.top - layerRect.top
+  const measuredLeft = isRtl
+    ? spanLeft + spanRect.width * (1 - endRatio)
+    : spanLeft + spanRect.width * startRatio
+  const measuredRight = isRtl
+    ? spanLeft + spanRect.width * (1 - startRatio)
+    : spanLeft + spanRect.width * endRatio
+
+  const fallbackTop = fallbackRect ? fallbackRect.top - layerRect.top : spanTop
+  const fallbackHeight = fallbackRect?.height > 0 ? fallbackRect.height : spanRect.height
+  return normalizeRect(
+    {
+      left: measuredLeft,
+      top: fallbackTop,
+      width: Math.max(0, measuredRight - measuredLeft),
+      height: fallbackHeight,
+    },
+    viewportWidth,
+    viewportHeight,
+  )
 }
 
 function unionRects(rects) {
@@ -206,6 +319,19 @@ export function buildRenderedPageIndex({
         viewportWidth,
         viewportHeight,
       )
+
+      const measuredRect = getMeasuredCharRect({
+        textDiv,
+        text: span.text,
+        offset,
+        layerRect,
+        viewportWidth,
+        viewportHeight,
+        fallbackRect: rect,
+      })
+      if (measuredRect?.width > 0 && measuredRect?.height > 0) {
+        current.rect = measuredRect
+      }
     }
   })
 
@@ -618,6 +744,18 @@ function getSegmentHorizontalPadding(line, pageIndex, segmentChars, kind = 'sele
   const innerPadMax = kind === 'decoration' ? 0 : kind === 'search' ? 0.001 : 0.00025
   const leftGap = previousChar ? Math.max(0, firstChar.rect.left - getRectRight(previousChar.rect)) : 0
   const rightGap = nextChar ? Math.max(0, nextChar.rect.left - getRectRight(lastChar.rect)) : 0
+  if (kind === 'selection-overlay') {
+    const medianWidth = getMedian(
+      segmentChars
+        .map((char) => char.rect?.width)
+        .filter((width) => typeof width === 'number' && width > 0),
+    )
+    const edgePad = Math.max(0.0024, Math.min(0.009, (medianWidth || firstChar.rect.width || 0.004) * 0.36))
+    return {
+      leftPad: previousChar ? Math.min(edgePad, leftGap * 0.45) : edgePad,
+      rightPad: nextChar ? Math.min(edgePad, rightGap * 0.28) : edgePad,
+    }
+  }
 
   return {
     leftPad: previousChar ? Math.min(innerPadMax, leftGap * 0.25) : outerPad,
@@ -848,14 +986,11 @@ export function getRangeRects(pageIndex, startChar, endChar) {
     .filter(Boolean)
 }
 
-export function getVisualBandsForRange(pageIndex, startChar, endChar, mode = 'selection') {
+function collectRangeLineChars(pageIndex, startChar, endChar) {
   if (!pageIndex) return []
   const ordered = getOrderedRange(startChar, endChar)
-  const touchedLines = pageIndex.lines.filter(
-    (line) => line.endChar > ordered.startChar && line.startChar < ordered.endChar,
-  )
-
-  return touchedLines
+  return (pageIndex.lines || [])
+    .filter((line) => line.endChar > ordered.startChar && line.startChar < ordered.endChar)
     .map((line) => {
       const chars = line.charIndices
         .map((index) => pageIndex.chars[index])
@@ -867,7 +1002,23 @@ export function getVisualBandsForRange(pageIndex, startChar, endChar, mode = 'se
             char.rect &&
             isWordChar(char.char),
         )
-      if (chars.length === 0) return null
+        .sort((left, right) => {
+          if (Math.abs(left.rect.left - right.rect.left) > 0.0001) {
+            return left.rect.left - right.rect.left
+          }
+          return left.index - right.index
+        })
+      return { line, chars }
+    })
+    .filter((entry) => entry.chars.length > 0)
+}
+
+export function getVisualBandsForRange(pageIndex, startChar, endChar, mode = 'selection') {
+  if (!pageIndex) return []
+  const ordered = getOrderedRange(startChar, endChar)
+
+  return collectRangeLineChars(pageIndex, ordered.startChar, ordered.endChar)
+    .map(({ line, chars }) => {
       const previousLine = getNeighborLineInColumn(pageIndex, line, 'previous')
       const nextLine = getNeighborLineInColumn(pageIndex, line, 'next')
       const metrics = line.metrics || buildLineMetrics(chars, line.rect)
@@ -923,6 +1074,93 @@ export function getVisualBandsForRange(pageIndex, startChar, endChar, mode = 'se
         0,
         0,
       )
+    })
+    .filter(Boolean)
+}
+
+export function getTextRangeGeometry(pageIndex, startChar, endChar, options = {}) {
+  if (!pageIndex) {
+    return {
+      orderedRange: { startChar: 0, endChar: 0 },
+      text: '',
+      copyText: '',
+      charsByLine: [],
+      rects: [],
+    }
+  }
+
+  const orderedRange = getOrderedRange(startChar, endChar)
+  const charsByLine = collectRangeLineChars(pageIndex, orderedRange.startChar, orderedRange.endChar)
+  const text = getPageTextSlice(pageIndex, orderedRange.startChar, orderedRange.endChar)
+  const copyText = formatRangeTextForCopy(pageIndex, orderedRange.startChar, orderedRange.endChar)
+  const visualMode = options.visualMode || 'selection-overlay'
+  const rects = visualMode === 'selection-overlay'
+    ? getSelectionOverlayRects(pageIndex, orderedRange.startChar, orderedRange.endChar)
+    : visualMode === 'highlight'
+      ? getHighlightRectsForRange(pageIndex, orderedRange.startChar, orderedRange.endChar)
+      : visualMode === 'underline' || visualMode === 'wavy-underline'
+        ? getDecorationRectsForRange(pageIndex, orderedRange.startChar, orderedRange.endChar)
+        : getLineRectsForRange(pageIndex, orderedRange.startChar, orderedRange.endChar)
+
+  return {
+    orderedRange,
+    text,
+    copyText,
+    charsByLine,
+    rects,
+  }
+}
+
+export function getSelectionOverlayRects(pageIndex, startChar, endChar) {
+  const rows = collectRangeLineChars(pageIndex, startChar, endChar)
+    .map(({ line, chars }) => {
+      const metrics = line.metrics || buildLineMetrics(chars, line.rect)
+      const band = getLineVisualBand({ ...line, metrics })
+      return { line, chars, metrics, band }
+    })
+
+  return rows
+    .map(({ line, chars }) => {
+      const widthRect = getSegmentWidthRect(line, pageIndex, chars, 'selection-overlay')
+      if (!widthRect) return null
+      const current = rows.find((row) => row.line.index === line.index)
+      const band = current?.band || getLineVisualBand(line)
+      const previousRow = rows
+        .filter((row) =>
+          row.line.index < line.index &&
+          (row.line.columnId === line.columnId || row.line.columnId === -1 || line.columnId === -1),
+        )
+        .at(-1)
+      const nextRow = rows.find((row) =>
+        row.line.index > line.index &&
+        (row.line.columnId === line.columnId || row.line.columnId === -1 || line.columnId === -1),
+      )
+      const lineCenter = band.top + band.height / 2
+      const previousCenter = previousRow
+        ? previousRow.band.top + previousRow.band.height / 2
+        : null
+      const nextCenter = nextRow
+        ? nextRow.band.top + nextRow.band.height / 2
+        : null
+      const rowGap = Math.max(LINE_SAFETY_GAP, Math.min(0.0022, band.height * 0.08))
+      const topLimit = previousCenter == null
+        ? 0
+        : (previousCenter + lineCenter) / 2 + rowGap
+      const bottomLimit = nextCenter == null
+        ? 1
+        : (lineCenter + nextCenter) / 2 - rowGap
+      const top = clamp(band.top, topLimit, Math.max(topLimit, bottomLimit - VISUAL_BAND_MIN_HEIGHT))
+      const bottom = clamp(
+        band.bottom,
+        top + VISUAL_BAND_MIN_HEIGHT,
+        Math.max(top + VISUAL_BAND_MIN_HEIGHT, bottomLimit),
+      )
+      return {
+        left: widthRect.left,
+        top,
+        width: widthRect.width,
+        height: Math.max(VISUAL_BAND_MIN_HEIGHT, bottom - top),
+      }
     })
     .filter(Boolean)
 }
@@ -1030,20 +1268,20 @@ export function buildSelectionFromWordRange(pageIndex, startWordIndex, endWordIn
 
   const startChar = selectedWords[0].startChar
   const endChar = selectedWords[selectedWords.length - 1].endChar
-  const text = getPageTextSlice(pageIndex, startChar, endChar)
-  const copyText = formatRangeTextForCopy(pageIndex, startChar, endChar)
-  const rects = getLineRectsForRange(pageIndex, startChar, endChar)
-  if (!text.trim() || rects.length === 0) return null
+  const geometry = getTextRangeGeometry(pageIndex, startChar, endChar, {
+    visualMode: 'selection-overlay',
+  })
+  if (!geometry.text.trim() || geometry.rects.length === 0) return null
 
   const context = getContextAroundRange(pageIndex, startChar, endChar)
 
   return {
     startChar,
     endChar,
-    text,
-    copyText,
-    rects,
-    anchorRect: rects[0] || null,
+    text: geometry.text,
+    copyText: geometry.copyText,
+    rects: geometry.rects,
+    anchorRect: geometry.rects[0] || null,
     contextBefore: context.before,
     contextAfter: context.after,
   }
@@ -1081,16 +1319,74 @@ export function findWordAtPoint(pageIndex, normalizedX, normalizedY) {
   return best && best.distance < 0.035 ? best.word : null
 }
 
-export function findCharBoundaryAtPoint(pageIndex, normalizedX, normalizedY, scope = null) {
+function getTextHitTolerances(line, chars, mode = 'annotation') {
+  const medianWidth = getMedian(
+    chars
+      .map((char) => char.rect?.width)
+      .filter((width) => typeof width === 'number' && width > 0),
+  )
+  const medianHeight = getMedian(
+    chars
+      .map((char) => char.rect?.height)
+      .filter((height) => typeof height === 'number' && height > 0),
+  )
+  const cjkDominant = isCjkDominant(chars)
+  const lineHeight = line?.metrics?.medianHeight || medianHeight || line?.rect?.height || 0.01
+
+  if (mode === 'selection') {
+    return {
+      medianWidth,
+      xTolerance: cjkDominant
+        ? Math.max(0.003, Math.min(0.01, medianWidth * 0.72))
+        : Math.max(0.003, Math.min(0.012, medianWidth * 0.82)),
+      yTolerance: cjkDominant
+        ? Math.max(0.004, Math.min(0.015, lineHeight * 0.3))
+        : Math.max(0.0035, Math.min(0.011, lineHeight * 0.24)),
+      boundaryCharMin: 0.0006,
+      boundaryCharFactor: cjkDominant ? 0.2 : 0.14,
+      closestLimit: Math.max(0.01, medianWidth * 0.95),
+      yWeight: 1.45,
+    }
+  }
+
+  if (mode === 'eraser') {
+    return {
+      medianWidth,
+      xTolerance: cjkDominant
+        ? Math.max(0.005, Math.min(0.014, medianWidth * 1.05))
+        : Math.max(0.007, Math.min(0.021, medianWidth * 1.55)),
+      yTolerance: cjkDominant
+        ? Math.max(0.006, Math.min(0.02, lineHeight * 0.42))
+        : Math.max(0.006, Math.min(0.018, lineHeight * 0.38)),
+      boundaryCharMin: 0.0025,
+      boundaryCharFactor: 0.42,
+      closestLimit: Math.max(0.018, medianWidth * 1.65),
+      yWeight: 1.15,
+    }
+  }
+
+  return {
+    medianWidth,
+    xTolerance: cjkDominant
+      ? Math.max(0.004, Math.min(0.012, medianWidth * 0.95))
+      : Math.max(0.006, Math.min(0.018, medianWidth * 1.35)),
+    yTolerance: cjkDominant
+      ? Math.max(0.004, Math.min(0.016, lineHeight * 0.34))
+      : Math.max(0.004, Math.min(0.012, lineHeight * 0.26)),
+    boundaryCharMin: 0.002,
+    boundaryCharFactor: 0.32,
+    closestLimit: Math.max(0.014, medianWidth * 1.3),
+    yWeight: 1.35,
+  }
+}
+
+function findTextBoundaryCore(pageIndex, normalizedX, normalizedY, scope = null, options = {}) {
   if (!pageIndex) return null
 
   const line = findLineAtPoint(pageIndex, normalizedX, normalizedY, scope)
   if (!line) return null
 
-  const chars = line.charIndices
-    .map((index) => pageIndex.chars[index])
-    .filter((char) => char?.rect && isWordChar(char.char))
-    .sort((left, right) => left.rect.left - right.rect.left)
+  const chars = getLineOrderedWordChars(line, pageIndex)
 
   if (chars.length === 0) return null
 
@@ -1098,14 +1394,12 @@ export function findCharBoundaryAtPoint(pageIndex, normalizedX, normalizedY, sco
   const lastChar = chars[chars.length - 1]
   const lineLeft = firstChar.rect.left
   const lineRight = lastChar.rect.left + lastChar.rect.width
-  const medianWidth = getMedian(chars.map((char) => char.rect.width).filter(Boolean))
-  const cjkDominant = isCjkDominant(chars)
-  const xTolerance = cjkDominant
-    ? Math.max(0.004, Math.min(0.012, medianWidth * 0.95))
-    : Math.max(0.006, Math.min(0.018, medianWidth * 1.35))
-  const yTolerance = cjkDominant
-    ? Math.max(0.004, Math.min(0.016, line.rect.height * 0.34))
-    : Math.max(0.004, Math.min(0.012, line.rect.height * 0.26))
+  const {
+    xTolerance,
+    yTolerance,
+    boundaryCharMin,
+    boundaryCharFactor,
+  } = getTextHitTolerances(line, chars, options.mode)
 
   if (normalizedX < lineLeft - xTolerance || normalizedX > lineRight + xTolerance) {
     return null
@@ -1121,7 +1415,7 @@ export function findCharBoundaryAtPoint(pageIndex, normalizedX, normalizedY, sco
 
     const left = char.rect.left
     const right = char.rect.left + char.rect.width
-    const charTolerance = Math.min(xTolerance, Math.max(0.002, char.rect.width * 0.32))
+    const charTolerance = Math.min(xTolerance, Math.max(boundaryCharMin, char.rect.width * boundaryCharFactor))
     if (normalizedX >= left - charTolerance && normalizedX <= right + charTolerance) {
       const midpoint = left + char.rect.width / 2
       return {
@@ -1157,28 +1451,36 @@ export function findCharBoundaryAtPoint(pageIndex, normalizedX, normalizedY, sco
   }
 }
 
-export function findSelectionBoundaryAtPoint(pageIndex, normalizedX, normalizedY, anchor = null) {
+export function findCharBoundaryAtPoint(pageIndex, normalizedX, normalizedY, scope = null) {
+  return findTextBoundaryCore(pageIndex, normalizedX, normalizedY, scope, {
+    mode: 'annotation',
+  })
+}
+
+export function findTextBoundaryAtPoint(pageIndex, normalizedX, normalizedY, scope = null, options = {}) {
   if (!pageIndex) return null
-
-  let line = findLineAtPoint(pageIndex, normalizedX, normalizedY, anchor)
-  if (!line && anchor?.blockIndex != null) {
-    line = findNearestLineInBlock(pageIndex, normalizedX, normalizedY, anchor.blockIndex)
+  const mode = options.mode || 'selection'
+  if (mode !== 'selection') {
+    return findTextBoundaryCore(pageIndex, normalizedX, normalizedY, scope, options)
   }
-  if (!line && anchor?.columnId != null) {
-    line = findNearestLineInColumn(pageIndex, normalizedX, normalizedY, anchor.columnId)
+
+  let line = findLineAtPoint(pageIndex, normalizedX, normalizedY, scope)
+  if (!line && scope?.blockIndex != null) {
+    line = findNearestLineInBlock(pageIndex, normalizedX, normalizedY, scope.blockIndex)
   }
-  if (!line) return anchor
+  if (!line && scope?.columnId != null) {
+    line = findNearestLineInColumn(pageIndex, normalizedX, normalizedY, scope.columnId)
+  }
+  if (!line) return scope
 
-  const lineChars = line.charIndices
-    .map((index) => pageIndex.chars[index])
-    .filter((char) => char?.rect && isWordChar(char.char))
-    .sort((left, right) => left.rect.left - right.rect.left)
+  const lineChars = getLineOrderedWordChars(line, pageIndex)
 
-  if (lineChars.length === 0) return anchor
+  if (lineChars.length === 0) return scope
 
   const lineLeft = lineChars[0].rect.left
   const lineRight = getRectRight(lineChars[lineChars.length - 1].rect)
-  const xSlack = Math.max(0.008, (lineRight - lineLeft) * 0.045)
+  const medianWidth = getMedian(lineChars.map((char) => char.rect.width).filter(Boolean))
+  const xSlack = Math.max(0.002, Math.min(0.006, medianWidth * 0.45))
 
   if (normalizedX <= lineLeft + xSlack) {
     return {
@@ -1200,10 +1502,17 @@ export function findSelectionBoundaryAtPoint(pageIndex, normalizedX, normalizedY
     }
   }
 
-  const boundary = findCharBoundaryAtPoint(pageIndex, normalizedX, normalizedY, anchor)
-  if (!anchor || !boundary) return boundary
+  const boundary = findTextBoundaryCore(pageIndex, normalizedX, normalizedY, scope, options)
+  if (!scope || !boundary) return boundary
 
   return boundary
+}
+
+export function findSelectionBoundaryAtPoint(pageIndex, normalizedX, normalizedY, anchor = null) {
+  return findTextBoundaryAtPoint(pageIndex, normalizedX, normalizedY, anchor, {
+    mode: 'selection',
+    horizontalPrecision: 'character',
+  })
 }
 
 function findNearestLineInBlock(pageIndex, normalizedX, normalizedY, blockIndex) {
@@ -1283,31 +1592,24 @@ export function findLineAtPoint(pageIndex, normalizedX, normalizedY, scope = nul
   }) || null
 }
 
-export function findCharAtPoint(pageIndex, normalizedX, normalizedY) {
+function findTextCharCore(pageIndex, normalizedX, normalizedY, scope = null, options = {}) {
   if (!pageIndex) return null
 
-  const line = findLineAtPoint(pageIndex, normalizedX, normalizedY)
+  const mode = options.mode || 'annotation'
+  const line = findLineAtPoint(pageIndex, normalizedX, normalizedY, scope)
   if (!line) return null
 
-  const chars = line.charIndices
-    .map((index) => pageIndex.chars[index])
-    .filter((char) => char?.rect && isWordChar(char.char))
-    .sort((left, right) => left.rect.left - right.rect.left)
+  const chars = getLineOrderedWordChars(line, pageIndex)
 
   if (chars.length === 0) return null
 
-  const medianWidth = getMedian(
-    chars
-      .map((char) => char.rect?.width)
-      .filter((width) => typeof width === 'number' && width > 0),
-  )
-  const cjkDominant = isCjkDominant(chars)
-  const xTolerance = cjkDominant
-    ? Math.max(0.003, Math.min(0.009, medianWidth * 0.42))
-    : Math.max(0.003, Math.min(0.012, medianWidth * 0.55))
-  const yTolerance = cjkDominant
-    ? Math.max(0.004, Math.min(0.016, line.rect.height * 0.34))
-    : Math.max(0.004, Math.min(0.014, line.rect.height * 0.28))
+  const {
+    medianWidth,
+    xTolerance,
+    yTolerance,
+    closestLimit,
+    yWeight,
+  } = getTextHitTolerances(line, chars, mode)
 
   for (const char of chars) {
     if (
@@ -1329,21 +1631,29 @@ export function findCharAtPoint(pageIndex, normalizedX, normalizedY) {
   for (const char of chars) {
     const centerX = char.rect.left + char.rect.width / 2
     const centerY = char.rect.top + char.rect.height / 2
-    const distance = Math.hypot(normalizedX - centerX, (normalizedY - centerY) * 1.35)
+    const distance = Math.hypot(normalizedX - centerX, (normalizedY - centerY) * yWeight)
     if (!closest || distance < closest.distance) {
       closest = { char, distance }
     }
   }
 
-  if (!closest || closest.distance > Math.max(0.014, medianWidth * 1.3)) {
+  if (!closest || closest.distance > (closestLimit || Math.max(0.014, medianWidth * 1.3))) {
     return null
   }
 
   return closest.char
 }
 
+export function findCharAtPoint(pageIndex, normalizedX, normalizedY) {
+  return findTextCharCore(pageIndex, normalizedX, normalizedY, null, {
+    mode: 'annotation',
+  })
+}
+
 export function findErasePreviewRangeAtPoint(pageIndex, normalizedX, normalizedY) {
-  const char = findCharAtPoint(pageIndex, normalizedX, normalizedY)
+  const char = findTextCharCore(pageIndex, normalizedX, normalizedY, null, {
+    mode: 'eraser',
+  })
   if (!char) return null
 
   return {
@@ -1361,32 +1671,26 @@ export function findCharInRangeAtPoint(pageIndex, startChar, endChar, normalized
   for (const line of pageIndex.lines || []) {
     if (line.endChar <= ordered.startChar || line.startChar >= ordered.endChar) continue
 
-    const chars = line.charIndices
-      .map((index) => pageIndex.chars[index])
-      .filter(
-        (char) =>
-          char?.rect &&
-          isWordChar(char.char) &&
-          char.index >= ordered.startChar &&
-          char.index < ordered.endChar,
-      )
-      .sort((left, right) => left.rect.left - right.rect.left)
+    const chars = getLineOrderedWordChars(line, pageIndex)
+      .filter((char) => char.index >= ordered.startChar && char.index < ordered.endChar)
     if (chars.length === 0) continue
 
     const lineRect = unionRects(chars.map((char) => char.rect))
     if (!lineRect) continue
 
-    const lineHeight = line.metrics?.medianHeight || lineRect.height
-    const ySlack = Math.max(0.006, lineHeight * 0.26)
-    const xSlack = Math.max(0.008, lineHeight * 0.42)
+    const {
+      xTolerance,
+      yTolerance,
+      yWeight,
+    } = getTextHitTolerances(line, chars, 'eraser')
     const lineLeft = chars[0].rect.left
     const lineRight = getRectRight(chars[chars.length - 1].rect)
 
     if (
-      normalizedY < lineRect.top - ySlack ||
-      normalizedY > getRectBottom(lineRect) + ySlack ||
-      normalizedX < lineLeft - xSlack ||
-      normalizedX > lineRight + xSlack
+      normalizedY < lineRect.top - yTolerance ||
+      normalizedY > getRectBottom(lineRect) + yTolerance ||
+      normalizedX < lineLeft - xTolerance ||
+      normalizedX > lineRight + xTolerance
     ) {
       continue
     }
@@ -1397,21 +1701,22 @@ export function findCharInRangeAtPoint(pageIndex, startChar, endChar, normalized
       lineRect,
       lineLeft,
       lineRight,
-      lineHeight,
+      yTolerance,
+      yWeight,
     })
   }
 
   if (candidateLines.length === 0) return null
 
-  const directLines = candidateLines.filter(({ lineRect, lineHeight }) =>
-    normalizedY >= lineRect.top - Math.max(0.003, lineHeight * 0.08) &&
-    normalizedY <= getRectBottom(lineRect) + Math.max(0.004, lineHeight * 0.14),
+  const directLines = candidateLines.filter(({ lineRect, yTolerance }) =>
+    normalizedY >= lineRect.top - yTolerance * 0.35 &&
+    normalizedY <= getRectBottom(lineRect) + yTolerance * 0.45,
   )
   const activeLines = directLines.length > 0 ? directLines : candidateLines
 
   let best = null
   for (const candidate of activeLines) {
-    const { chars, lineRect, lineLeft, lineRight } = candidate
+    const { chars, lineRect, lineLeft, lineRight, yWeight } = candidate
 
     let nearestChar = null
     for (const char of chars) {
@@ -1425,7 +1730,7 @@ export function findCharInRangeAtPoint(pageIndex, startChar, endChar, normalized
       const yPenalty = normalizedY >= char.rect.top && normalizedY <= getRectBottom(char.rect)
         ? 0
         : Math.abs(normalizedY - centerY)
-      const distance = xPenalty * xPenalty + yPenalty * yPenalty * 1.4
+      const distance = xPenalty * xPenalty + yPenalty * yPenalty * yWeight
       if (!nearestChar || distance < nearestChar.distance) {
         nearestChar = { char, distance }
       }
@@ -1454,42 +1759,15 @@ export function findCharInRangeAtPoint(pageIndex, startChar, endChar, normalized
 }
 
 function findNearestCharForEraser(pageIndex, normalizedX, normalizedY) {
-  if (!pageIndex) return null
-
-  let best = null
-  for (const line of pageIndex.lines || []) {
-    const chars = line.charIndices
-      .map((index) => pageIndex.chars[index])
-      .filter((char) => char?.rect && isWordChar(char.char))
-    if (chars.length === 0) continue
-
-    const lineRect = unionRects(chars.map((char) => char.rect))
-    if (!lineRect) continue
-
-    const lineHeight = line.metrics?.medianHeight || lineRect.height
-    const xLeft = lineRect.left - Math.max(0.006, lineHeight * 0.35)
-    const xRight = getRectRight(lineRect) + Math.max(0.006, lineHeight * 0.35)
-    const yTop = lineRect.top - Math.max(0.006, lineHeight * 0.3)
-    const yBottom = getRectBottom(lineRect) + Math.max(0.012, lineHeight * 0.55)
-    if (normalizedX < xLeft || normalizedX > xRight || normalizedY < yTop || normalizedY > yBottom) {
-      continue
-    }
-
-    for (const char of chars) {
-      const centerX = char.rect.left + char.rect.width / 2
-      const centerY = char.rect.top + char.rect.height / 2
-      const distance = Math.hypot(normalizedX - centerX, (normalizedY - centerY) * 1.2)
-      if (!best || distance < best.distance) {
-        best = { char, distance }
-      }
-    }
-  }
-
-  return best?.char || null
+  return findTextCharCore(pageIndex, normalizedX, normalizedY, null, {
+    mode: 'eraser',
+  })
 }
 
 export function findEraseRangeAtPoint(pageIndex, normalizedX, normalizedY) {
-  const boundary = findCharBoundaryAtPoint(pageIndex, normalizedX, normalizedY)
+  const boundary = findTextBoundaryAtPoint(pageIndex, normalizedX, normalizedY, null, {
+    mode: 'eraser',
+  })
   if (boundary) {
     const startChar = clamp(boundary.charIndex - 2, 0, pageIndex.length)
     const endChar = clamp(boundary.charIndex + 2, 0, pageIndex.length)
@@ -1531,22 +1809,22 @@ export function getSelectionFromNativeSelection(selection, pageIndex) {
     return null
   }
 
-  const text = getPageTextSlice(pageIndex, ordered.startChar, ordered.endChar)
-  const copyText = formatRangeTextForCopy(pageIndex, ordered.startChar, ordered.endChar)
-  if (!text.trim()) {
+  const geometry = getTextRangeGeometry(pageIndex, ordered.startChar, ordered.endChar, {
+    visualMode: 'selection-overlay',
+  })
+  if (!geometry.text.trim()) {
     return null
   }
 
-  const rects = getLineRectsForRange(pageIndex, ordered.startChar, ordered.endChar)
   const context = getContextAroundRange(pageIndex, ordered.startChar, ordered.endChar)
 
   return {
     startChar: ordered.startChar,
     endChar: ordered.endChar,
-    text,
-    copyText,
-    rects,
-    anchorRect: rects[0] || null,
+    text: geometry.text,
+    copyText: geometry.copyText,
+    rects: geometry.rects,
+    anchorRect: geometry.rects[0] || null,
     contextBefore: context.before,
     contextAfter: context.after,
   }

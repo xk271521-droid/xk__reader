@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Annotated
 
+import subprocess
+import sys
+from pathlib import Path
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,11 +23,25 @@ from app.services.paper_summary import (
     SUMMARY_TYPES,
     build_summary_response_payload,
     is_summary_stale,
-    run_paper_summary_task,
+    is_summary_running_stale,
+    mark_summary_interrupted,
+    normalize_summary_terminal_state,
     stale_summary_message,
 )
 
 router = APIRouter(prefix="/papers/{paper_id}/summaries")
+
+
+def _spawn_paper_summary_task(summary_id: int, provider_id: int | None = None) -> None:
+    backend_root = Path(__file__).resolve().parents[3]
+    args = [sys.executable, "-m", "app.services.paper_summary_worker", str(summary_id)]
+    if provider_id is not None:
+        args.append(str(provider_id))
+    subprocess.Popen(
+        args,
+        cwd=str(backend_root),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
 
 
 def _ensure_owned_paper(db: Session, paper_id: int, user: User) -> Paper:
@@ -72,6 +90,9 @@ def list_paper_summaries(
     states = []
     for summary_type in SUMMARY_TYPES:
         item = by_type.get(summary_type)
+        item = normalize_summary_terminal_state(db, item)
+        if item and item.status == "running" and is_summary_running_stale(item):
+            item = mark_summary_interrupted(db, item)
         stale = is_summary_stale(db, paper, item)
         states.append(
             PaperSummaryState(
@@ -98,7 +119,11 @@ def generate_paper_summary(
     _ensure_summary_type(summary_type)
     paper = _ensure_owned_paper(db, paper_id, current_user)
     item = _load_summary(db, paper_id, current_user.id, summary_type)
+    item = normalize_summary_terminal_state(db, item)
     stale = is_summary_stale(db, paper, item)
+
+    if item and item.status == "running" and is_summary_running_stale(item):
+        item = mark_summary_interrupted(db, item)
 
     if item and item.status == "running":
         return PaperSummaryStatusResponse(**build_summary_response_payload(item, summary_type))
@@ -123,7 +148,7 @@ def generate_paper_summary(
     db.commit()
     db.refresh(item)
 
-    background_tasks.add_task(run_paper_summary_task, item.id, payload.provider_id)
+    _spawn_paper_summary_task(item.id, payload.provider_id)
     return PaperSummaryStatusResponse(**build_summary_response_payload(item, summary_type))
 
 
@@ -148,6 +173,9 @@ def get_paper_summary_status(
             updated_at=None,
             model="",
         )
+    item = normalize_summary_terminal_state(db, item)
+    if item.status == "running" and is_summary_running_stale(item):
+        item = mark_summary_interrupted(db, item)
     stale = is_summary_stale(db, paper, item)
     return PaperSummaryStatusResponse(
         **build_summary_response_payload(

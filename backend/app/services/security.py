@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import random
 from datetime import datetime, timedelta, timezone
 
@@ -22,6 +23,11 @@ def hash_password(password: str) -> str:
 
 def verify_password(password: str, hashed_password: str) -> bool:
     return password_hasher.verify(password, hashed_password)
+
+
+def hash_verification_code(channel: str, purpose: str, target: str, code: str) -> str:
+    payload = f"{channel}:{purpose}:{target.strip().lower()}:{code.strip()}:{settings.secret_key}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def create_access_token(subject: str) -> str:

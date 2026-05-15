@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from time import time_ns
-from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -15,12 +15,26 @@ from app.db.session import get_db
 from app.models import Folder, User, UserAgreement, UserProfile
 from app.schemas.auth import (
     AuthResponse,
+    CaptchaChallengeResponse,
     LoginRequest,
     RegisterRequest,
+    ResetPasswordRequest,
+    SendResetCodeRequest,
+    SendVerificationCodeRequest,
+    SendVerificationCodeResponse,
     UpdateProfileRequest,
     UserResponse,
 )
+from app.services.auth_guard import auth_guard
 from app.services.security import create_access_token, create_uid, hash_password, verify_password
+from app.services.verification import (
+    EMAIL_CHANNEL,
+    REGISTER_PURPOSE,
+    RESET_PASSWORD_PURPOSE,
+    SMS_CHANNEL,
+    issue_verification_code,
+    verify_code,
+)
 
 
 router = APIRouter(prefix="/auth")
@@ -30,6 +44,45 @@ ALLOWED_AVATAR_TYPES = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
+
+
+def get_client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "").strip()
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip() or "unknown"
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def normalize_account_key(value: str) -> str:
+    account = value.strip()
+    return account.lower() if "@" in account else account
+
+
+def resolve_account_channel(value: str) -> str:
+    return EMAIL_CHANNEL if "@" in value else SMS_CHANNEL
+
+
+def normalize_captcha_scene(value: str) -> str:
+    return "register" if value == "signup" else value
+
+
+def validate_password_strength(password: str) -> None:
+    if len(password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="密码至少需要 8 位。",
+        )
+
+    has_upper = any(char.isupper() for char in password)
+    has_lower = any(char.islower() for char in password)
+    has_digit = any(char.isdigit() for char in password)
+    if sum((has_upper, has_lower, has_digit)) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="密码需至少包含字母和数字中的两类组合。",
+        )
 
 
 def generate_unique_uid(db: Session) -> str:
@@ -83,17 +136,151 @@ def resolve_old_avatar_path(avatar_url: str | None) -> Path | None:
     return resolved
 
 
+def find_user_by_account(db: Session, account: str) -> User | None:
+    normalized_account = normalize_account_key(account)
+    lookup_field = User.email if "@" in normalized_account else User.phone
+    return db.scalar(
+        select(User)
+        .options(selectinload(User.profile))
+        .where(lookup_field == normalized_account)
+    )
+
+
+@router.get("/captcha", response_model=CaptchaChallengeResponse)
+def get_captcha(
+    scene: Annotated[str, Query(pattern="^(login|register|signup|reset)$")],
+) -> CaptchaChallengeResponse:
+    challenge = auth_guard.create_challenge(normalize_captcha_scene(scene))
+    return CaptchaChallengeResponse(**challenge)
+
+
+@router.post("/register/send-code", response_model=SendVerificationCodeResponse)
+def send_register_code(
+    request: Request,
+    payload: SendVerificationCodeRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> SendVerificationCodeResponse:
+    client_ip = get_client_ip(request)
+    auth_guard.ensure_request_allowed("register", client_ip, account_keys=[payload.target])
+    auth_guard.verify_challenge("register", payload.captcha_id, payload.captcha_code)
+
+    if payload.channel == SMS_CHANNEL:
+        existing_user = db.scalar(select(User.id).where(User.phone == payload.target))
+        if existing_user:
+            raise HTTPException(status_code=409, detail="该手机号已注册。")
+    elif payload.channel == EMAIL_CHANNEL:
+        existing_user = db.scalar(select(User.id).where(User.email == payload.target.lower()))
+        if existing_user:
+            raise HTTPException(status_code=409, detail="该邮箱已注册。")
+
+    cooldown = issue_verification_code(
+        db,
+        channel=payload.channel,
+        purpose=REGISTER_PURPOSE,
+        target=payload.target,
+        request_ip=client_ip,
+    )
+    return SendVerificationCodeResponse(cooldown_seconds=cooldown)
+
+
+@router.post("/password/send-code", response_model=SendVerificationCodeResponse)
+def send_reset_code(
+    request: Request,
+    payload: SendResetCodeRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> SendVerificationCodeResponse:
+    client_ip = get_client_ip(request)
+    normalized_account = normalize_account_key(payload.account)
+    auth_guard.ensure_request_allowed("login", client_ip, account_keys=[normalized_account])
+    auth_guard.verify_challenge("reset", payload.captcha_id, payload.captcha_code)
+
+    user = find_user_by_account(db, normalized_account)
+    if not user:
+        raise HTTPException(status_code=404, detail="账号不存在。")
+
+    channel = resolve_account_channel(normalized_account)
+    cooldown = issue_verification_code(
+        db,
+        channel=channel,
+        purpose=RESET_PASSWORD_PURPOSE,
+        target=normalized_account,
+        request_ip=client_ip,
+    )
+    return SendVerificationCodeResponse(cooldown_seconds=cooldown)
+
+
+@router.post("/password/reset")
+def reset_password(
+    request: Request,
+    payload: ResetPasswordRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, str]:
+    client_ip = get_client_ip(request)
+    normalized_account = normalize_account_key(payload.account)
+    auth_guard.ensure_request_allowed("login", client_ip, account_keys=[normalized_account])
+    auth_guard.verify_challenge("reset", payload.captcha_id, payload.captcha_code)
+    validate_password_strength(payload.password)
+
+    user = find_user_by_account(db, normalized_account)
+    if not user:
+        raise HTTPException(status_code=404, detail="账号不存在。")
+
+    verify_code(
+        db,
+        channel=resolve_account_channel(normalized_account),
+        purpose=RESET_PASSWORD_PURPOSE,
+        target=normalized_account,
+        code=payload.verification_code,
+    )
+
+    user.password_hash = hash_password(payload.password)
+    db.add(user)
+    db.commit()
+    auth_guard.record_success("login", account_keys=[normalized_account])
+    return {"message": "密码重置成功，请使用新密码登录。"}
+
+
 @router.post("/register", response_model=AuthResponse)
 def register(
+    request: Request,
     payload: RegisterRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> AuthResponse:
-    existing_user = db.scalar(
-        select(User).where(
-            or_(User.phone == payload.phone, User.email == payload.email)
-        )
+    client_ip = get_client_ip(request)
+    account_keys = [payload.phone]
+    if payload.email:
+        account_keys.append(payload.email)
+
+    auth_guard.ensure_request_allowed("register", client_ip, account_keys=account_keys)
+    validate_password_strength(payload.password)
+
+    verify_code(
+        db,
+        channel=SMS_CHANNEL,
+        purpose=REGISTER_PURPOSE,
+        target=payload.phone,
+        code=payload.phone_verification_code,
     )
+    if payload.email and payload.email_verification_code:
+        verify_code(
+            db,
+            channel=EMAIL_CHANNEL,
+            purpose=REGISTER_PURPOSE,
+            target=payload.email,
+            code=payload.email_verification_code,
+        )
+
+    if payload.email:
+        existing_user = db.scalar(
+            select(User).where(
+                or_(User.phone == payload.phone, User.email == payload.email)
+            )
+        )
+    else:
+        existing_user = db.scalar(select(User).where(User.phone == payload.phone))
+
     if existing_user:
+        auth_guard.record_failure("register", client_ip, account_keys=account_keys)
         if existing_user.phone == payload.phone:
             raise HTTPException(status_code=409, detail="该手机号已注册。")
         raise HTTPException(status_code=409, detail="该邮箱已注册。")
@@ -125,10 +312,7 @@ def register(
 
     db.add(profile)
     db.add(agreement)
-
-    uncategorized = Folder(user_id=user.id, name="未分类")
-    db.add(uncategorized)
-
+    db.add(Folder(user_id=user.id, name="未分类"))
     db.commit()
 
     created_user = db.scalar(
@@ -137,8 +321,12 @@ def register(
         .where(User.id == user.id)
     )
     if not created_user:
-        raise HTTPException(status_code=500, detail="注册成功但读取用户信息失败。")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="注册成功，但读取用户信息失败。",
+        )
 
+    auth_guard.record_success("register", account_keys=account_keys)
     return AuthResponse(
         access_token=create_access_token(created_user.uid),
         user=build_user_response(created_user),
@@ -147,27 +335,28 @@ def register(
 
 @router.post("/login", response_model=AuthResponse)
 def login(
+    request: Request,
     payload: LoginRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> AuthResponse:
-    normalized_account = payload.account.lower() if "@" in payload.account else payload.account
-    lookup_field = User.email if "@" in normalized_account else User.phone
+    client_ip = get_client_ip(request)
+    normalized_account = normalize_account_key(payload.account)
+    auth_guard.ensure_request_allowed("login", client_ip, account_keys=[normalized_account])
+    auth_guard.verify_challenge("login", payload.captcha_id, payload.captcha_code)
 
-    user = db.scalar(
-        select(User)
-        .options(selectinload(User.profile))
-        .where(lookup_field == normalized_account)
-    )
+    user = find_user_by_account(db, normalized_account)
     if not user or not verify_password(payload.password, user.password_hash):
+        auth_guard.record_failure("login", client_ip, account_keys=[normalized_account])
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="账号或密码错误。",
         )
 
     if user.status != "active":
+        auth_guard.record_failure("login", client_ip, account_keys=[normalized_account])
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="该账号暂时不可用。",
+            detail="该账号当前不可用。",
         )
 
     user.last_login_at = datetime.now(timezone.utc)
@@ -175,6 +364,7 @@ def login(
     db.commit()
     db.refresh(user, attribute_names=["profile"])
 
+    auth_guard.record_success("login", account_keys=[normalized_account])
     return AuthResponse(
         access_token=create_access_token(user.uid),
         user=build_user_response(user),
@@ -228,7 +418,7 @@ async def upload_avatar(
     if avatar.content_type not in ALLOWED_AVATAR_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="头像仅支持 JPG、PNG 或 WEBP 格式。",
+            detail="头像仅支持 JPG、PNG 和 WEBP 格式。",
         )
 
     content = await avatar.read()

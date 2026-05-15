@@ -43,6 +43,8 @@ const parseModeItems = [
   { id: 'aliyun', label: '阿里云增强' },
 ]
 
+const SHOW_FULL_TRANSLATE_ENTRY = false
+
 function ToolbarIconButton({ children, label, onClick, active = false, disabled = false }) {
   return (
     <button
@@ -298,45 +300,49 @@ export function PdfToolbar({
           ) : null}
         </div>
 
-        <button
-          type="button"
-          className={`toolbar-tool toolbar-tool--full-translate toolbar-tool--full-translate-${fullTranslateStatus}${
-            fullTranslateActive ? ' is-active' : ''
-          }`}
-          title="全文翻译"
-          aria-label="全文翻译"
-          onClick={onFullTranslate}
-        >
-          {fullTranslateStatus === 'running' ? (
-            <span
-              className="toolbar-progress-ring"
-              style={{ '--progress': `${Math.max(0, Math.min(100, fullTranslateProgress || 0))}%` }}
-            />
-          ) : (
-            <Languages />
-          )}
-          <span>
-            {fullTranslateStatus === 'running'
-              ? `翻译中 ${Math.round(fullTranslateProgress || 0)}%`
-              : fullTranslateStatus === 'cancelled'
-                ? '已取消'
-                : '全文·翻译'}
-          </span>
-        </button>
+        {SHOW_FULL_TRANSLATE_ENTRY ? (
+          <>
+            <button
+              type="button"
+              className={`toolbar-tool toolbar-tool--full-translate toolbar-tool--full-translate-${fullTranslateStatus}${
+                fullTranslateActive ? ' is-active' : ''
+              }`}
+              title="全文翻译"
+              aria-label="全文翻译"
+              onClick={onFullTranslate}
+            >
+              {fullTranslateStatus === 'running' ? (
+                <span
+                  className="toolbar-progress-ring"
+                  style={{ '--progress': `${Math.max(0, Math.min(100, fullTranslateProgress || 0))}%` }}
+                />
+              ) : (
+                <Languages />
+              )}
+              <span>
+                {fullTranslateStatus === 'running'
+                  ? `翻译中 ${Math.round(fullTranslateProgress || 0)}%`
+                  : fullTranslateStatus === 'cancelled'
+                    ? '已取消'
+                    : '全文·翻译'}
+              </span>
+            </button>
 
-        <select
-          className="toolbar-parse-mode"
-          title="全文翻译解析方式"
-          aria-label="全文翻译解析方式"
-          value={fullTranslateParseMode || 'auto'}
-          onChange={(event) => onFullTranslateParseModeChange?.(event.target.value)}
-        >
-          {parseModeItems.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.label}
-            </option>
-          ))}
-        </select>
+            <select
+              className="toolbar-parse-mode"
+              title="全文翻译解析方式"
+              aria-label="全文翻译解析方式"
+              value={fullTranslateParseMode || 'auto'}
+              onChange={(event) => onFullTranslateParseModeChange?.(event.target.value)}
+            >
+              {parseModeItems.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </>
+        ) : null}
 
         <div className="toolbar-download" ref={downloadWrapRef}>
           <button

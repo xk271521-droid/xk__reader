@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Annotated
 
+import subprocess
+import sys
+from pathlib import Path
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -23,11 +27,13 @@ from app.schemas.research_matrix import (
 from app.services.paper_summary import is_summary_stale, run_paper_summary_task
 from app.services.research_matrix import (
     DELETED_SOURCE_PAPER_MESSAGE,
+    WORKER_MAX_RETRIES,
     build_dashboard_snapshot,
     create_matrix_run,
     ensure_unique_paper_ids,
     get_owned_papers,
     inspect_run_source_state,
+    is_run_worker_stale,
     rename_matrix_run,
     retry_pending_run,
     run_matrix_run_task,
@@ -37,6 +43,37 @@ from app.services.research_matrix import (
 )
 
 router = APIRouter(prefix="/research-matrix", tags=["research-matrix"])
+
+
+def _spawn_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
+    backend_root = Path(__file__).resolve().parents[3]
+    args = [sys.executable, "-m", "app.services.research_matrix_worker", str(run_id)]
+    if provider_id is not None:
+        args.append(str(provider_id))
+    subprocess.Popen(
+        args,
+        cwd=str(backend_root),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+def resume_stale_matrix_runs() -> None:
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        runs = db.scalars(
+            select(ResearchMatrixRun).options(selectinload(ResearchMatrixRun.papers)).where(
+                ResearchMatrixRun.status.in_(["queued", "running"])
+            )
+        ).all()
+        for run in runs:
+            if run.status == "queued" or is_run_worker_stale(run):
+                if int(run.worker_retry_count or 0) > WORKER_MAX_RETRIES:
+                    continue
+                _spawn_matrix_run_task(run.id, None)
+    finally:
+        db.close()
 
 
 def _load_run(db: Session, run_id: int, user_id: int) -> ResearchMatrixRun:
@@ -102,12 +139,13 @@ def create_matrix_run_endpoint(
             [paper.id for paper in papers],
             title=payload.title,
             include_reproduction=payload.include_reproduction,
+            grouping_mode=payload.grouping_mode,
         )
     except ValueError:
         raise HTTPException(status_code=404, detail="没有可用的文献") from None
     run = _load_run(db, run.id, current_user.id)
     if run.status in {"queued", "running"}:
-        background_tasks.add_task(run_matrix_run_task, run.id, payload.provider_id)
+        _spawn_matrix_run_task(run.id, payload.provider_id)
     return ResearchMatrixRunResponse(**serialize_run_detail(db, run, current_user.id))
 
 
@@ -186,11 +224,12 @@ def refresh_matrix_run(
         paper_ids,
         title=payload.title or f"{run.title} - 新版本",
         include_reproduction=bool((run.config_json or {}).get("include_reproduction", True)),
+        grouping_mode=str(payload.grouping_mode or (run.config_json or {}).get("grouping_mode") or "topic_first"),
         refreshed_from_id=run.id,
     )
     refreshed = _load_run(db, refreshed.id, current_user.id)
     if refreshed.status in {"queued", "running"}:
-        background_tasks.add_task(run_matrix_run_task, refreshed.id, payload.provider_id)
+        _spawn_matrix_run_task(refreshed.id, payload.provider_id)
     return ResearchMatrixRunResponse(**serialize_run_detail(db, refreshed, current_user.id))
 
 
@@ -204,7 +243,7 @@ def retry_pending_matrix_run(
     run = _load_run(db, run_id, current_user.id)
     _raise_if_run_source_deleted(db, run, current_user.id)
     run = retry_pending_run(db, run)
-    background_tasks.add_task(run_matrix_run_task, run.id, None)
+    _spawn_matrix_run_task(run.id, None)
     run = _load_run(db, run.id, current_user.id)
     return ResearchMatrixRunResponse(**serialize_run_detail(db, run, current_user.id))
 

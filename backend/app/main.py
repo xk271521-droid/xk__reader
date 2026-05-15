@@ -6,9 +6,10 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import inspect, select, text
 
 from app.api.router import api_router
+from app.api.routes.research_matrix import resume_stale_matrix_runs
 from app.core.config import settings
 from app.db.session import Base, SessionLocal, engine
-from app.models import Annotation, AiProvider, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, ResearchMatrixRun, ResearchMatrixRunPaper, User, UserAgreement, UserProfile  # noqa: F401
+from app.models import Annotation, AiProvider, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, ResearchMatrixRun, ResearchMatrixRunPaper, User, UserAgreement, UserProfile, VerificationCode  # noqa: F401
 
 
 def _ensure_system_providers() -> None:
@@ -138,6 +139,12 @@ def _ensure_research_matrix_columns() -> None:
         ("ready_count", "INTEGER", "0"),
         ("failed_count", "INTEGER", "0"),
         ("progress_percent", "INTEGER", "0"),
+        ("worker_status", "VARCHAR(24)", "'idle'"),
+        ("worker_started_at", "DATETIME", None),
+        ("worker_heartbeat_at", "DATETIME", None),
+        ("worker_pid", "INTEGER", None),
+        ("worker_retry_count", "INTEGER", "0"),
+        ("last_worker_error", "TEXT", None),
     ]
     run_paper_additions = [
         ("review_role", "VARCHAR(120)", "''"),
@@ -147,12 +154,19 @@ def _ensure_research_matrix_columns() -> None:
         for name, column_type, default in run_additions:
             if name in run_columns:
                 continue
-            connection.execute(
-                text(
-                    f"ALTER TABLE research_matrix_runs ADD COLUMN {name} {column_type} "
-                    f"NOT NULL DEFAULT {default}"
+            if default is None:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE research_matrix_runs ADD COLUMN {name} {column_type} NULL"
+                    )
                 )
-            )
+            else:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE research_matrix_runs ADD COLUMN {name} {column_type} "
+                        f"NOT NULL DEFAULT {default}"
+                    )
+                )
         for name, column_type, default in run_paper_additions:
             if name in run_paper_columns:
                 continue
@@ -187,6 +201,24 @@ def _ensure_reading_record_duration_column() -> None:
         )
 
 
+def _ensure_user_email_nullable() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"]: column for column in inspector.get_columns("users")}
+    except Exception:
+        return
+
+    email_column = columns.get("email")
+    if not email_column or email_column.get("nullable"):
+        return
+
+    if engine.dialect.name == "sqlite":
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE users MODIFY COLUMN email VARCHAR(255) NULL"))
+
+
 def create_app() -> FastAPI:
     application = FastAPI(title=settings.app_name)
     application.add_middleware(
@@ -211,7 +243,9 @@ def create_app() -> FastAPI:
         _ensure_paper_trash_columns()
         _ensure_research_matrix_columns()
         _ensure_reading_record_duration_column()
+        _ensure_user_email_nullable()
         _ensure_system_providers()
+        resume_stale_matrix_runs()
 
     return application
 

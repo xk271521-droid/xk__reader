@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,51 @@ REVIEW_SECTION_ALIASES = {
 class PageText:
     page: int
     text: str
+
+
+SUMMARY_RUNNING_STALE_SECONDS = 180
+
+
+def _normalize_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def is_summary_running_stale(item: PaperSummary | None, *, now: datetime | None = None) -> bool:
+    if not item or item.status != "running":
+        return False
+    updated_at = _normalize_datetime(item.updated_at)
+    if updated_at is None:
+        return False
+    current = _normalize_datetime(now or datetime.now(timezone.utc))
+    if current is None:
+        return False
+    return (current - updated_at) > timedelta(seconds=SUMMARY_RUNNING_STALE_SECONDS)
+
+
+def mark_summary_interrupted(db: Session, item: PaperSummary, message: str = "生成任务已中断，请重试。") -> PaperSummary:
+    item.status = "failed" if not item.content_json else "generated"
+    item.stage = "failed"
+    item.error_message = message
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+def normalize_summary_terminal_state(db: Session, item: PaperSummary | None) -> PaperSummary | None:
+    if not item:
+        return None
+    if item.stage == "completed" and int(item.progress or 0) >= 100 and item.status != "generated":
+        item.status = "generated"
+        item.error_message = None
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+    return item
 
 
 def get_review_summary_content(content: dict[str, Any] | None) -> dict[str, Any]:
@@ -387,6 +433,8 @@ def update_summary_progress(summary_id: int, *, stage: str, progress: int, statu
     try:
         item = db.get(PaperSummary, summary_id)
         if not item:
+            return
+        if item.status == "generated" and (item.stage == "completed" or int(item.progress or 0) >= 100):
             return
         item.status = status
         item.stage = stage

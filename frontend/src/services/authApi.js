@@ -42,6 +42,47 @@ export function clearStoredAuthToken() {
   window.localStorage.removeItem(AUTH_TOKEN_KEY)
 }
 
+export async function fetchCaptchaChallenge(scene) {
+  const response = await fetch(`/api/auth/captcha?scene=${encodeURIComponent(scene)}`)
+  return parseJsonResponse(response)
+}
+
+export async function sendRegisterVerificationCode(payload) {
+  const response = await fetch('/api/auth/register/send-code', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+
+  return parseJsonResponse(response)
+}
+
+export async function sendResetVerificationCode(payload) {
+  const response = await fetch('/api/auth/password/send-code', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+
+  return parseJsonResponse(response)
+}
+
+export async function resetPassword(payload) {
+  const response = await fetch('/api/auth/password/reset', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+
+  return parseJsonResponse(response)
+}
+
 export async function registerUser(payload) {
   const response = await fetch('/api/auth/register', {
     method: 'POST',

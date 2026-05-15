@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
-import { loginUser, registerUser } from '../services/authApi'
+import { RefreshCw } from 'lucide-react'
+import {
+  fetchCaptchaChallenge,
+  loginUser,
+  registerUser,
+  resetPassword,
+  sendResetVerificationCode,
+  sendRegisterVerificationCode,
+} from '../services/authApi'
 import xkLogoIcon from '../assets/brand/xk-logo-icon.svg'
 import './Login.css'
 
@@ -466,6 +474,155 @@ function EyeIcon({ hidden = false }) {
   )
 }
 
+function CaptchaPanel({
+  captcha,
+  value,
+  isLoading,
+  onChange,
+  onRefresh,
+  onFocus,
+  onBlur,
+}) {
+  return (
+    <div className="auth-form__field">
+      <label htmlFor="captcha-code">验证码</label>
+      <div className="auth-captcha">
+        <button
+          type="button"
+          className="auth-captcha__image"
+          onClick={onRefresh}
+          disabled={isLoading}
+          aria-label="刷新验证码"
+        >
+          {captcha?.image_data_url ? (
+            <img src={captcha.image_data_url} alt="图形验证码" />
+          ) : (
+            <span>加载中...</span>
+          )}
+        </button>
+        <div className="auth-captcha__controls">
+          <input
+            id="captcha-code"
+            type="text"
+            placeholder="请输入图形验证码"
+            autoComplete="off"
+            inputMode="text"
+            maxLength={8}
+            value={value}
+            onChange={(event) => onChange(event.target.value.toUpperCase())}
+            onFocus={onFocus}
+            onBlur={onBlur}
+            className="auth-input"
+          />
+          <button
+            type="button"
+            className="auth-captcha__refresh"
+            onClick={onRefresh}
+            disabled={isLoading}
+          >
+            <RefreshCw />
+            <span>换一张</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function VerificationCodeField({
+  className = '',
+  id,
+  label,
+  placeholder,
+  value,
+  onChange,
+  onSend,
+  sending,
+  cooldown,
+  disabled = false,
+  required = false,
+}) {
+  return (
+    <div className={`auth-form__field ${className}`.trim()}>
+      <label htmlFor={id}>
+        {label}
+        {required ? ' *' : ''}
+      </label>
+      <div className="auth-captcha__controls">
+        <input
+          id={id}
+          type="text"
+          inputMode="numeric"
+          maxLength={6}
+          placeholder={placeholder}
+          value={value}
+          onChange={(event) => onChange(event.target.value.replace(/\D/g, '').slice(0, 6))}
+          className="auth-input"
+          disabled={disabled}
+        />
+        <button
+          type="button"
+          className="auth-captcha__refresh"
+          onClick={onSend}
+          disabled={disabled || sending || cooldown > 0}
+        >
+          <span>{sending ? '发送中...' : cooldown > 0 ? `${cooldown}s` : '发送验证码'}</span>
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function SendCodeCaptchaModal({
+  open,
+  title,
+  captcha,
+  codeValue,
+  isLoading,
+  isSubmitting,
+  onChange,
+  onRefresh,
+  onClose,
+  onConfirm,
+}) {
+  if (!open) return null
+
+  return (
+    <div className="auth-modal-backdrop" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="auth-modal">
+        <div className="auth-modal__header">
+          <strong>{title}</strong>
+          <button type="button" className="text-link" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+
+        <CaptchaPanel
+          captcha={captcha}
+          value={codeValue}
+          isLoading={isLoading}
+          onChange={onChange}
+          onRefresh={onRefresh}
+        />
+
+        <div className="auth-modal__actions">
+          <button type="button" className="auth-captcha__refresh" onClick={onClose}>
+            取消
+          </button>
+          <button
+            type="button"
+            className="auth-captcha__refresh auth-captcha__refresh--primary"
+            onClick={onConfirm}
+            disabled={isSubmitting}
+          >
+            {isSubmitting ? '发送中...' : '确认发送'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function InteractiveHoverButton({ text, icon, className = '', type = 'button', ...props }) {
   return (
     <button
@@ -486,9 +643,13 @@ function buildEmptyForm() {
   return {
     account: '',
     phone: '',
+    phoneVerificationCode: '',
     email: '',
+    emailVerificationCode: '',
+    resetVerificationCode: '',
     password: '',
     confirmPassword: '',
+    captchaCode: '',
     nickname: '',
     education: EDUCATION_OPTIONS[1],
     occupation: OCCUPATION_OPTIONS[0],
@@ -509,6 +670,7 @@ function isValidEmail(value) {
 function Login({ initialMode = 'login', onAuthSuccess }) {
   const [mode, setMode] = useState(initialMode)
   const [signupStep, setSignupStep] = useState(1)
+  const [loginStep, setLoginStep] = useState('login')
   const [form, setForm] = useState(buildEmptyForm)
   const [showPassword, setShowPassword] = useState(false)
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
@@ -517,6 +679,18 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
   const [activePasswordField, setActivePasswordField] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
+  const [captcha, setCaptcha] = useState(null)
+  const [isCaptchaLoading, setIsCaptchaLoading] = useState(false)
+  const [isSendingPhoneCode, setIsSendingPhoneCode] = useState(false)
+  const [isSendingEmailCode, setIsSendingEmailCode] = useState(false)
+  const [isSendingResetCode, setIsSendingResetCode] = useState(false)
+  const [sendCodeModal, setSendCodeModal] = useState({ open: false, channel: '' })
+  const [sendCodeCaptcha, setSendCodeCaptcha] = useState(null)
+  const [sendCodeCaptchaValue, setSendCodeCaptchaValue] = useState('')
+  const [isSendCodeCaptchaLoading, setIsSendCodeCaptchaLoading] = useState(false)
+  const [phoneCodeCooldown, setPhoneCodeCooldown] = useState(0)
+  const [emailCodeCooldown, setEmailCodeCooldown] = useState(0)
+  const [resetCodeCooldown, setResetCodeCooldown] = useState(0)
   const current = copy[mode]
 
   const passwordLength = useMemo(() => {
@@ -548,6 +722,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
   function resetForMode(nextMode) {
     setMode(nextMode)
     setSignupStep(1)
+    setLoginStep('login')
     setForm(buildEmptyForm())
     setShowPassword(false)
     setShowConfirmPassword(false)
@@ -558,12 +733,103 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
     setError('')
   }
 
+  async function loadCaptcha(scene = mode) {
+    setIsCaptchaLoading(true)
+    try {
+      const payload = await fetchCaptchaChallenge(scene)
+      setCaptcha(payload)
+      setForm((currentForm) => ({
+        ...currentForm,
+        captchaCode: '',
+      }))
+    } catch {
+      setCaptcha(null)
+    } finally {
+      setIsCaptchaLoading(false)
+    }
+  }
+
+  async function loadSendCodeCaptcha(scene = 'register') {
+    setIsSendCodeCaptchaLoading(true)
+    try {
+      const payload = await fetchCaptchaChallenge(scene)
+      setSendCodeCaptcha(payload)
+      setSendCodeCaptchaValue('')
+    } catch {
+      setSendCodeCaptcha(null)
+    } finally {
+      setIsSendCodeCaptchaLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadCaptcha(mode)
+  }, [mode])
+
+  useEffect(() => {
+    if (phoneCodeCooldown <= 0) return undefined
+    const timer = window.setTimeout(() => {
+      setPhoneCodeCooldown((value) => Math.max(0, value - 1))
+    }, 1000)
+    return () => window.clearTimeout(timer)
+  }, [phoneCodeCooldown])
+
+  useEffect(() => {
+    if (emailCodeCooldown <= 0) return undefined
+    const timer = window.setTimeout(() => {
+      setEmailCodeCooldown((value) => Math.max(0, value - 1))
+    }, 1000)
+    return () => window.clearTimeout(timer)
+  }, [emailCodeCooldown])
+
+  useEffect(() => {
+    if (resetCodeCooldown <= 0) return undefined
+    const timer = window.setTimeout(() => {
+      setResetCodeCooldown((value) => Math.max(0, value - 1))
+    }, 1000)
+    return () => window.clearTimeout(timer)
+  }, [resetCodeCooldown])
+
   function validateLogin() {
     if (!form.account.trim()) {
       return '请输入手机号或邮箱。'
     }
     if (form.password.length < 8) {
       return '密码至少需要 8 位。'
+    }
+    if (!captcha?.challenge_id) {
+      return '验证码加载失败，请刷新后重试。'
+    }
+    if (form.captchaCode.trim().length < 4) {
+      return '请输入验证码。'
+    }
+    return ''
+  }
+
+  function validateResetRequest() {
+    if (!form.account.trim()) {
+      return '请输入手机号或邮箱。'
+    }
+    if (!captcha?.challenge_id) {
+      return '验证码加载失败，请刷新后重试。'
+    }
+    if (form.captchaCode.trim().length < 4) {
+      return '请输入图形验证码。'
+    }
+    return ''
+  }
+
+  function validateResetSubmit() {
+    const requestError = validateResetRequest()
+    if (requestError) return requestError
+    if (form.resetVerificationCode.trim().length !== 6) {
+      return '请输入 6 位重置验证码。'
+    }
+    if (form.password.length < 8) {
+      return '新密码至少需要 8 位。'
+    }
+    if (form.password !== form.confirmPassword) {
+      return '两次输入的新密码不一致。'
     }
     return ''
   }
@@ -572,8 +838,8 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
     if (!isValidPhone(form.phone)) {
       return '请输入正确的手机号。'
     }
-    if (!isValidEmail(form.email)) {
-      return '请输入正确的邮箱地址。'
+    if (form.email.trim() && !isValidEmail(form.email)) {
+      return '邮箱填写后必须是正确格式。'
     }
     if (form.password.length < 8) {
       return '密码至少需要 8 位。'
@@ -581,7 +847,109 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
     if (form.password !== form.confirmPassword) {
       return '两次输入的密码不一致。'
     }
+    if (form.phoneVerificationCode.trim().length !== 6) {
+      return '请输入 6 位短信验证码。'
+    }
+    if (form.email.trim() && form.emailVerificationCode.trim().length !== 6) {
+      return '填写邮箱后必须输入 6 位邮箱验证码。'
+    }
     return ''
+  }
+
+  async function openSendCodeModal(channel) {
+    setError('')
+
+    if (channel === 'sms') {
+      if (!isValidPhone(form.phone)) {
+        setError('请先输入正确的手机号。')
+        return
+      }
+    } else {
+      if (!form.email.trim()) {
+        setError('请先填写邮箱。')
+        return
+      }
+      if (!isValidEmail(form.email)) {
+        setError('请输入正确的邮箱地址。')
+        return
+      }
+    }
+
+    setSendCodeModal({ open: true, channel })
+    await loadSendCodeCaptcha('register')
+  }
+
+  async function handleSendVerificationCode() {
+    const channel = sendCodeModal.channel
+    if (!channel) return
+    setError('')
+
+    if (!sendCodeCaptcha?.challenge_id) {
+      setError('验证码加载失败，请刷新后重试。')
+      return
+    }
+
+    if (sendCodeCaptchaValue.trim().length < 4) {
+      setError('请输入图形验证码。')
+      return
+    }
+
+    if (channel === 'sms') {
+      setIsSendingPhoneCode(true)
+    } else {
+      setIsSendingEmailCode(true)
+    }
+
+    try {
+      const payload = await sendRegisterVerificationCode({
+        channel,
+        target: channel === 'sms' ? form.phone.trim() : form.email.trim(),
+        captcha_id: sendCodeCaptcha.challenge_id,
+        captcha_code: sendCodeCaptchaValue.trim(),
+      })
+      if (channel === 'sms') {
+        setPhoneCodeCooldown(Number(payload?.cooldown_seconds) || 60)
+      } else {
+        setEmailCodeCooldown(Number(payload?.cooldown_seconds) || 60)
+      }
+      setSendCodeModal({ open: false, channel: '' })
+      setSendCodeCaptcha(null)
+      setSendCodeCaptchaValue('')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '验证码发送失败，请稍后再试。')
+      await loadSendCodeCaptcha('register')
+    } finally {
+      if (channel === 'sms') {
+        setIsSendingPhoneCode(false)
+      } else {
+        setIsSendingEmailCode(false)
+      }
+    }
+  }
+
+  async function handleSendResetCode() {
+    setError('')
+    const validationError = validateResetRequest()
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+
+    setIsSendingResetCode(true)
+    try {
+      const payload = await sendResetVerificationCode({
+        account: form.account.trim(),
+        captcha_id: captcha.challenge_id,
+        captcha_code: form.captchaCode.trim(),
+      })
+      setResetCodeCooldown(Number(payload?.cooldown_seconds) || 60)
+      await loadCaptcha('reset')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '发送重置验证码失败，请稍后再试。')
+      await loadCaptcha('reset')
+    } finally {
+      setIsSendingResetCode(false)
+    }
   }
 
   function validateSignupStepTwo() {
@@ -602,6 +970,39 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
     setError('')
 
     if (mode === 'login') {
+      if (loginStep === 'reset') {
+        const resetError = validateResetSubmit()
+        if (resetError) {
+          setError(resetError)
+          return
+        }
+
+        setIsLoading(true)
+        try {
+          const result = await resetPassword({
+            account: form.account.trim(),
+            verification_code: form.resetVerificationCode.trim(),
+            password: form.password,
+            confirm_password: form.confirmPassword,
+            captcha_id: captcha.challenge_id,
+            captcha_code: form.captchaCode.trim(),
+          })
+          setError(result?.message || '密码重置成功，请登录。')
+          setLoginStep('login')
+          setForm((currentForm) => ({
+            ...buildEmptyForm(),
+            account: currentForm.account.trim(),
+          }))
+          await loadCaptcha('login')
+        } catch (requestError) {
+          setError(requestError instanceof Error ? requestError.message : '重置密码失败，请稍后再试。')
+          await loadCaptcha('reset')
+        } finally {
+          setIsLoading(false)
+        }
+        return
+      }
+
       const loginError = validateLogin()
       if (loginError) {
         setError(loginError)
@@ -613,10 +1014,13 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
         const authPayload = await loginUser({
           account: form.account.trim(),
           password: form.password,
+          captcha_id: captcha.challenge_id,
+          captcha_code: form.captchaCode.trim(),
         })
         onAuthSuccess?.(authPayload)
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : '登录失败，请稍后再试。')
+        loadCaptcha('login')
       } finally {
         setIsLoading(false)
       }
@@ -643,9 +1047,13 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
     try {
       const authPayload = await registerUser({
         phone: form.phone.trim(),
-        email: form.email.trim(),
+        phone_verification_code: form.phoneVerificationCode.trim(),
+        email: form.email.trim() || null,
+        email_verification_code: form.email.trim() ? form.emailVerificationCode.trim() : null,
         password: form.password,
         confirm_password: form.confirmPassword,
+        captcha_id: sendCodeCaptcha?.challenge_id || 'verified-by-send-code',
+        captcha_code: 'PASS',
         nickname: form.nickname.trim(),
         education: form.education,
         occupation: form.occupation,
@@ -656,6 +1064,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
       onAuthSuccess?.(authPayload)
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : '注册失败，请稍后再试。')
+      loadCaptcha('register')
     } finally {
       setIsLoading(false)
     }
@@ -663,6 +1072,23 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
 
   return (
     <div className="auth-layout">
+      <SendCodeCaptchaModal
+        open={sendCodeModal.open}
+        title={sendCodeModal.channel === 'email' ? '邮箱发码验证' : '手机发码验证'}
+        captcha={sendCodeCaptcha}
+        codeValue={sendCodeCaptchaValue}
+        isLoading={isSendCodeCaptchaLoading}
+        isSubmitting={sendCodeModal.channel === 'email' ? isSendingEmailCode : isSendingPhoneCode}
+        onChange={setSendCodeCaptchaValue}
+        onRefresh={() => loadSendCodeCaptcha('register')}
+        onClose={() => {
+          setSendCodeModal({ open: false, channel: '' })
+          setSendCodeCaptcha(null)
+          setSendCodeCaptchaValue('')
+        }}
+        onConfirm={handleSendVerificationCode}
+      />
+
       <div className="auth-layout__scene">
         <div className="scene-panel">
           <div className="scene-panel__brand">
@@ -743,29 +1169,103 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                   />
                 </div>
 
-                <div className="auth-form__field">
-                  <label htmlFor="login-password">密码</label>
-                  <div className="auth-input-wrap">
-                    <input
-                      id="login-password"
-                      type={showPassword ? 'text' : 'password'}
-                      placeholder="请输入密码"
-                      autoComplete="current-password"
-                      value={form.password}
-                      onChange={(event) => updateField('password', event.target.value)}
-                      onFocus={() => handleFieldFocus('password', 'password')}
-                      onBlur={handleFieldBlur}
-                      className="auth-input auth-input--password"
-                    />
-                    <button
-                      type="button"
-                      className="auth-input-wrap__toggle"
-                      onClick={() => setShowPassword((value) => !value)}
-                    >
-                      <EyeIcon hidden={showPassword} />
-                    </button>
+                {loginStep === 'login' ? (
+                  <div className="auth-form__field">
+                    <label htmlFor="login-password">密码</label>
+                    <div className="auth-input-wrap">
+                      <input
+                        id="login-password"
+                        type={showPassword ? 'text' : 'password'}
+                        placeholder="请输入密码"
+                        autoComplete="current-password"
+                        value={form.password}
+                        onChange={(event) => updateField('password', event.target.value)}
+                        onFocus={() => handleFieldFocus('password', 'password')}
+                        onBlur={handleFieldBlur}
+                        className="auth-input auth-input--password"
+                      />
+                      <button
+                        type="button"
+                        className="auth-input-wrap__toggle"
+                        onClick={() => setShowPassword((value) => !value)}
+                      >
+                        <EyeIcon hidden={showPassword} />
+                      </button>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <>
+                    <VerificationCodeField
+                      id="reset-code"
+                      label="重置验证码"
+                      placeholder="请输入 6 位重置验证码"
+                      value={form.resetVerificationCode}
+                      onChange={(value) => updateField('resetVerificationCode', value)}
+                      onSend={handleSendResetCode}
+                      sending={isSendingResetCode}
+                      cooldown={resetCodeCooldown}
+                      required
+                    />
+
+                    <div className="auth-form__field">
+                      <label htmlFor="reset-password">新密码</label>
+                      <div className="auth-input-wrap">
+                        <input
+                          id="reset-password"
+                          type={showPassword ? 'text' : 'password'}
+                          placeholder="请输入新密码"
+                          autoComplete="new-password"
+                          value={form.password}
+                          onChange={(event) => updateField('password', event.target.value)}
+                          onFocus={() => handleFieldFocus('password', 'password')}
+                          onBlur={handleFieldBlur}
+                          className="auth-input auth-input--password"
+                        />
+                        <button
+                          type="button"
+                          className="auth-input-wrap__toggle"
+                          onClick={() => setShowPassword((value) => !value)}
+                        >
+                          <EyeIcon hidden={showPassword} />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="auth-form__field">
+                      <label htmlFor="reset-confirm-password">确认新密码</label>
+                      <div className="auth-input-wrap">
+                        <input
+                          id="reset-confirm-password"
+                          type={showConfirmPassword ? 'text' : 'password'}
+                          placeholder="请再次输入新密码"
+                          autoComplete="new-password"
+                          value={form.confirmPassword}
+                          onChange={(event) => updateField('confirmPassword', event.target.value)}
+                          onFocus={() => handleFieldFocus('password', 'confirmPassword')}
+                          onBlur={handleFieldBlur}
+                          className="auth-input auth-input--password"
+                        />
+                        <button
+                          type="button"
+                          className="auth-input-wrap__toggle"
+                          onClick={() => setShowConfirmPassword((value) => !value)}
+                        >
+                          <EyeIcon hidden={showConfirmPassword} />
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                <CaptchaPanel
+                  captcha={captcha}
+                  value={form.captchaCode}
+                  isLoading={isCaptchaLoading}
+                  onChange={(value) => updateField('captchaCode', value)}
+                  onRefresh={() => loadCaptcha(loginStep === 'reset' ? 'reset' : 'login')}
+                  onFocus={() => handleFieldFocus('account')}
+                  onBlur={handleFieldBlur}
+                />
               </>
             ) : signupStep === 1 ? (
               <>
@@ -784,12 +1284,25 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                   />
                 </div>
 
+                <VerificationCodeField
+                  className="auth-form__field--paired"
+                  id="signup-phone-code"
+                  label="短信验证码"
+                  placeholder="请输入 6 位短信验证码"
+                  value={form.phoneVerificationCode}
+                  onChange={(value) => updateField('phoneVerificationCode', value)}
+                  onSend={() => openSendCodeModal('sms')}
+                  sending={isSendingPhoneCode}
+                  cooldown={phoneCodeCooldown}
+                  required
+                />
+
                 <div className="auth-form__field">
                   <label htmlFor="signup-email">邮箱</label>
                   <input
                     id="signup-email"
                     type="email"
-                    placeholder="请输入邮箱"
+                    placeholder="可选，填写后需验证"
                     autoComplete="email"
                     value={form.email}
                     onChange={(event) => updateField('email', event.target.value)}
@@ -798,6 +1311,19 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                     className="auth-input"
                   />
                 </div>
+
+                <VerificationCodeField
+                  className="auth-form__field--paired"
+                  id="signup-email-code"
+                  label="邮箱验证码"
+                  placeholder={form.email.trim() ? '请输入 6 位邮箱验证码' : '填写邮箱后可发送'}
+                  value={form.emailVerificationCode}
+                  onChange={(value) => updateField('emailVerificationCode', value)}
+                  onSend={() => openSendCodeModal('email')}
+                  sending={isSendingEmailCode}
+                  cooldown={emailCodeCooldown}
+                  disabled={!form.email.trim()}
+                />
 
                 <div className="auth-form__field">
                   <label htmlFor="signup-password">密码</label>
@@ -952,9 +1478,35 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                   <input type="checkbox" />
                   <span>30 天内记住我</span>
                 </label>
-                <button type="button" className="text-link">
-                  忘记密码？
-                </button>
+                {loginStep === 'login' ? (
+                  <button
+                    type="button"
+                    className="text-link"
+                    onClick={async () => {
+                      setLoginStep('reset')
+                      setError('')
+                      await loadCaptcha('reset')
+                    }}
+                  >
+                    忘记密码？
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="text-link"
+                    onClick={async () => {
+                      setLoginStep('login')
+                      setError('')
+                      setForm((currentForm) => ({
+                        ...buildEmptyForm(),
+                        account: currentForm.account,
+                      }))
+                      await loadCaptcha('login')
+                    }}
+                  >
+                    返回登录
+                  </button>
+                )}
               </div>
             ) : null}
 
@@ -978,11 +1530,15 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                 text={
                   isLoading
                     ? mode === 'login'
-                      ? '登录中...'
+                      ? loginStep === 'reset'
+                        ? '重置中...'
+                        : '登录中...'
                       : '提交中...'
                     : mode === 'signup' && signupStep === 1
                       ? copy.signup.next
-                      : current.primary
+                      : mode === 'login' && loginStep === 'reset'
+                        ? '重置密码'
+                        : current.primary
                 }
                 className="auth-button auth-button--primary"
                 disabled={isLoading}

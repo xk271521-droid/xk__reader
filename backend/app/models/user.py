@@ -17,7 +17,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(PrimaryKeyType, primary_key=True, autoincrement=True)
     uid: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     phone: Mapped[str] = mapped_column(String(20), unique=True, index=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    email: Mapped[str | None] = mapped_column(String(255), unique=True, index=True, nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(20), default="active")
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

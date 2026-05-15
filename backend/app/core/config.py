@@ -51,6 +51,54 @@ class Settings:
     access_token_expire_minutes: int = int(
         os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080")
     )
+    auth_captcha_length: int = int(os.getenv("AUTH_CAPTCHA_LENGTH", "4"))
+    auth_captcha_ttl_seconds: int = int(os.getenv("AUTH_CAPTCHA_TTL_SECONDS", "300"))
+    auth_rate_limit_window_seconds: int = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "900"))
+    auth_rate_limit_block_seconds: int = int(os.getenv("AUTH_RATE_LIMIT_BLOCK_SECONDS", "900"))
+    auth_login_max_attempts_per_ip: int = int(os.getenv("AUTH_LOGIN_MAX_ATTEMPTS_PER_IP", "12"))
+    auth_login_max_attempts_per_account: int = int(os.getenv("AUTH_LOGIN_MAX_ATTEMPTS_PER_ACCOUNT", "6"))
+    auth_register_max_attempts_per_ip: int = int(os.getenv("AUTH_REGISTER_MAX_ATTEMPTS_PER_IP", "8"))
+    auth_register_max_attempts_per_account: int = int(os.getenv("AUTH_REGISTER_MAX_ATTEMPTS_PER_ACCOUNT", "3"))
+    verification_code_ttl_seconds: int = int(os.getenv("VERIFICATION_CODE_TTL_SECONDS", "300"))
+    verification_code_resend_cooldown_seconds: int = int(os.getenv("VERIFICATION_CODE_RESEND_COOLDOWN_SECONDS", "60"))
+    verification_code_max_attempts: int = int(os.getenv("VERIFICATION_CODE_MAX_ATTEMPTS", "5"))
+    register_verification_max_attempts_per_ip: int = int(os.getenv("REGISTER_VERIFICATION_MAX_ATTEMPTS_PER_IP", "10"))
+    register_verification_max_attempts_per_target: int = int(os.getenv("REGISTER_VERIFICATION_MAX_ATTEMPTS_PER_TARGET", "5"))
+    sms_code_template: str = os.getenv("SMS_CODE_TEMPLATE", "您的注册验证码为 {code}，5 分钟内有效。")
+    sms_provider_order: tuple[str, ...] = field(
+        default_factory=lambda: _split_csv(os.getenv("SMS_PROVIDER_ORDER", "huyi,spug,aliyun,tencent"))
+    )
+    email_provider_order: tuple[str, ...] = field(
+        default_factory=lambda: _split_csv(os.getenv("EMAIL_PROVIDER_ORDER", "spug,smtp"))
+    )
+    smtp_host: str = os.getenv("SMTP_HOST", "")
+    smtp_port: int = int(os.getenv("SMTP_PORT", "465"))
+    smtp_username: str = os.getenv("SMTP_USERNAME", "")
+    smtp_password: str = os.getenv("SMTP_PASSWORD", "")
+    smtp_from_email: str = os.getenv("SMTP_FROM_EMAIL", "")
+    smtp_from_name: str = os.getenv("SMTP_FROM_NAME", "XK 阅读")
+    smtp_use_ssl: bool = os.getenv("SMTP_USE_SSL", "true").lower() in {"1", "true", "yes", "on"}
+    spug_push_app_name: str = os.getenv("SPUG_PUSH_APP_NAME", "XK 阅读")
+    spug_sms_template_url: str = os.getenv("SPUG_SMS_TEMPLATE_URL", "")
+    spug_email_template_url: str = os.getenv("SPUG_EMAIL_TEMPLATE_URL", "")
+    spug_request_timeout_seconds: int = int(os.getenv("SPUG_REQUEST_TIMEOUT_SECONDS", "10"))
+    huyi_sms_enabled: bool = os.getenv("HUYI_SMS_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    huyi_sms_api_id: str = os.getenv("HUYI_SMS_API_ID", "")
+    huyi_sms_api_key: str = os.getenv("HUYI_SMS_API_KEY", "")
+    huyi_sms_template_id: str = os.getenv("HUYI_SMS_TEMPLATE_ID", "1")
+    huyi_sms_endpoint: str = os.getenv("HUYI_SMS_ENDPOINT", "https://106.ihuyi.com/webservice/sms.php?method=Submit")
+    aliyun_sms_enabled: bool = os.getenv("ALIYUN_SMS_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    aliyun_sms_access_key_id: str = os.getenv("ALIYUN_SMS_ACCESS_KEY_ID", "")
+    aliyun_sms_access_key_secret: str = os.getenv("ALIYUN_SMS_ACCESS_KEY_SECRET", "")
+    aliyun_sms_sign_name: str = os.getenv("ALIYUN_SMS_SIGN_NAME", "")
+    aliyun_sms_template_code: str = os.getenv("ALIYUN_SMS_TEMPLATE_CODE", "")
+    aliyun_sms_endpoint: str = os.getenv("ALIYUN_SMS_ENDPOINT", "dysmsapi.aliyuncs.com")
+    tencent_sms_enabled: bool = os.getenv("TENCENT_SMS_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    tencent_sms_sdk_app_id: str = os.getenv("TENCENT_SMS_SDK_APP_ID", "")
+    tencent_sms_sign_name: str = os.getenv("TENCENT_SMS_SIGN_NAME", "")
+    tencent_sms_template_id: str = os.getenv("TENCENT_SMS_TEMPLATE_ID", "")
+    tencent_sms_region: str = os.getenv("TENCENT_SMS_REGION", "ap-guangzhou")
+    tencent_sms_endpoint: str = os.getenv("TENCENT_SMS_ENDPOINT", "sms.tencentcloudapi.com")
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     secret_key: str = os.getenv("SECRET_KEY", "change-me-before-production")
     uploads_dir: str = os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads"))
@@ -97,6 +145,53 @@ class Settings:
             self.tencent_mt_enabled
             and self.tencent_secret_id
             and self.tencent_secret_key
+        )
+
+    @property
+    def smtp_available(self) -> bool:
+        return bool(
+            self.smtp_host
+            and self.smtp_username
+            and self.smtp_password
+            and self.smtp_from_email
+        )
+
+    @property
+    def spug_sms_available(self) -> bool:
+        return bool(self.spug_sms_template_url)
+
+    @property
+    def spug_email_available(self) -> bool:
+        return bool(self.spug_email_template_url)
+
+    @property
+    def huyi_sms_available(self) -> bool:
+        return bool(
+            self.huyi_sms_enabled
+            and self.huyi_sms_api_id
+            and self.huyi_sms_api_key
+            and self.huyi_sms_template_id
+        )
+
+    @property
+    def aliyun_sms_available(self) -> bool:
+        return bool(
+            self.aliyun_sms_enabled
+            and self.aliyun_sms_access_key_id
+            and self.aliyun_sms_access_key_secret
+            and self.aliyun_sms_sign_name
+            and self.aliyun_sms_template_code
+        )
+
+    @property
+    def tencent_sms_available(self) -> bool:
+        return bool(
+            self.tencent_sms_enabled
+            and self.tencent_secret_id
+            and self.tencent_secret_key
+            and self.tencent_sms_sdk_app_id
+            and self.tencent_sms_sign_name
+            and self.tencent_sms_template_id
         )
 
     @property

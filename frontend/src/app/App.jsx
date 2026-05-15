@@ -35,6 +35,14 @@ import {
   updateCurrentUser,
 } from '../services/authApi'
 import {
+  getStoredUiPreferences,
+  getUiFontScale,
+  getUiTopbarScale,
+  normalizeUiFontSize,
+  storeUiPreferences,
+  UI_FONT_SIZE_DEFAULT,
+} from '../services/uiPreferences'
+import {
   cancelFullTranslation,
   downloadPaperExport,
   fetchFullTranslation,
@@ -194,6 +202,7 @@ function App() {
   const [currentUser, setCurrentUser] = useState(null)
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
   const [accountSection, setAccountSection] = useState('')
+  const [uiFontSize, setUiFontSize] = useState(UI_FONT_SIZE_DEFAULT)
   const [readerLayoutWidth, setReaderLayoutWidth] = useState(0)
   const [chatMessages, setChatMessages] = useState({})
   const [chatInput, setChatInput] = useState({})
@@ -560,6 +569,12 @@ function App() {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    const nextPreferences = getStoredUiPreferences(currentUser?.uid)
+    const nextFontSize = normalizeUiFontSize(nextPreferences.fontSize)
+    setUiFontSize((current) => (current === nextFontSize ? current : nextFontSize))
+  }, [currentUser?.uid])
 
   // Toolbar button ripple effect
   useEffect(() => {
@@ -1578,11 +1593,23 @@ function App() {
     return user
   }
 
+  function handleUiFontSizeChange(nextValue) {
+    const normalizedValue = normalizeUiFontSize(nextValue)
+    setUiFontSize(normalizedValue)
+    storeUiPreferences(currentUser?.uid, { fontSize: normalizedValue })
+  }
+
+  const appShellStyle = {
+    '--ui-font-scale': getUiFontScale(uiFontSize),
+    '--ui-topbar-scale': getUiTopbarScale(uiFontSize),
+  }
+
   return (
     <div
       className={`app-shell${isAuthViewOpen ? ' app-shell--auth' : ''}${
         !isAuthViewOpen && isAccountView ? ' app-shell--account' : ''
       }`}
+      style={appShellStyle}
     >
       <input
         ref={fileInputRef}
@@ -1964,6 +1991,8 @@ function App() {
             onBack={() => setAccountSection('')}
             onSaveProfile={handleSaveProfile}
             onSectionChange={setAccountSection}
+            uiFontSize={uiFontSize}
+            onUiFontSizeChange={handleUiFontSizeChange}
             onUploadAvatar={handleUploadAvatar}
           />
           )}

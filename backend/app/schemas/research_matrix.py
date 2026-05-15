@@ -10,6 +10,7 @@ class ResearchMatrixCreateRequest(BaseModel):
     paper_ids: list[int] = Field(min_length=1, max_length=50)
     include_reproduction: bool = True
     provider_id: int | None = Field(default=None, ge=1)
+    grouping_mode: Literal["topic_first", "method_first"] = "topic_first"
 
 
 class ResearchMatrixGenerateMissingRequest(BaseModel):
@@ -20,6 +21,7 @@ class ResearchMatrixGenerateMissingRequest(BaseModel):
 class ResearchMatrixRefreshRequest(BaseModel):
     title: str = Field(default="", max_length=160)
     provider_id: int | None = Field(default=None, ge=1)
+    grouping_mode: Literal["topic_first", "method_first"] | None = None
 
 
 class ResearchMatrixRunUpdateRequest(BaseModel):
@@ -67,14 +69,6 @@ class ResearchMatrixRunListItem(BaseModel):
     error_message: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
-
-
-class ResearchMatrixRunResponse(ResearchMatrixRunListItem):
-    matrix: dict[str, Any] = Field(default_factory=dict)
-    drafts: dict[str, Any] = Field(default_factory=dict)
-    dashboard: dict[str, Any] = Field(default_factory=dict)
-    papers: list[ResearchMatrixRunPaperResponse] = Field(default_factory=list)
-    refresh_available: bool = False
     draft_status: str = "idle"
     draft_stage: str = "idle"
     draft_stage_label: str = ""
@@ -83,6 +77,20 @@ class ResearchMatrixRunResponse(ResearchMatrixRunListItem):
     draft_total_count: int = 0
     draft_failed_count: int = 0
     draft_error_message: str | None = None
+    grouping_mode: str = "topic_first"
+    worker_status: str = "idle"
+    worker_started_at: str | None = None
+    worker_heartbeat_at: str | None = None
+    worker_retry_count: int = 0
+    last_worker_error: str | None = None
+
+
+class ResearchMatrixRunResponse(ResearchMatrixRunListItem):
+    matrix: dict[str, Any] = Field(default_factory=dict)
+    drafts: dict[str, Any] = Field(default_factory=dict)
+    dashboard: dict[str, Any] = Field(default_factory=dict)
+    papers: list[ResearchMatrixRunPaperResponse] = Field(default_factory=list)
+    refresh_available: bool = False
 
 
 class ResearchMatrixRunListResponse(BaseModel):

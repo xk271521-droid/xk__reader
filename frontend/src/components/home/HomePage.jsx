@@ -16,18 +16,20 @@ import {
   Radar,
   RotateCcw,
   Search,
+  SearchCheck,
   Sun,
   Sunrise,
   TimerReset,
   Trash2,
 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { LiteratureSearchPage } from './LiteratureSearchPage'
 import { ReadingInsightSection } from './ReadingInsightSection'
 import { ResearchMatrixPage } from './ResearchMatrixPage'
 
 const homeSections = [
   { id: 'recent', label: '阅读记录', icon: Clock3 },
   { id: 'library', label: '我的文献', icon: LibraryBig },
+  { id: 'literature-search', label: '文献检索', icon: SearchCheck },
   { id: 'insights', label: '阅读信息站', icon: Radar },
   { id: 'matrix', label: '文献矩阵', icon: Network },
   { id: 'trash', label: '回收站', icon: Trash2 },
@@ -1128,8 +1130,8 @@ export function HomePage({
         </div>
       </aside>
 
-      <div className={`home-content${activeSection === 'matrix' ? ' is-matrix' : ''}`}>
-        {activeSection !== 'trash' && activeSection !== 'matrix' && activeSection !== 'insights' ? (
+      <div className={`home-content${activeSection === 'matrix' ? ' is-matrix' : ''}${activeSection === 'literature-search' ? ' is-literature-search' : ''}`}>
+        {activeSection !== 'trash' && activeSection !== 'matrix' && activeSection !== 'insights' && activeSection !== 'literature-search' ? (
         <div className={`home-toolbar${activeSection === 'library' ? ' is-library' : ''}`}>
           <div className="home-toolbar__actions">
             <button
@@ -1245,7 +1247,11 @@ export function HomePage({
           />
         ) : null}
 
-        {activeSection !== 'matrix' && activeSection !== 'insights' ? (
+        {activeSection === 'literature-search' ? (
+          <LiteratureSearchPage />
+        ) : null}
+
+        {activeSection !== 'matrix' && activeSection !== 'insights' && activeSection !== 'literature-search' ? (
         <div className={`home-section-head${activeSection === 'library' ? ' is-library' : ''}`}>
           <h3>
             {activeSection === 'recent' && '阅读记录'}
