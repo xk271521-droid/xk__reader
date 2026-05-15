@@ -21,6 +21,9 @@ backend/uploads/
 .env.*
 .venv/
 venv/
-backend-dev.log
-backend-dev.err.log
-translate_debug.log
+
+# Generated backend logs
+backend/*.log
+
+# Local Claude worktrees
+.claude/worktrees/
