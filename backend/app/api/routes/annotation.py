@@ -85,6 +85,25 @@ def _dedupe_paper_annotations(paper_id: int, db: Session) -> bool:
     return changed
 
 
+def _cleanup_fragmented_annotations(paper_id: int, db: Session) -> bool:
+    annotations = _list_paper_annotations(paper_id, db)
+    changed = False
+    for annotation in annotations:
+        quote = str(annotation.quote_text or "").strip()
+        span = int(annotation.end_char or 0) - int(annotation.start_char or 0)
+        rects = _parse_rects(annotation.rects_json)
+        if (
+            annotation.geometry_version == "v2"
+            and annotation.type in {"underline", "wavy_underline", "highlight"}
+            and span <= 1
+            and len(quote) <= 1
+            and len(rects) >= 1
+        ):
+            db.delete(annotation)
+            changed = True
+    return changed
+
+
 def _invalidate_annotation_summary(paper_id: int, user_id: int, db: Session) -> None:
     item = db.scalar(
         select(PaperSummary).where(
@@ -94,6 +113,12 @@ def _invalidate_annotation_summary(paper_id: int, user_id: int, db: Session) -> 
         )
     )
     if not item or item.status == "running":
+        return
+    if item.status == "generated" and item.content_json:
+        # Keep the last generated result visible; the old source_hash lets the
+        # summary API surface it as "stale" until the user manually updates it.
+        item.error_message = None
+        db.add(item)
         return
     item.status = "idle"
     item.stage = "idle"
@@ -122,6 +147,8 @@ def list_annotations(
 ) -> AnnotationListResponse:
     _ensure_owned_paper(paper_id, user, db)
     if _dedupe_paper_annotations(paper_id, db):
+        _invalidate_annotation_summary(paper_id, user.id, db)
+    if _cleanup_fragmented_annotations(paper_id, db):
         _invalidate_annotation_summary(paper_id, user.id, db)
     db.commit()
     annotations = _list_paper_annotations(paper_id, db)
@@ -220,6 +247,7 @@ def erase_annotations(
 
     db.commit()
     _dedupe_paper_annotations(paper_id, db)
+    _cleanup_fragmented_annotations(paper_id, db)
     _invalidate_annotation_summary(paper_id, user.id, db)
     db.commit()
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,12 +38,12 @@ SUMMARY_TYPES: dict[str, dict[str, Any]] = {
     },
     "review": {
         "title": "文献综述卡片",
-        "target_words": "900-1400",
-        "section_chars": "160-300",
-        "intent": "产出可聚合的标准字段，服务后期多篇论文对比矩阵和综述写作。",
-        "sections": ["研究问题与对象", "关键变量/指标", "方法与模型", "数据与样本", "核心结论与发现", "创新点与局限性", "文献定位与引用价值", "可对比标签"],
-        "focus": "字段短而稳定，适合进入矩阵；必须优先补齐关键变量/指标、核心结论与发现、创新点与局限性、文献定位与引用价值。",
-        "extra_rules": "文献综述卡片必须说明被解释变量、核心解释变量、变量衡量口径和数据来源；核心结论要区分长期/短期效应、显著/不显著结果和反常发现；创新点与局限性要能服务用户找研究切入点；文献定位与引用价值要说明这篇文献适合在综述中承担什么角色。",
+        "target_words": "1300-1900",
+        "section_chars": "180-360",
+        "intent": "产出可直接进入文献矩阵、比较导读和后续综述写作的结构化单篇卡片。",
+        "sections": ["研究背景与动机", "研究问题", "方法路线", "数据与实验设置", "对比基线与评价指标", "核心发现", "创新点", "局限与风险"],
+        "focus": "优先抽取可横向比较、可回查原文、可直接支撑后续综述写作的事实点，而不是泛泛摘要。",
+        "extra_rules": "每个核心字段都要尽量写细，优先拆成 2-4 个事实点；非列表字段可用中文分号分隔子点；必须补齐研究背景、实验设置、基线与指标，避免后续综述只有方法和结论没有证据。",
     },
     "reproduction": {
         "title": "复现总结",
@@ -79,36 +80,36 @@ ANNOTATION_TYPE_LABELS = {
     "wavy_underline": "波浪线",
 }
 REVIEW_STRUCTURED_FIELD_ORDER = [
+    "background_motivation",
     "research_question",
-    "core_metrics",
     "method_route",
-    "data_sample",
+    "data_experiment",
+    "baselines_metrics",
     "main_findings",
     "innovations",
     "limitations",
-    "comparison_tags",
 ]
 
 REVIEW_FIELD_TO_SECTION = {
+    "background_motivation": "研究背景与动机",
     "research_question": "研究问题与对象",
-    "core_metrics": "关键变量/指标",
     "method_route": "方法路线",
-    "data_sample": "数据与样本",
+    "data_experiment": "数据与实验设置",
+    "baselines_metrics": "对比基线与评价指标",
     "main_findings": "核心发现",
     "innovations": "创新点",
     "limitations": "局限与风险",
-    "comparison_tags": "可对比标签",
 }
 
 REVIEW_SECTION_ALIASES = {
+    "background_motivation": ["研究背景与动机", "背景动机", "研究背景", "背景", "动机"],
     "research_question": ["研究问题与对象", "研究问题", "对象"],
-    "core_metrics": ["关键变量/指标", "变量", "指标"],
     "method_route": ["方法路线", "方法与模型", "方法", "模型"],
-    "data_sample": ["数据与样本", "数据", "样本"],
+    "data_experiment": ["数据与实验设置", "数据与样本", "实验设置", "数据", "样本", "实验"],
+    "baselines_metrics": ["对比基线与评价指标", "对比基线", "评价指标", "基线", "指标"],
     "main_findings": ["核心发现", "核心结论与发现", "核心结论", "发现"],
-    "innovations": ["创新点与局限性", "创新点", "创新"],
-    "limitations": ["局限与风险", "创新点与局限性", "局限", "不足"],
-    "comparison_tags": ["可对比标签", "标签"],
+    "innovations": ["创新点", "创新点与局限性", "创新"],
+    "limitations": ["局限与风险", "创新点与局限性", "局限", "不足", "风险"],
 }
 
 
@@ -119,6 +120,9 @@ class PageText:
 
 
 SUMMARY_RUNNING_STALE_SECONDS = 180
+LLM_CALL_MAX_ATTEMPTS = 3
+LLM_JSON_MAX_ATTEMPTS = 2
+LLM_RETRY_BACKOFF_SECONDS = (1.0, 2.2, 4.0)
 
 
 def _normalize_datetime(value: datetime | None) -> datetime | None:
@@ -173,7 +177,9 @@ def get_review_summary_content(content: dict[str, Any] | None) -> dict[str, Any]
         normalized.get("narrative_sections") or normalized.get("sections"),
         structured,
     )
+    evidence_map = update_review_section_evidence_map(narrative_sections)
     normalized["structured_fields"] = structured
+    normalized["review_field_blocks"] = build_review_field_blocks(structured, evidence_map)
     normalized["narrative_sections"] = narrative_sections
     normalized["sections"] = narrative_sections
     normalized.setdefault("structured_field_meta", {})
@@ -206,6 +212,69 @@ def parse_compound_list(value: Any, *, limit: int = 6) -> list[str]:
     return [text[:220]]
 
 
+def slugify_review_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def derive_evidence_id(field_key: str, evidence: dict[str, Any] | None) -> str:
+    source = evidence or {}
+    page = source.get("page") or "x"
+    quote = clean_text(source.get("quote") or "")[:48]
+    digest = hashlib.sha1(f"{field_key}:{page}:{quote}".encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return f"rev-{slugify_review_key(field_key)}-{digest}"
+
+
+def normalize_review_field_items(field_key: str, values: list[str], evidence_map: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    evidences = evidence_map.get(field_key, [])
+    for index, value in enumerate(values[:6], start=1):
+        text = clean_text(value)[:320]
+        if not text:
+            continue
+        evidence = evidences[min(index - 1, len(evidences) - 1)] if evidences else {}
+        source_page = evidence.get("page")
+        normalized.append({
+            "id": f"{slugify_review_key(field_key)}-{index}",
+            "text": text,
+            "source_pages": [int(source_page)] if isinstance(source_page, int) and source_page > 0 else [],
+            "source_section": REVIEW_FIELD_TO_SECTION.get(field_key, field_key),
+            "source_quote": clean_text(evidence.get("quote") or "")[:260],
+            "start_char": evidence.get("start_char"),
+            "end_char": evidence.get("end_char"),
+            "evidence_ids": [derive_evidence_id(field_key, evidence)] if evidence else [],
+            "confidence": "high" if evidence else "medium",
+            "edited_by_user": False,
+        })
+    return normalized
+
+
+def build_review_field_blocks(structured_fields: dict[str, Any], evidence_map: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    block_titles = {
+        "background_motivation": "研究背景与动机",
+        "research_question": "研究问题",
+        "method_route": "方法路线",
+        "data_experiment": "数据与实验设置",
+        "baselines_metrics": "对比基线与评价指标",
+        "main_findings": "核心发现",
+        "innovations": "创新点",
+        "limitations": "局限与风险",
+    }
+    blocks: list[dict[str, Any]] = []
+    for field_key, title in block_titles.items():
+        raw_value = structured_fields.get(field_key)
+        values = parse_compound_list(raw_value, limit=6)
+        items = normalize_review_field_items(field_key, values, evidence_map)
+        summary = "；".join([item["text"] for item in items[:3]])[:420]
+        blocks.append({
+            "key": field_key,
+            "title": title,
+            "role": "review_core",
+            "summary": summary,
+            "items": items,
+        })
+    return blocks
+
+
 def split_innovation_and_limitations(text: str) -> tuple[list[str], list[str]]:
     cleaned = clean_text(text)
     if not cleaned:
@@ -234,26 +303,26 @@ def normalize_review_structured_fields(value: Any, sections_value: Any = None) -
     sections = sections_value if isinstance(sections_value, list) else []
     raw = value if isinstance(value, dict) else {}
     combined_text = ""
-    combined_section = section_lookup(sections, REVIEW_SECTION_ALIASES["innovations"])
+    combined_section = section_lookup(sections, REVIEW_SECTION_ALIASES["limitations"])
     if combined_section:
         combined_text = str(combined_section.get("body") or "")
     innovations, limitations = split_innovation_and_limitations(combined_text)
     structured = {
+        "background_motivation": clean_text(raw.get("background_motivation") or (section_lookup(sections, REVIEW_SECTION_ALIASES["background_motivation"]) or {}).get("body") or "")[:420],
         "research_question": clean_text(raw.get("research_question") or (section_lookup(sections, REVIEW_SECTION_ALIASES["research_question"]) or {}).get("body") or "")[:360],
-        "core_metrics": parse_compound_list(raw.get("core_metrics") or (section_lookup(sections, REVIEW_SECTION_ALIASES["core_metrics"]) or {}).get("keywords") or (section_lookup(sections, REVIEW_SECTION_ALIASES["core_metrics"]) or {}).get("body")),
         "method_route": clean_text(raw.get("method_route") or (section_lookup(sections, REVIEW_SECTION_ALIASES["method_route"]) or {}).get("body") or "")[:420],
-        "data_sample": clean_text(raw.get("data_sample") or (section_lookup(sections, REVIEW_SECTION_ALIASES["data_sample"]) or {}).get("body") or "")[:420],
+        "data_experiment": clean_text(raw.get("data_experiment") or (section_lookup(sections, REVIEW_SECTION_ALIASES["data_experiment"]) or {}).get("body") or "")[:420],
+        "baselines_metrics": clean_text(raw.get("baselines_metrics") or (section_lookup(sections, REVIEW_SECTION_ALIASES["baselines_metrics"]) or {}).get("body") or "")[:420],
         "main_findings": clean_text(raw.get("main_findings") or (section_lookup(sections, REVIEW_SECTION_ALIASES["main_findings"]) or {}).get("body") or "")[:420],
         "innovations": parse_compound_list(raw.get("innovations") or innovations),
         "limitations": parse_compound_list(raw.get("limitations") or limitations),
-        "comparison_tags": parse_compound_list(raw.get("comparison_tags") or (section_lookup(sections, REVIEW_SECTION_ALIASES["comparison_tags"]) or {}).get("keywords") or (section_lookup(sections, REVIEW_SECTION_ALIASES["comparison_tags"]) or {}).get("body")),
     }
     return structured
 
 
 def format_structured_field_text(field_key: str, structured_fields: dict[str, Any]) -> str:
     value = structured_fields.get(field_key)
-    if field_key in {"core_metrics", "innovations", "limitations", "comparison_tags"}:
+    if field_key in {"innovations", "limitations"}:
         return "；".join(parse_compound_list(value, limit=8))
     return clean_text(str(value or ""))
 
@@ -270,16 +339,6 @@ def update_review_section_evidence_map(sections: list[dict[str, Any]]) -> dict[s
 def normalize_review_narrative_sections(value: Any, structured_fields: dict[str, Any]) -> list[dict[str, Any]]:
     sections = value if isinstance(value, list) else []
     evidence_map = update_review_section_evidence_map(sections)
-    keywords_map = {
-        "research_question": parse_compound_list(structured_fields.get("comparison_tags"), limit=4),
-        "core_metrics": parse_compound_list(structured_fields.get("core_metrics"), limit=6),
-        "method_route": [],
-        "data_sample": [],
-        "main_findings": [],
-        "innovations": parse_compound_list(structured_fields.get("comparison_tags"), limit=4),
-        "limitations": [],
-        "comparison_tags": parse_compound_list(structured_fields.get("comparison_tags"), limit=6),
-    }
     normalized: list[dict[str, Any]] = []
     for field_key in REVIEW_STRUCTURED_FIELD_ORDER:
         body = format_structured_field_text(field_key, structured_fields)
@@ -288,7 +347,7 @@ def normalize_review_narrative_sections(value: Any, structured_fields: dict[str,
         normalized.append({
             "heading": REVIEW_FIELD_TO_SECTION[field_key],
             "body": body,
-            "keywords": keywords_map.get(field_key, []),
+            "keywords": parse_compound_list(structured_fields.get(field_key), limit=4) if field_key in {"innovations", "limitations"} else [],
             "evidence": evidence_map.get(field_key, []),
         })
     return normalized
@@ -311,6 +370,7 @@ def merge_manual_review_fields(existing_content: dict[str, Any] | None, next_con
     merged["structured_fields"] = merged_fields
     merged["structured_field_meta"] = meta
     merged_sections = normalize_review_narrative_sections(merged.get("narrative_sections") or merged.get("sections"), merged_fields)
+    merged["review_field_blocks"] = build_review_field_blocks(merged_fields, update_review_section_evidence_map(merged_sections))
     merged["narrative_sections"] = merged_sections
     merged["sections"] = merged_sections
     return merged
@@ -335,12 +395,13 @@ def apply_review_field_updates(content: dict[str, Any], updates: dict[str, Any])
         if field_key not in REVIEW_STRUCTURED_FIELD_ORDER:
             continue
         changed_keys.append(field_key)
-        if field_key in {"core_metrics", "innovations", "limitations", "comparison_tags"}:
+        if field_key in {"innovations", "limitations"}:
             structured[field_key] = parse_compound_list(raw_value, limit=8)
         else:
             structured[field_key] = clean_text(str(raw_value or ""))[:420]
     normalized["structured_fields"] = structured
     sections = normalize_review_narrative_sections(normalized.get("narrative_sections") or normalized.get("sections"), structured)
+    normalized["review_field_blocks"] = build_review_field_blocks(structured, update_review_section_evidence_map(sections))
     normalized["narrative_sections"] = sections
     normalized["sections"] = sections
     return mark_review_fields_manual(normalized, changed_keys)
@@ -392,25 +453,25 @@ def build_summary_response_payload(
             "updated_at": None,
             "model": "",
         }
+    content = normalize_summary_content(item.content_json, summary_type, title)
+    if summary_type == "review":
+        content = get_review_summary_content(content)
+    preview = str(content.get("preview") or "")
     if is_stale and item.status != "running":
         message = stale_message or "来源内容已变化，请重新生成。"
         return {
             "type": summary_type,
             "title": title,
-            "status": "idle",
-            "stage": "idle",
-            "progress": 0,
-            "preview": message,
-            "summary": None,
+            "status": item.status if item.status == "generated" else "idle",
+            "stage": item.stage or "idle",
+            "progress": int(item.progress or 0) if item.status == "generated" else 0,
+            "preview": preview or message,
+            "summary": content if item.status == "generated" and content else None,
             "is_stale": True,
             "error_message": message,
             "updated_at": item.updated_at.isoformat() if item.updated_at else None,
             "model": item.model or "",
         }
-    content = normalize_summary_content(item.content_json, summary_type, title)
-    if summary_type == "review":
-        content = get_review_summary_content(content)
-    preview = str(content.get("preview") or "")
     return {
         "type": summary_type,
         "title": title,
@@ -452,100 +513,116 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
 
     db = SessionLocal()
     try:
-        item = db.get(PaperSummary, summary_id)
-        if not item:
-            return
-        paper = db.scalar(select(Paper).where(Paper.id == item.paper_id, Paper.user_id == item.user_id))
-        if not paper:
-            _mark_failed(db, item, "论文不存在或无权访问。")
-            return
+        for task_attempt in range(1, LLM_CALL_MAX_ATTEMPTS + 1):
+            try:
+                item = db.get(PaperSummary, summary_id)
+                if not item:
+                    return
+                paper = db.scalar(select(Paper).where(Paper.id == item.paper_id, Paper.user_id == item.user_id))
+                if not paper:
+                    _mark_failed(db, item, "论文不存在或已被删除")
+                    return
 
-        provider = load_available_provider(db, item.user_id, provider_id)
-        if not provider:
-            _mark_failed(db, item, "没有可用的 AI 厂商，请先在 AI 配置中启用一个模型。")
-            return
+                provider = load_available_provider(db, item.user_id, provider_id)
+                if not provider:
+                    _mark_failed(db, item, "缺少可用 AI 服务，请先配置 AI 提供商")
+                    return
 
-        item.provider_id = provider.id
-        item.model = provider.model
-        item.error_message = None
-        db.add(item)
-        db.commit()
+                item.provider_id = provider.id
+                item.model = provider.model
+                item.error_message = None
+                db.add(item)
+                db.commit()
 
-        annotations = load_annotation_context(db, paper.id, item.user_id)
-        update_summary_progress(summary_id, stage="extracting_context", progress=10)
+                annotations = load_annotation_context(db, paper.id, item.user_id)
+                update_summary_progress(summary_id, stage="extracting_context", progress=10)
 
-        if item.summary_type == "annotations":
-            source_hash = compute_source_hash(paper, item.summary_type, [], annotations)
-            if len(annotations) < 3:
-                content = build_sparse_annotation_summary(item.summary_type, annotations)
-                content = normalize_generated_summary(content, item.summary_type, [], annotations, existing_content=item.content_json)
+                if item.summary_type == "annotations":
+                    source_hash = compute_source_hash(paper, item.summary_type, [], annotations)
+                    if len(annotations) < 3:
+                        content = build_sparse_annotation_summary(item.summary_type, annotations)
+                        content = normalize_generated_summary(content, item.summary_type, [], annotations, existing_content=item.content_json)
+                        _mark_generated(db, item, content, source_hash, provider)
+                        return
+
+                    api_key = decrypt_api_key(provider.encrypted_api_key)
+                    update_summary_progress(summary_id, stage="analyzing_structure", progress=48)
+                    fact_sheet = build_annotation_fact_sheet(paper, annotations)
+
+                    update_summary_progress(summary_id, stage="generating_summary", progress=72)
+                    content = generate_typed_summary(
+                        base_url=provider.base_url,
+                        api_key=api_key,
+                        model=provider.model,
+                        summary_type=item.summary_type,
+                        paper=paper,
+                        pages=[],
+                        fact_sheet=fact_sheet,
+                        annotations=annotations,
+                    )
+
+                    update_summary_progress(summary_id, stage="checking_coverage", progress=90)
+                    content = normalize_generated_summary(content, item.summary_type, [], annotations, existing_content=item.content_json)
+                    _mark_generated(db, item, content, source_hash, provider)
+                    return
+
+                pages = extract_paper_pages(db, paper)
+                if item.summary_type != "annotations" and total_chars(pages) < 100:
+                    _mark_failed(db, item, "未能提取到足够的 PDF 正文，请检查原文是否可解析")
+                    return
+
+                source_hash = compute_source_hash(paper, item.summary_type, pages, annotations)
+                api_key = decrypt_api_key(provider.encrypted_api_key)
+                update_summary_progress(summary_id, stage="chunking", progress=22)
+                chunk_digests = build_chunk_digests(
+                    base_url=provider.base_url,
+                    api_key=api_key,
+                    model=provider.model,
+                    paper=paper,
+                    pages=pages,
+                    summary_id=summary_id,
+                )
+
+                update_summary_progress(summary_id, stage="analyzing_structure", progress=50)
+                fact_sheet = build_fact_sheet(
+                    base_url=provider.base_url,
+                    api_key=api_key,
+                    model=provider.model,
+                    paper=paper,
+                    pages=pages,
+                    chunk_digests=chunk_digests,
+                    annotations=annotations,
+                )
+
+                update_summary_progress(summary_id, stage="generating_summary", progress=72)
+                content = generate_typed_summary(
+                    base_url=provider.base_url,
+                    api_key=api_key,
+                    model=provider.model,
+                    summary_type=item.summary_type,
+                    paper=paper,
+                    pages=pages,
+                    fact_sheet=fact_sheet,
+                    annotations=annotations,
+                )
+
+                update_summary_progress(summary_id, stage="checking_coverage", progress=90)
+                content = normalize_generated_summary(content, item.summary_type, pages, annotations, existing_content=item.content_json)
                 _mark_generated(db, item, content, source_hash, provider)
                 return
-
-            api_key = decrypt_api_key(provider.encrypted_api_key)
-            update_summary_progress(summary_id, stage="analyzing_structure", progress=48)
-            fact_sheet = build_annotation_fact_sheet(paper, annotations)
-
-            update_summary_progress(summary_id, stage="generating_summary", progress=72)
-            content = generate_typed_summary(
-                base_url=provider.base_url,
-                api_key=api_key,
-                model=provider.model,
-                summary_type=item.summary_type,
-                paper=paper,
-                pages=[],
-                fact_sheet=fact_sheet,
-                annotations=annotations,
-            )
-
-            update_summary_progress(summary_id, stage="checking_coverage", progress=90)
-            content = normalize_generated_summary(content, item.summary_type, [], annotations, existing_content=item.content_json)
-            _mark_generated(db, item, content, source_hash, provider)
-            return
-
-        pages = extract_paper_pages(db, paper)
-        if item.summary_type != "annotations" and total_chars(pages) < 100:
-            _mark_failed(db, item, "没有提取到足够的论文正文，请确认 PDF 文本可选择或先执行全文翻译解析。")
-            return
-
-        source_hash = compute_source_hash(paper, item.summary_type, pages, annotations)
-        api_key = decrypt_api_key(provider.encrypted_api_key)
-        update_summary_progress(summary_id, stage="chunking", progress=22)
-        chunk_digests = build_chunk_digests(
-            base_url=provider.base_url,
-            api_key=api_key,
-            model=provider.model,
-            paper=paper,
-            pages=pages,
-            summary_id=summary_id,
-        )
-
-        update_summary_progress(summary_id, stage="analyzing_structure", progress=50)
-        fact_sheet = build_fact_sheet(
-            base_url=provider.base_url,
-            api_key=api_key,
-            model=provider.model,
-            paper=paper,
-            pages=pages,
-            chunk_digests=chunk_digests,
-            annotations=annotations,
-        )
-
-        update_summary_progress(summary_id, stage="generating_summary", progress=72)
-        content = generate_typed_summary(
-            base_url=provider.base_url,
-            api_key=api_key,
-            model=provider.model,
-            summary_type=item.summary_type,
-            paper=paper,
-            pages=pages,
-            fact_sheet=fact_sheet,
-            annotations=annotations,
-        )
-
-        update_summary_progress(summary_id, stage="checking_coverage", progress=90)
-        content = normalize_generated_summary(content, item.summary_type, pages, annotations, existing_content=item.content_json)
-        _mark_generated(db, item, content, source_hash, provider)
+            except Exception as exc:
+                if task_attempt >= LLM_CALL_MAX_ATTEMPTS:
+                    raise
+                fresh = db.get(PaperSummary, summary_id)
+                if fresh:
+                    update_summary_progress(
+                        summary_id,
+                        stage=fresh.stage or "generating_summary",
+                        progress=int(fresh.progress or 0),
+                        status="running",
+                        error=f"自动重试中：{task_attempt}/{LLM_CALL_MAX_ATTEMPTS}，{exc}",
+                    )
+                sleep_before_retry(task_attempt)
     except Exception as exc:
         fresh = db.get(PaperSummary, summary_id)
         if fresh:
@@ -659,23 +736,101 @@ def compute_source_hash(paper: Paper, summary_type: str, pages: list[PageText], 
     digest = hashlib.sha256()
     digest.update(str(paper.id).encode("utf-8"))
     digest.update(summary_type.encode("utf-8"))
-    digest.update(str(paper.updated_at or "").encode("utf-8"))
     if summary_type == "annotations":
         for annotation in annotations:
             digest.update(json.dumps(annotation, ensure_ascii=False, sort_keys=True).encode("utf-8"))
         return digest.hexdigest()
+    digest.update(str(paper.updated_at or "").encode("utf-8"))
     for page in pages:
         digest.update(str(page.page).encode("utf-8"))
         digest.update(page.text.encode("utf-8", errors="ignore"))
     return digest.hexdigest()
 
 
+def _annotation_snapshot_from_context(annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    snapshot: list[dict[str, Any]] = []
+    for annotation in annotations:
+        quote = clean_text(annotation.get("quote") or "")[:800]
+        if not quote:
+            continue
+        snapshot.append(
+            {
+                "id": annotation.get("id"),
+                "type": str(annotation.get("type") or "highlight"),
+                "page": annotation.get("page"),
+                "start_char": annotation.get("start_char"),
+                "end_char": annotation.get("end_char"),
+                "color": str(annotation.get("color") or ""),
+                "quote": quote,
+            }
+        )
+    return sorted(
+        snapshot,
+        key=lambda item: (
+            str(item.get("type") or ""),
+            int(item.get("page") or 0),
+            int(item.get("start_char") or 0),
+            int(item.get("id") or 0),
+        ),
+    )
+
+
+def _annotation_snapshot_from_summary(item: PaperSummary) -> list[dict[str, Any]] | None:
+    content = item.content_json if isinstance(item.content_json, dict) else {}
+    groups = content.get("annotation_groups")
+    if not isinstance(groups, list):
+        return None
+    snapshot: list[dict[str, Any]] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        annotation_type = str(group.get("type") or "highlight")
+        items = group.get("items")
+        if not isinstance(items, list):
+            continue
+        for annotation in items:
+            if not isinstance(annotation, dict):
+                continue
+            quote = clean_text(annotation.get("quote") or "")[:800]
+            if not quote:
+                continue
+            snapshot.append(
+                {
+                    "id": annotation.get("id"),
+                    "type": annotation_type,
+                    "page": annotation.get("page"),
+                    "start_char": annotation.get("start_char"),
+                    "end_char": annotation.get("end_char"),
+                    "color": str(annotation.get("color") or ""),
+                    "quote": quote,
+                }
+            )
+    return sorted(
+        snapshot,
+        key=lambda item: (
+            str(item.get("type") or ""),
+            int(item.get("page") or 0),
+            int(item.get("start_char") or 0),
+            int(item.get("id") or 0),
+        ),
+    )
+
+
 def is_summary_stale(db: Session, paper: Paper, item: PaperSummary | None) -> bool:
-    if not item or item.status == "running" or not item.source_hash:
+    if not item or item.status == "running":
         return False
     if item.summary_type == "annotations":
         annotations = load_annotation_context(db, paper.id, item.user_id)
+        saved_snapshot = _annotation_snapshot_from_summary(item)
+        if not item.source_hash:
+            if saved_snapshot is not None:
+                return saved_snapshot != _annotation_snapshot_from_context(annotations)
+            return False
         current_hash = compute_source_hash(paper, item.summary_type, [], annotations)
+        if current_hash == item.source_hash:
+            return False
+        if saved_snapshot is not None:
+            return saved_snapshot != _annotation_snapshot_from_context(annotations)
         return current_hash != item.source_hash
     return False
 
@@ -709,18 +864,32 @@ def build_chunk_digests(
     for index, chunk in enumerate(chunks, start=1):
         progress = 24 + int(index / max(1, len(chunks)) * 20)
         update_summary_progress(summary_id, stage="chunking", progress=progress)
-        prompt = f"""请阅读以下论文分块，生成一份高密度中文事实摘要。
+        prompt = f"""你是严谨的中文学术阅读助手，请把下面这一段论文内容压缩成可供后续综述使用的事实摘要。
 
 要求：
-1. 只记录论文里明确出现的信息，不要补充常识。
-2. 保留研究问题、方法、实验、数据集、指标、结果、局限、公式/参数、页码线索。
-3. 如果看到表格、实验结果、结论，请优先记录。
-4. 输出 500-800 字，使用分点。
+1. 保留研究问题、方法、实验设置、结果、局限等事实信息。
+2. 不要引入原文没有出现的新判断。
+3. 尽量保留页码、数据集、指标、模型名称和关键数值。
+4. 输出 500-800 字中文摘要。
 
 论文标题：{paper.title or paper.file_name}
-分块 {index}/{len(chunks)}：
+分块：{index}/{len(chunks)}
+正文：
 {chunk}"""
-        digests.append(call_text_completion(base_url=base_url, api_key=api_key, model=model, prompt=prompt, max_tokens=1800))
+        for attempt in range(1, LLM_CALL_MAX_ATTEMPTS + 1):
+            try:
+                digests.append(call_text_completion(base_url=base_url, api_key=api_key, model=model, prompt=prompt, max_tokens=1800))
+                break
+            except Exception as exc:
+                if attempt >= LLM_CALL_MAX_ATTEMPTS:
+                    raise
+                update_summary_progress(
+                    summary_id,
+                    stage="chunking",
+                    progress=max(progress, 24),
+                    error=f"分块 {index} 生成失败，自动重试 {attempt}/{LLM_CALL_MAX_ATTEMPTS}：{exc}",
+                )
+                sleep_before_retry(attempt)
     return digests
 
 
@@ -766,35 +935,45 @@ def build_fact_sheet(
 ) -> str:
     excerpts = build_priority_excerpts(pages, max_chars=24000)
     annotation_text = format_annotations(annotations, limit=20)
-    prompt = f"""你是严谨的论文阅读助手。请基于论文分块摘要和关键页摘录，整理一份“论文事实底稿”。
+    prompt = f"""你是严谨的中文学术阅读助手，请根据论文摘要片段、重点原文和用户标注整理一份事实底稿。
 
-底稿必须覆盖：
-- 研究问题和任务场景
-- 背景动机和现有方法不足
-- 核心方法、模型结构、公式或关键机制
-- 数据集、实验设置、评价指标、对比方法
-- 主要结果和结论
-- 创新点、优点、局限、未来工作
-- 关键术语和可回查页码
+请覆盖：
+- 研究背景与动机
+- 研究问题
+- 方法路线
+- 数据与实验设置
+- 对比基线与评价指标
+- 核心发现
+- 创新点
+- 局限与风险
 
 要求：
-1. 只写论文中有依据的信息。
-2. 没找到的信息写“文中未说明”。
-3. 以中文分点输出，尽量具体。
+1. 只使用输入中出现的信息。
+2. 保留页码、模型名、数据集、指标和关键数值。
+3. 用中文输出，条理清楚。
 
 论文标题：{paper.title or paper.file_name}
-作者：{paper.author or "文中未说明"}
-关键词：{paper.keywords or "文中未说明"}
+作者：{paper.author or "未知"}
+关键词：{paper.keywords or "未知"}
 
-【分块摘要】
+分块摘要：
 {chr(10).join(chunk_digests)}
 
-【关键页摘录】
+重点原文：
 {excerpts}
 
-【用户标注摘录】
-{annotation_text or "暂无用户标注。"}"""
-    return call_text_completion(base_url=base_url, api_key=api_key, model=model, prompt=prompt, max_tokens=5000)
+用户标注：
+{annotation_text or "暂无标注"}"""
+    last_error: Exception | None = None
+    for attempt in range(1, LLM_CALL_MAX_ATTEMPTS + 1):
+        try:
+            return call_text_completion(base_url=base_url, api_key=api_key, model=model, prompt=prompt, max_tokens=5000)
+        except Exception as exc:
+            last_error = exc
+            if attempt >= LLM_CALL_MAX_ATTEMPTS:
+                raise
+            sleep_before_retry(attempt)
+    raise last_error or RuntimeError("build_fact_sheet_failed")
 
 
 def generate_typed_summary(
@@ -811,7 +990,77 @@ def generate_typed_summary(
     config = SUMMARY_TYPES[summary_type]
     excerpts = build_priority_excerpts(pages, max_chars=16000)
     annotation_text = format_annotations(annotations, limit=60 if summary_type == "annotations" else 12)
-    prompt = f"""你正在为研究生阅读器生成“{config["title"]}”。
+    if summary_type == "review":
+        prompt = f"""你正在为研究生阅读器生成“{config["title"]}”。
+
+目标：{config["intent"]}
+建议字数：{config["target_words"]} 中文字。
+每个正文小节建议长度：{config["section_chars"]} 中文字符。
+重点上下文：{config["focus"]}
+必须包含的小节：{", ".join(config["sections"])}
+补充规则：{config.get("extra_rules", "按该板块用途输出具体、有证据、可复用的内容。")}
+
+这不是普通摘要，而是后续综述写作的数据底座。请严格遵守：
+1. 必须围绕 8 个核心字段输出，字段名必须与 JSON 模板完全一致。
+2. `structured_fields` 是后续矩阵和比较导读的直接输入，必须尽量写细。除 `innovations`、`limitations` 外，其余字段使用 1 段高密度中文字符串；如果有多个要点，请用中文分号“；”分隔 2-4 个事实点。
+3. `innovations` 和 `limitations` 必须分别输出 2-4 条短事实点数组；没有足够依据时宁可少写，也不要脑补。
+4. `sections` 是给用户阅读的展开版正文，必须与 8 个核心字段一一对应，heading 必须分别是：研究背景与动机、研究问题、方法路线、数据与实验设置、对比基线与评价指标、核心发现、创新点、局限与风险。
+5. 每个 section.body 都要写清楚对象、方法/设置、结果/含义，不要空泛，也不要只抄标题。
+6. evidence 只能逐字摘自【关键页摘录】或【用户标注】，尽量给 3-8 条候选；系统会二次核验，匹配不到原文的证据会被删除。
+7. highlights 只保留 3 条最关键结论，20-60 个中文字符即可。
+8. missing_items 只列会影响比较、复现或综述引用的具体缺失信息，例如数据规模、基线细节、评价指标定义、显著性、实验边界、局限说明；没有就返回空数组。
+9. followup_questions 必须是可以指导继续回查全文或继续写综述的高价值问题，避免泛泛而谈。
+10. assistant_panels 仍然输出“证据判断、研究价值、下一步行动”三类，每类 2-4 条，内容要具体到方法、数据、结果或写作用途。
+11. 输出必须是 JSON，不要 Markdown，不要代码块。
+
+JSON 结构：
+{{
+  "type": "review",
+  "title": "{config["title"]}",
+  "preview": "120 字以内总览",
+  "highlights": ["最重要结论 1", "最重要结论 2", "最重要结论 3"],
+  "structured_fields": {{
+    "background_motivation": "研究背景与动机，必要时用中文分号分隔 2-4 个事实点",
+    "research_question": "研究问题与对象，必要时用中文分号分隔 2-4 个事实点",
+    "method_route": "方法路线与关键机制，必要时用中文分号分隔 2-4 个事实点",
+    "data_experiment": "数据来源、样本规模、实验设置，必要时用中文分号分隔 2-4 个事实点",
+    "baselines_metrics": "对比基线、评价指标、消融或统计口径，必要时用中文分号分隔 2-4 个事实点",
+    "main_findings": "核心发现与关键结果，必要时用中文分号分隔 2-4 个事实点",
+    "innovations": ["创新点 1", "创新点 2"],
+    "limitations": ["局限或风险 1", "局限或风险 2"]
+  }},
+  "sections": [
+    {{"heading": "研究背景与动机", "body": "正文", "keywords": ["标签"], "evidence": [{{"page": 1, "quote": "短摘录", "source_type": "paper"}}]}},
+    {{"heading": "研究问题", "body": "正文", "keywords": ["标签"], "evidence": [{{"page": 1, "quote": "短摘录", "source_type": "paper"}}]}},
+    {{"heading": "方法路线", "body": "正文", "keywords": ["标签"], "evidence": [{{"page": 1, "quote": "短摘录", "source_type": "paper"}}]}},
+    {{"heading": "数据与实验设置", "body": "正文", "keywords": ["标签"], "evidence": [{{"page": 1, "quote": "短摘录", "source_type": "paper"}}]}},
+    {{"heading": "对比基线与评价指标", "body": "正文", "keywords": ["标签"], "evidence": [{{"page": 1, "quote": "短摘录", "source_type": "paper"}}]}},
+    {{"heading": "核心发现", "body": "正文", "keywords": ["标签"], "evidence": [{{"page": 1, "quote": "短摘录", "source_type": "paper"}}]}},
+    {{"heading": "创新点", "body": "正文", "keywords": ["标签"], "evidence": [{{"page": 1, "quote": "短摘录", "source_type": "paper"}}]}},
+    {{"heading": "局限与风险", "body": "正文", "keywords": ["标签"], "evidence": [{{"page": 1, "quote": "短摘录", "source_type": "paper"}}]}}
+  ],
+  "assistant_panels": [
+    {{"title": "证据判断", "intent": "帮用户判断结论是否可靠", "items": ["回查关键结果表与实验设置，确认核心发现是否被充分支撑"]}},
+    {{"title": "研究价值", "intent": "帮用户判断这篇文献如何进入综述", "items": ["说明这篇论文在比较矩阵、方法综述或局限讨论里适合承担什么角色"]}},
+    {{"title": "下一步行动", "intent": "给用户可执行动作", "items": ["指出下一步应继续回查哪类证据，或适合与哪类论文做横向比较"]}}
+  ],
+  "missing_items": ["文中未说明但会影响比较或引用的具体缺失信息"],
+  "followup_questions": ["指导继续回查全文、补证据或推进综述写作的问题"],
+  "source_note": "本总结依据..."
+}}
+
+论文标题：{paper.title or paper.file_name}
+
+【论文事实底稿】
+{fact_sheet}
+
+【关键页摘录】
+{excerpts}
+
+【用户标注】
+{annotation_text or "暂无用户标注。"}"""
+    else:
+        prompt = f"""你正在为研究生阅读器生成“{config["title"]}”。
 
 目标：{config["intent"]}
 建议字数：{config["target_words"]} 中文字。
@@ -826,7 +1075,7 @@ def generate_typed_summary(
 3. section.body 才是正式总结，必须有信息密度：写清对象、方法/证据、结果/含义，不能只写标题式短语。
 4. 每个 section.body 按本板块建议长度展开，通常写 2-4 个短段或分点；如果一个点内容太多，拆成多个 section，不要压缩成一句话。
 5. keywords 用 2-6 个短标签，突出术语、数据集、指标、创新点、局限。
-6. evidence 只能逐字摘自【关键页摘录】或【用户标注】，尽量给 2-4 条候选；系统会二次核验，匹配不到原文的证据会被删除。
+6. evidence 只能逐字摘自【关键页摘录】或【用户标注】，尽量给 3-8 条候选；系统会二次核验，匹配不到原文的证据会被删除。
 7. missing_items 只列“具体缺失但会影响理解、复现、验证或综述引用”的信息，例如样本区间、变量定义、数据来源、参数、显著性、稳健性、实验环境、页码证据；如果只是泛泛的后续研究问题，不要放入 missing_items；没有具体缺失就返回空数组 []。
 8. followup_questions 必须是可直接拿去问 AI 或指导用户回查原文的高价值问题，写清楚“围绕什么对象、为了什么目的、希望得到什么输出”；禁止输出“XX 如何影响 YY？”这种泛泛问题。
 9. assistant_panels 是研究助手价值，不是摘要复述；必须给出“证据判断、研究价值、下一步行动”三类，每类 2-4 条，条目要具体到变量、页码、模型、数据、引用场景或复现动作。
@@ -862,8 +1111,26 @@ JSON 结构：
 
 【用户标注】
 {annotation_text or "暂无用户标注。"}"""
-    raw = call_text_completion(base_url=base_url, api_key=api_key, model=model, prompt=prompt, max_tokens=7600)
-    return parse_json_object(raw)
+    last_error: Exception | None = None
+    for attempt in range(1, LLM_JSON_MAX_ATTEMPTS + 1):
+        try:
+            raw = ''
+            for call_attempt in range(1, LLM_CALL_MAX_ATTEMPTS + 1):
+                try:
+                    raw = call_text_completion(base_url=base_url, api_key=api_key, model=model, prompt=prompt, max_tokens=7600)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if call_attempt >= LLM_CALL_MAX_ATTEMPTS:
+                        raise
+                    sleep_before_retry(call_attempt)
+            return parse_json_object(raw)
+        except Exception as exc:
+            last_error = exc
+            if attempt >= LLM_JSON_MAX_ATTEMPTS:
+                raise
+            sleep_before_retry(attempt)
+    raise last_error or RuntimeError("generate_typed_summary_failed")
 
 
 def build_priority_excerpts(pages: list[PageText], *, max_chars: int) -> str:
@@ -905,6 +1172,11 @@ def build_priority_excerpts(pages: list[PageText], *, max_chars: int) -> str:
         parts.append(f"[第 {page.page} 页]\n{snippet}")
         used += len(snippet)
     return "\n\n".join(parts)
+
+
+def sleep_before_retry(attempt: int) -> None:
+    index = max(0, min(attempt - 1, len(LLM_RETRY_BACKOFF_SECONDS) - 1))
+    time.sleep(LLM_RETRY_BACKOFF_SECONDS[index])
 
 
 def format_annotations(annotations: list[dict[str, Any]], *, limit: int) -> str:
@@ -985,6 +1257,12 @@ def normalize_generated_summary(
         "followup_questions": filter_followup_questions(followup_questions),
         "source_note": str(content.get("source_note") or f"依据 {len(pages)} 页论文文本生成，来源依据已由系统核验。"),
     }
+    if summary_type == "review":
+        normalized["structured_fields"] = normalize_review_structured_fields(
+            content.get("structured_fields"),
+            content.get("sections"),
+        )
+        normalized["review_field_blocks"] = list(content.get("review_field_blocks") or [])
     if summary_type == "annotations":
         normalized["source_note"] = f"依据当前 {len(annotations)} 条用户标注生成，标注清单默认折叠展示，来源依据已由系统核验。"
     if not normalized["highlights"] and normalized["sections"]:
@@ -1092,10 +1370,10 @@ def build_verified_section_evidence(
             continue
         evidence.append(verified)
         seen.add(key)
-        if len(evidence) >= 4:
+        if len(evidence) >= 8:
             return evidence
 
-    target_count = 4
+    target_count = 8
     candidates = retrieve_evidence_candidates(
         section=section,
         section_index=section_index,
@@ -1111,7 +1389,7 @@ def build_verified_section_evidence(
         seen.add(key)
         if len(evidence) >= target_count:
             break
-    return evidence[:4]
+    return evidence[:8]
 
 
 def verify_evidence_item(
@@ -1153,8 +1431,15 @@ def verify_evidence_item(
     page_number = normalize_page_number(raw.get("page"))
     pages_to_scan = [page for page in pages if page.page == page_number] if page_number else pages
     for page in pages_to_scan:
-        if normalized_match(quote, page.text):
-            return {"page": page.page, "quote": quote[:260], "source_type": "paper"}
+        match_range = find_quote_char_range(page.text, quote)
+        if match_range:
+            return {
+                "page": page.page,
+                "quote": quote[:260],
+                "source_type": "paper",
+                "start_char": match_range[0],
+                "end_char": match_range[1],
+            }
     return None
 
 
@@ -1196,7 +1481,18 @@ def retrieve_evidence_candidates(
             score = score_text_for_terms(snippet, terms)
             if score <= 0:
                 continue
-            scored.append((score, -snippet_index, {"page": page.page, "quote": snippet[:260], "source_type": "paper"}))
+            match_range = find_quote_char_range(page.text, snippet)
+            scored.append((
+                score,
+                -snippet_index,
+                {
+                    "page": page.page,
+                    "quote": snippet[:260],
+                    "source_type": "paper",
+                    "start_char": match_range[0] if match_range else None,
+                    "end_char": match_range[1] if match_range else None,
+                },
+            ))
 
     if scored:
         return [item for _score, _order, item in sorted(scored, key=lambda row: (row[0], row[1]), reverse=True)]
@@ -1210,7 +1506,14 @@ def retrieve_evidence_candidates(
     for page in ordered_pages:
         for snippet in split_source_snippets(page.text)[:2]:
             if len(snippet) >= 30:
-                fallback.append({"page": page.page, "quote": snippet[:260], "source_type": "paper"})
+                match_range = find_quote_char_range(page.text, snippet)
+                fallback.append({
+                    "page": page.page,
+                    "quote": snippet[:260],
+                    "source_type": "paper",
+                    "start_char": match_range[0] if match_range else None,
+                    "end_char": match_range[1] if match_range else None,
+                })
         if len(fallback) >= 4:
             break
     return fallback
@@ -1236,6 +1539,48 @@ def normalized_match(needle: str, haystack: str) -> bool:
     if compact_needle in compact_haystack:
         return True
     return len(compact_needle) >= 80 and compact_needle[:80] in compact_haystack
+
+
+def find_quote_char_range(haystack: str, needle: str) -> tuple[int, int] | None:
+    source = str(haystack or "")
+    target = clean_text(needle)
+    if not source or len(target) < 8:
+        return None
+    direct_index = source.find(target)
+    if direct_index >= 0:
+        return direct_index, direct_index + len(target)
+    compact_source = compact_text(source)
+    compact_target = compact_text(target)
+    if not compact_source or not compact_target:
+        return None
+    compact_index = compact_source.find(compact_target)
+    if compact_index < 0:
+        shortened = compact_target[:80] if len(compact_target) >= 80 else compact_target
+        compact_index = compact_source.find(shortened) if len(shortened) >= 8 else -1
+        if compact_index < 0:
+            return None
+        compact_target = shortened
+
+    source_pointer = 0
+    compact_pointer = 0
+    start_char: int | None = None
+    end_char: int | None = None
+    while source_pointer < len(source):
+        char = source[source_pointer]
+        compact_char = compact_text(char)
+        if compact_char:
+            for piece in compact_char:
+                if compact_pointer == compact_index and start_char is None:
+                    start_char = source_pointer
+                if compact_index <= compact_pointer < compact_index + len(compact_target):
+                    end_char = source_pointer + 1
+                compact_pointer += 1
+        source_pointer += 1
+        if end_char is not None and compact_pointer >= compact_index + len(compact_target):
+            break
+    if start_char is None or end_char is None or end_char <= start_char:
+        return None
+    return start_char, end_char
 
 
 def compact_text(value: str) -> str:

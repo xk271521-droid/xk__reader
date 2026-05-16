@@ -22,6 +22,7 @@ from app.models import (
     User,
 )
 from app.schemas.resource import ResourceLayoutPayload, ResourceLayoutResponse
+from app.services.annotation_metrics import count_effective_annotations
 from app.services.paper_summary import is_summary_stale
 
 router = APIRouter(prefix="/resources", tags=["resources"])
@@ -176,7 +177,6 @@ def get_resource_overview(
     annotation_rows = db.execute(
         select(
             Annotation.paper_id,
-            func.count(Annotation.id),
             func.max(Annotation.created_at),
         )
         .where(
@@ -185,14 +185,28 @@ def get_resource_overview(
         )
         .group_by(Annotation.paper_id)
     ).all()
+    annotation_items = db.scalars(
+        select(Annotation).where(
+            Annotation.user_id == current_user.id,
+            Annotation.paper_id.in_(paper_ids),
+        )
+    ).all()
+    annotation_by_paper: dict[int, list[Annotation]] = {}
+    for annotation in annotation_items:
+        annotation_by_paper.setdefault(int(annotation.paper_id), []).append(annotation)
     total_annotations = 0
-    for paper_id, count, updated_at in annotation_rows:
-        count = int(count or 0)
-        if count <= 0:
+    for paper_id, updated_at in annotation_rows:
+        effective_count = count_effective_annotations(annotation_by_paper.get(int(paper_id), []))
+        if effective_count <= 0:
             continue
-        total_annotations += count
+        total_annotations += effective_count
         resources_by_paper[int(paper_id)].append(
-            _resource("annotations", count=count, updated_at=updated_at, preview=f"当前保留 {count} 条原文标注。")
+            _resource(
+                "annotations",
+                count=effective_count,
+                updated_at=updated_at,
+                preview=f"当前保留 {effective_count} 条原文标注。",
+            )
         )
 
     note_rows = db.execute(

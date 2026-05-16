@@ -37,6 +37,41 @@ import {
 } from './resourcePreviewShared'
 import { buildRichTextSegments, DEFAULT_NOTE_TEXT_COLOR, parseRichNoteContent } from '../reader/richNoteContent'
 
+function mergeEffectiveAnnotations(annotations = []) {
+  const groups = new Map()
+  for (const annotation of annotations || []) {
+    if (!annotation) continue
+    const key = [
+      annotation.page_number || 0,
+      annotation.type || 'highlight',
+      annotation.color || '',
+    ].join(':')
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(annotation)
+  }
+
+  const merged = []
+  for (const items of groups.values()) {
+    const ordered = [...items].sort((left, right) =>
+      (left.start_char || 0) - (right.start_char || 0) || (left.end_char || 0) - (right.end_char || 0),
+    )
+    let current = null
+    for (const item of ordered) {
+      const startChar = Number(item.start_char || 0)
+      const endChar = Number(item.end_char || 0)
+      if (!current || startChar > current.end_char) {
+        current = { ...item, start_char: startChar, end_char: endChar }
+        merged.push(current)
+        continue
+      }
+      current.end_char = Math.max(current.end_char, endChar)
+      current.quote_text = [current.quote_text, item.quote_text].filter(Boolean).join('')
+      current.rects = [...(current.rects || []), ...(item.rects || [])]
+    }
+  }
+  return merged
+}
+
 function darkenColor(hex, ratio = 0.26) {
   const normalized = String(hex || '').trim()
   if (!/^#([\da-f]{6})$/i.test(normalized)) return '#172033'
@@ -72,6 +107,48 @@ function SectionShell({ id, kicker, title, subtitle, children }) {
   )
 }
 
+function PreviewEvidenceList({ evidence = [], onJumpToEvidence }) {
+  const [expanded, setExpanded] = useState(false)
+  const visibleItems = expanded ? evidence : evidence.slice(0, 3)
+  const hiddenCount = Math.max(0, evidence.length - visibleItems.length)
+  if (!Array.isArray(evidence) || !evidence.length) return null
+  return (
+    <div className="resource-preview__detail-block">
+      <button
+        className="resource-preview__detail-summary"
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+      >
+        引用与页码依据 {evidence.length} 条
+      </button>
+      <ul>
+        {visibleItems.map((item, evidenceIndex) => (
+          <li key={`${item.quote}-${evidenceIndex}`}>
+            <strong>{renderEvidenceSourceLabel(item)}</strong>
+            <button
+              className="summary-source-link"
+              type="button"
+              disabled={!item.page}
+              onClick={() => onJumpToEvidence?.(item)}
+            >
+              {item.quote}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {evidence.length > 3 ? (
+        <button
+          className="resource-preview__detail-toggle"
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? '收起多余依据' : `展开剩余 ${hiddenCount} 条依据`}
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
 function SummaryPreviewView({
   paperTitle,
   resourceLabel,
@@ -83,6 +160,7 @@ function SummaryPreviewView({
   onCacheUpdate,
   onBusyChange,
   exportSignal,
+  onJumpToEvidence,
 }) {
   const summaryType = PREVIEW_SUMMARY_TYPE_MAP[resourceType]?.id
   const summaryMeta = PREVIEW_SUMMARY_TYPE_MAP[resourceType] || PREVIEW_SUMMARY_TYPE_MAP[summaryType] || {}
@@ -254,17 +332,7 @@ function SummaryPreviewView({
                     </div>
                   ) : null}
                   {section.evidence?.length ? (
-                    <details className="resource-preview__detail-block">
-                      <summary>引用与页码依据 {section.evidence.length} 条</summary>
-                      <ul>
-                        {section.evidence.map((item, evidenceIndex) => (
-                          <li key={`${sectionId}-evidence-${evidenceIndex}`}>
-                            <strong>{renderEvidenceSourceLabel(item)}</strong>
-                            <span>{item.quote}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </details>
+                    <PreviewEvidenceList evidence={section.evidence} onJumpToEvidence={onJumpToEvidence} />
                   ) : null}
                 </div>
               </div>
@@ -531,6 +599,7 @@ function AnnotationsPreviewView({
 }) {
   const [expandedGroups, setExpandedGroups] = useState({})
   const annotations = cacheEntry?.data?.annotations || []
+  const effectiveAnnotations = useMemo(() => mergeEffectiveAnnotations(annotations), [annotations])
   const isLoading = cacheEntry?.status === 'loading'
   const error = cacheEntry?.error || ''
 
@@ -567,10 +636,10 @@ function AnnotationsPreviewView({
       })
   }, [cacheEntry?.status, onBusyChange, onCacheUpdate, paperId])
 
-  const groups = useMemo(() => buildAnnotationsPreviewGroups(annotations), [annotations])
+  const groups = useMemo(() => buildAnnotationsPreviewGroups(effectiveAnnotations), [effectiveAnnotations])
   useEffect(() => {
-    if (!exportSignal || !annotations.length) return
-    const html = buildAnnotationsExportHtml(resourceLabel, paperTitle, annotations)
+    if (!exportSignal || !effectiveAnnotations.length) return
+    const html = buildAnnotationsExportHtml(resourceLabel, paperTitle, effectiveAnnotations)
     if (exportSignal === 'pdf') {
       openPreviewPdfExport(html)
       return
@@ -578,7 +647,7 @@ function AnnotationsPreviewView({
     if (exportSignal === 'word') {
       triggerPreviewWordExport(html, `${paperTitle || resourceLabel}-annotations`)
     }
-  }, [annotations, exportSignal, paperTitle, resourceLabel])
+  }, [effectiveAnnotations, exportSignal, paperTitle, resourceLabel])
 
   if (isLoading) {
     return (
@@ -605,9 +674,9 @@ function AnnotationsPreviewView({
   }
 
   const stats = [
-    { label: '标注总数', value: annotations.length },
+    { label: '标注总数', value: effectiveAnnotations.length },
     { label: '覆盖页数', value: groups.length },
-    { label: '类型数量', value: new Set(annotations.map((item) => item.type)).size },
+    { label: '类型数量', value: new Set(effectiveAnnotations.map((item) => item.type)).size },
   ]
 
   return (
@@ -621,7 +690,7 @@ function AnnotationsPreviewView({
           </div>
           <div className="resource-preview__hero-meta">
             <span>{paperTitle}</span>
-            <span>{annotations.length} 条文本标注</span>
+            <span>{effectiveAnnotations.length} 条文本标注</span>
           </div>
         </section>
 
@@ -930,7 +999,9 @@ function NotesPreviewView({
 
 export function ResourcePreviewModal({
   preview,
+  uiFontScale = 1,
   onClose,
+  onJumpToEvidence,
 }) {
   const panelRef = useRef(null)
   const triggerRef = useRef(preview?.trigger || null)
@@ -1039,6 +1110,7 @@ export function ResourcePreviewModal({
     onBusyChange: setIsBusy,
     exportSignal: activeExportFormat,
     themeClass,
+    onJumpToEvidence,
   }
 
   return (
@@ -1050,6 +1122,7 @@ export function ResourcePreviewModal({
       }}
       style={{
         '--resource-preview-accent': visualColor,
+        '--ui-dialog-scale': uiFontScale,
         '--resource-preview-ink': inkColor,
         '--resource-preview-soft': surfaceGlow,
         '--resource-preview-soft-strong': overlayGlow,

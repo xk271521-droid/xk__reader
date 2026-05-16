@@ -312,7 +312,7 @@ export function UserCenterPage({
                   </div>
                   <div className="account-settings-row__copy">
                     <strong>字体大小</strong>
-                    <span>拖动后立即作用到首页和顶部状态栏。</span>
+                    <span>拖动后立即作用到全站界面文字和弹层。</span>
                   </div>
                 </div>
 

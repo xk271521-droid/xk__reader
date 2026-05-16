@@ -107,6 +107,10 @@ const TIMEFRAME_EMPTY_LABELS = {
   total: '累计',
 }
 
+function scaleChartFontSize(size, uiFontScale = 1) {
+  return Math.max(size, Math.round(size * uiFontScale * 10) / 10)
+}
+
 const HELP_COPY = {
   readingTrend: '这里看你在当前时间范围里，哪几天真的打开过文献。',
   resourceMix: '别被中间这个圆圈骗了，重点其实是你沉淀内容的类型结构，不只是总数。',
@@ -236,11 +240,13 @@ function InsightStatCard({ item, index, animate, onHoverStart, onHoverEnd }) {
 }
 
 
-function buildReadingTrendOption(data, activeDay) {
+function buildReadingTrendOption(data, activeDay, uiFontScale = 1) {
   const points = data.length ? data : Array.from({ length: 7 }, (_, index) => ({
     day: `${index + 1}`.padStart(2, '0'),
     opens: 0,
   }))
+  const axisFontSize = scaleChartFontSize(11, uiFontScale)
+  const tooltipFontSize = scaleChartFontSize(12, uiFontScale)
 
   return {
     animationDuration: 900,
@@ -250,7 +256,7 @@ function buildReadingTrendOption(data, activeDay) {
       trigger: 'axis',
       backgroundColor: 'rgba(8, 14, 36, 0.96)',
       borderColor: 'rgba(129, 140, 248, 0.26)',
-      textStyle: { color: '#EAF2FF' },
+      textStyle: { color: '#EAF2FF', fontSize: tooltipFontSize },
       extraCssText: 'box-shadow: 0 18px 32px rgba(1,4,16,0.34); border-radius: 14px;',
       axisPointer: {
         type: 'line',
@@ -268,13 +274,13 @@ function buildReadingTrendOption(data, activeDay) {
       data: points.map((item) => item.day),
       axisLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.18)' } },
       axisTick: { show: false },
-      axisLabel: { color: '#8EA7C5', fontSize: 11, margin: 12 },
+      axisLabel: { color: '#8EA7C5', fontSize: axisFontSize, margin: 12 },
     },
     yAxis: {
       type: 'value',
       minInterval: 1,
       splitNumber: 3,
-      axisLabel: { color: '#7F97BA', fontSize: 11 },
+      axisLabel: { color: '#7F97BA', fontSize: axisFontSize },
       axisLine: { show: false },
       axisTick: { show: false },
       splitLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.12)', type: 'dashed' } },
@@ -326,11 +332,13 @@ function buildReadingTrendOption(data, activeDay) {
   }
 }
 
-function buildImportTrendOption(data, activeDay) {
+function buildImportTrendOption(data, activeDay, uiFontScale = 1) {
   const points = data.length ? data : Array.from({ length: 7 }, (_, index) => ({
     day: `${index + 1}`.padStart(2, '0'),
     imports: 0,
   }))
+  const axisFontSize = scaleChartFontSize(11, uiFontScale)
+  const tooltipFontSize = scaleChartFontSize(12, uiFontScale)
 
   return {
     animationDuration: 780,
@@ -341,7 +349,7 @@ function buildImportTrendOption(data, activeDay) {
       axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(45, 212, 191, 0.12)' } },
       backgroundColor: 'rgba(8, 14, 36, 0.96)',
       borderColor: 'rgba(45, 212, 191, 0.24)',
-      textStyle: { color: '#EAF2FF' },
+      textStyle: { color: '#EAF2FF', fontSize: tooltipFontSize },
       extraCssText: 'box-shadow: 0 18px 32px rgba(1,4,16,0.34); border-radius: 14px;',
       formatter: (params) => {
         const item = params?.[0]
@@ -354,13 +362,13 @@ function buildImportTrendOption(data, activeDay) {
       data: points.map((item) => item.day),
       axisLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.18)' } },
       axisTick: { show: false },
-      axisLabel: { color: '#8EA7C5', fontSize: 11, margin: 12 },
+      axisLabel: { color: '#8EA7C5', fontSize: axisFontSize, margin: 12 },
     },
     yAxis: {
       type: 'value',
       minInterval: 1,
       splitNumber: 3,
-      axisLabel: { color: '#7F97BA', fontSize: 11 },
+      axisLabel: { color: '#7F97BA', fontSize: axisFontSize },
       axisLine: { show: false },
       axisTick: { show: false },
       splitLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.12)', type: 'dashed' } },
@@ -412,13 +420,14 @@ function buildImportTrendOption(data, activeDay) {
   }
 }
 
-function buildResourceMixOption(data, activeName) {
+function buildResourceMixOption(data, activeName, uiFontScale = 1) {
   const points = data.length ? data : [
     { name: '摘要', value: 0, color: '#7C3AED' },
     { name: '笔记', value: 0, color: '#22D3EE' },
     { name: '标注', value: 0, color: '#10B981' },
     { name: '翻译', value: 0, color: '#F97316' },
   ]
+  const tooltipFontSize = scaleChartFontSize(12, uiFontScale)
 
   return {
     animationDuration: 920,
@@ -427,7 +436,7 @@ function buildResourceMixOption(data, activeName) {
       trigger: 'item',
       backgroundColor: 'rgba(8, 14, 36, 0.96)',
       borderColor: 'rgba(167, 139, 250, 0.24)',
-      textStyle: { color: '#EAF2FF' },
+      textStyle: { color: '#EAF2FF', fontSize: tooltipFontSize },
       extraCssText: 'box-shadow: 0 18px 32px rgba(1,4,16,0.34); border-radius: 14px;',
       formatter: (params) => `${params.name}<br/><strong>${params.value}</strong> 项`,
     },
@@ -466,12 +475,15 @@ function buildResourceMixOption(data, activeName) {
   }
 }
 
-function buildTimePreferenceOption(data, activeLabel) {
+function buildTimePreferenceOption(data, activeLabel, uiFontScale = 1) {
   const points = data.length ? data : [
     { label: '上午', value: 0, color: '#38BDF8' },
     { label: '下午', value: 0, color: '#A78BFA' },
     { label: '夜间', value: 0, color: '#34D399' },
   ]
+  const axisFontSize = scaleChartFontSize(13, uiFontScale)
+  const labelFontSize = scaleChartFontSize(13, uiFontScale)
+  const tooltipFontSize = scaleChartFontSize(12, uiFontScale)
 
   return {
     animationDuration: 820,
@@ -482,7 +494,7 @@ function buildTimePreferenceOption(data, activeLabel) {
       axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(96, 165, 250, 0.12)' } },
       backgroundColor: 'rgba(8, 14, 36, 0.96)',
       borderColor: 'rgba(96, 165, 250, 0.24)',
-      textStyle: { color: '#EAF2FF' },
+      textStyle: { color: '#EAF2FF', fontSize: tooltipFontSize },
       extraCssText: 'box-shadow: 0 18px 32px rgba(1,4,16,0.34); border-radius: 14px;',
       formatter: (params) => {
         const item = params?.[0]
@@ -504,7 +516,7 @@ function buildTimePreferenceOption(data, activeLabel) {
       data: points.map((item) => item.label),
       axisLine: { show: false },
       axisTick: { show: false },
-      axisLabel: { color: '#A9BDD9', fontSize: 13, margin: 20 },
+      axisLabel: { color: '#A9BDD9', fontSize: axisFontSize, margin: 20 },
     },
     series: [
       {
@@ -542,7 +554,7 @@ function buildTimePreferenceOption(data, activeLabel) {
           show: true,
           position: 'right',
           color: '#F8FAFC',
-          fontSize: 13,
+          fontSize: labelFontSize,
           fontWeight: 700,
           formatter: ({ value }) => `${value}`,
         },
@@ -600,6 +612,7 @@ function CatMascot({ message, onMouseDown, dockSide = 'right', pose = 'idle' }) 
 export function ReadingInsightSection({
   dashboard,
   timeframe = 'month',
+  uiFontScale = 1,
   onTimeframeChange,
 }) {
   const [assistantMessage, setAssistantMessage] = useState('')
@@ -800,23 +813,23 @@ export function ReadingInsightSection({
   )
 
   const readingTrendOption = useMemo(
-    () => buildReadingTrendOption(readingTrendData, lockedFocus?.chart === 'readingTrend' ? lockedFocus.key : interactiveFocus?.chart === 'readingTrend' ? interactiveFocus.key : ''),
-    [readingTrendData, interactiveFocus, lockedFocus],
+    () => buildReadingTrendOption(readingTrendData, lockedFocus?.chart === 'readingTrend' ? lockedFocus.key : interactiveFocus?.chart === 'readingTrend' ? interactiveFocus.key : '', uiFontScale),
+    [readingTrendData, interactiveFocus, lockedFocus, uiFontScale],
   )
 
   const importTrendOption = useMemo(
-    () => buildImportTrendOption(importTrendData, lockedFocus?.chart === 'importTrend' ? lockedFocus.key : interactiveFocus?.chart === 'importTrend' ? interactiveFocus.key : ''),
-    [importTrendData, interactiveFocus, lockedFocus],
+    () => buildImportTrendOption(importTrendData, lockedFocus?.chart === 'importTrend' ? lockedFocus.key : interactiveFocus?.chart === 'importTrend' ? interactiveFocus.key : '', uiFontScale),
+    [importTrendData, interactiveFocus, lockedFocus, uiFontScale],
   )
 
   const resourceMixOption = useMemo(
-    () => buildResourceMixOption(resourceDistributionData, lockedFocus?.chart === 'resourceMix' ? lockedFocus.key : interactiveFocus?.chart === 'resourceMix' ? interactiveFocus.key : ''),
-    [resourceDistributionData, interactiveFocus, lockedFocus],
+    () => buildResourceMixOption(resourceDistributionData, lockedFocus?.chart === 'resourceMix' ? lockedFocus.key : interactiveFocus?.chart === 'resourceMix' ? interactiveFocus.key : '', uiFontScale),
+    [resourceDistributionData, interactiveFocus, lockedFocus, uiFontScale],
   )
 
   const timePreferenceOption = useMemo(
-    () => buildTimePreferenceOption(timeDistributionData, lockedFocus?.chart === 'timePreference' ? lockedFocus.key : interactiveFocus?.chart === 'timePreference' ? interactiveFocus.key : ''),
-    [timeDistributionData, interactiveFocus, lockedFocus],
+    () => buildTimePreferenceOption(timeDistributionData, lockedFocus?.chart === 'timePreference' ? lockedFocus.key : interactiveFocus?.chart === 'timePreference' ? interactiveFocus.key : '', uiFontScale),
+    [timeDistributionData, interactiveFocus, lockedFocus, uiFontScale],
   )
 
   const resourceDistributionTotal = useMemo(

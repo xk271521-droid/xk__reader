@@ -350,6 +350,7 @@ export function FullTranslationReader({
   pdfDocument,
   translation,
   parseMode = 'auto',
+  uiFontScale = 1,
   onParseModeChange,
   onRegenerate,
   onBack,
@@ -452,7 +453,7 @@ export function FullTranslationReader({
   }
 
   return (
-    <section className="full-translation-view">
+    <section className="full-translation-view" style={{ '--ui-reader-scale': uiFontScale }}>
       <header className="full-translation-toolbar">
         <button type="button" className="full-translation-action" onClick={onBack}>
           <ArrowLeft size={16} />

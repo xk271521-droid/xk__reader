@@ -12,9 +12,8 @@ import {
   findLineAtPoint,
   findSelectionBoundaryAtPoint,
   findWordAtPoint,
+  getTextRangeDebugGeometry,
   getTextRangeGeometry,
-  getLineRectsForRange,
-  getSearchRectsForRange,
   isPointInsideRect,
 } from './pdfSelectionModel'
 
@@ -42,6 +41,18 @@ function createEmptySelection() {
     contextBefore: '',
     contextAfter: '',
   }
+}
+
+function isSelectionDebugEnabled() {
+  if (typeof window === 'undefined') return false
+  const hashQuery = window.location.hash.includes('?')
+    ? window.location.hash.slice(window.location.hash.indexOf('?') + 1)
+    : ''
+  return (
+    new URLSearchParams(window.location.search).has('selectionDebug') ||
+    new URLSearchParams(hashQuery).has('selectionDebug') ||
+    window.localStorage?.getItem('pdfSelectionDebug') === '1'
+  )
 }
 
 function createEmptyEraserPreview() {
@@ -304,6 +315,25 @@ function normalizeDragRect(start, end) {
   }
 }
 
+function isSelectionFlowCompatible(current, boundary) {
+  if (!boundary) return false
+  const currentColumn = current.columnId
+  const boundaryColumn = boundary.columnId
+  const sameColumn =
+    currentColumn == null ||
+    boundaryColumn == null ||
+    currentColumn < 0 ||
+    boundaryColumn < 0 ||
+    currentColumn === boundaryColumn
+  if (!sameColumn) return false
+
+  if (boundary.blockIndex === current.blockIndex) return true
+
+  // Full-width headings can visually continue into the next normal line.
+  // Keep body text constrained by column so double-column PDFs do not jump sideways.
+  return currentColumn < 0 || boundaryColumn < 0
+}
+
 function simplifyInkPoints(points = []) {
   const simplified = []
   let previous = null
@@ -381,6 +411,7 @@ export function PdfViewport({
   const [eraserPreview, setEraserPreview] = useState(createEmptyEraserPreview())
   const [drawingInkStroke, setDrawingInkStroke] = useState(null)
   const [selectionState, setSelectionState] = useState(createEmptySelection())
+  const [selectionDebugEnabled] = useState(isSelectionDebugEnabled)
   const [searchFlashNonce, setSearchFlashNonce] = useState(0)
   const activeSearchMatch = matchIndex >= 0 ? matches[matchIndex] : null
   const activeSearchKey = activeSearchMatch
@@ -464,7 +495,9 @@ export function PdfViewport({
         start_char: match.startChar,
         end_char: match.endChar,
         quote_text: '',
-        rects: getSearchRectsForRange(pageIndex, match.startChar, match.endChar),
+        rects: getTextRangeGeometry(pageIndex, match.startChar, match.endChar, {
+          visualMode: 'search',
+        }).rects,
         type: isCurrent ? 'search_current' : 'search',
         color: null,
       }
@@ -480,7 +513,9 @@ export function PdfViewport({
         start_char: noteFocusRange.startChar,
         end_char: noteFocusRange.endChar,
         quote_text: '',
-        rects: getLineRectsForRange(pageIndex, noteFocusRange.startChar, noteFocusRange.endChar),
+        rects: getTextRangeGeometry(pageIndex, noteFocusRange.startChar, noteFocusRange.endChar, {
+          visualMode: 'highlight',
+        }).rects,
         type: 'note_focus',
         color: null,
       }]
@@ -778,7 +813,9 @@ export function PdfViewport({
     const focusRange = resolveFocusRange(pageIndex, focus)
     if (!focusRange) return false
 
-    const rects = getLineRectsForRange(pageIndex, focusRange.startChar, focusRange.endChar)
+    const rects = getTextRangeGeometry(pageIndex, focusRange.startChar, focusRange.endChar, {
+      visualMode: 'highlight',
+    }).rects
     const firstRect = rects[0]
     if (!firstRect) return false
 
@@ -1121,29 +1158,23 @@ export function PdfViewport({
     const pageIndex = pageIndexesRef.current.get(selection.pageNumber)
     const pageAnnotations = (annotationsByPage.get(selection.pageNumber) || [])
       .filter((annotation) => annotation.type === 'highlight' || annotation.type === 'underline' || annotation.type === 'wavy_underline')
-    const ranges = getRangeFromBoxSelection(pageIndex, selection.pageNumber, selection.rect, pageAnnotations)
     const pageInkAnnotations = (inkAnnotationsByPage.get(selection.pageNumber) || [])
       .filter((stroke) => inkStrokeIntersectsRect(stroke, selection.rect))
     clearScreenshotSelection()
     await Promise.all(
       pageInkAnnotations.map((stroke) => onDeleteInkAnnotation?.(stroke.id)),
     )
-    const activeRanges = (ranges || []).filter((range) =>
-      pageAnnotations.some((annotation) => annotationIntersectsRange(annotation, range, pageIndex)),
+    const touchedAnnotations = pageAnnotations.filter((annotation) =>
+      getAnnotationHitRects(annotation, pageIndex).some((annotationRect) =>
+        rectsIntersect(annotationRect, selection.rect, 0.002),
+      ),
     )
-    if (!activeRanges.length) {
+    if (!touchedAnnotations.length) {
       return
     }
-
-    const eraseSessionId = `box:${Date.now()}:${Math.random().toString(36).slice(2)}`
-    for (const range of activeRanges) {
-      await onEraseAnnotationRange?.({
-        pageNumber: range.pageNumber,
-        startChar: range.startChar,
-        endChar: range.endChar,
-        eraseSessionId,
-      })
-    }
+    await Promise.all(
+      touchedAnnotations.map((annotation) => onDeleteAnnotation?.(annotation.id)),
+    )
   }
 
   async function commitInkStroke() {
@@ -1362,11 +1393,7 @@ export function PdfViewport({
       pageResolved.point.y,
       current.anchorBoundary,
     )
-    if (
-      !boundary ||
-      boundary.blockIndex !== current.blockIndex ||
-      (current.columnId != null && boundary.columnId != null && boundary.columnId !== current.columnId)
-    ) {
+    if (!isSelectionFlowCompatible(current, boundary)) {
       return
     }
 
@@ -1920,6 +1947,15 @@ export function PdfViewport({
             inkAnnotations={inkAnnotationsByPage.get(item) || []}
             drawingStroke={drawingInkStroke?.pageNumber === item ? drawingInkStroke : null}
             currentSelection={selectionState.visible && selectionState.pageNumber === item ? selectionState : null}
+            selectionDebugGeometry={
+              selectionDebugEnabled && selectionState.visible && selectionState.pageNumber === item
+                ? getTextRangeDebugGeometry(
+                  pageIndexesRef.current.get(item),
+                  selectionState.startChar,
+                  selectionState.endChar,
+                )
+                : null
+            }
             eraserPreview={eraserPreview.visible && eraserPreview.pageNumber === item ? eraserPreview : null}
             screenshotSelection={screenshotSelection?.pageNumber === item ? screenshotSelection : null}
             selectionTool={activeTool}

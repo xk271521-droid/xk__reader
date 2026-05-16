@@ -1,7 +1,7 @@
 const UI_PREFERENCES_STORAGE_PREFIX = 'xk_reader_ui_preferences'
 
 export const UI_FONT_SIZE_MIN = 100
-export const UI_FONT_SIZE_MAX = 130
+export const UI_FONT_SIZE_MAX = 160
 export const UI_FONT_SIZE_STEP = 5
 export const UI_FONT_SIZE_DEFAULT = 110
 

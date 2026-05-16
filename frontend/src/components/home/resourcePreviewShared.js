@@ -20,7 +20,7 @@ export const PREVIEW_SUMMARY_TYPES = [
     id: 'review',
     resourceType: 'summary_review',
     title: '文献综述卡片',
-    subtitle: '变量指标、核心发现、创新局限和引用价值',
+    subtitle: '背景、问题、方法、实验、指标、发现、创新与局限的结构化底稿',
     themeClass: 'summary-theme--review',
   },
   {

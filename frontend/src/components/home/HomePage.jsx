@@ -25,6 +25,7 @@ import {
 import { LiteratureSearchPage } from './LiteratureSearchPage'
 import { ReadingInsightSection } from './ReadingInsightSection'
 import { ResearchMatrixPage } from './ResearchMatrixPage'
+import { fetchResearchMatrixRuns } from '../../services/paperReaderApi'
 
 const homeSections = [
   { id: 'recent', label: '阅读记录', icon: Clock3 },
@@ -33,6 +34,25 @@ const homeSections = [
   { id: 'insights', label: '阅读信息站', icon: Radar },
   { id: 'matrix', label: '文献矩阵', icon: Network },
   { id: 'trash', label: '回收站', icon: Trash2 },
+]
+
+const LIBRARY_STATUS_FILTERS = [
+  { id: 'all', label: '全部' },
+  { id: 'unread', label: '待阅读' },
+  { id: 'reading', label: '阅读中' },
+  { id: 'summary-pending', label: '待总结' },
+  { id: 'notes', label: '有笔记' },
+  { id: 'summary', label: '已总结' },
+  { id: 'translation', label: '已翻译' },
+  { id: 'stale', label: '待更新' },
+]
+
+const PENDING_TASK_ORDER = [
+  'summary-pending',
+  'stale',
+  'unread',
+  'matrix-pending',
+  'trash-soon',
 ]
 
 function formatDateTime(timestamp) {
@@ -123,6 +143,202 @@ function periodIcon(period) {
 
 function getTranslatedTitle(paper) {
   return paper.metadata?.translatedTitle || paper.metadata?.subject || '—'
+}
+
+function getPaperResourceMap(resourceOverview) {
+  const next = {}
+  ;(resourceOverview?.papers || []).forEach((item) => {
+    next[String(item.paper_id)] = item
+  })
+  return next
+}
+
+function getPaperResourceEntries(paperId, paperResourcesById) {
+  return paperResourcesById[String(paperId)]?.resources || []
+}
+
+function getPaperResourceEntry(resources, type) {
+  return resources.find((resource) => resource.type === type) || null
+}
+
+function hasAnyResourceType(resources, types) {
+  return types.some((type) => resources.some((resource) => resource.type === type))
+}
+
+function getResourceLabel(resourceType) {
+  if (resourceType === 'summary_annotations') return '标注总结'
+  if (resourceType === 'summary_overview') return '整篇总结'
+  if (resourceType === 'summary_review') return '综述卡片'
+  if (resourceType === 'summary_reproduction') return '复现总结'
+  if (resourceType === 'summary_meeting') return '组会稿'
+  if (resourceType === 'translation') return '全文翻译'
+  if (resourceType === 'annotations') return '原文标注'
+  if (resourceType === 'notes') return '笔记'
+  return '资源'
+}
+
+function getPaperStatusFlags(paper, resources = []) {
+  const annotationEntry = getPaperResourceEntry(resources, 'annotations')
+  const notesEntry = getPaperResourceEntry(resources, 'notes')
+  const summaryEntry = resources.find((resource) => String(resource.type || '').startsWith('summary_')) || null
+  const translationEntry = getPaperResourceEntry(resources, 'translation')
+  const staleResource = resources.find((resource) => resource.status === 'stale') || null
+  const hasAnnotations = Boolean(annotationEntry)
+  const hasNotes = Boolean(notesEntry)
+  const hasSummary = Boolean(summaryEntry)
+  const hasTranslation = Boolean(translationEntry)
+  const isStale = Boolean(staleResource)
+  const lastViewedAt = Number(paper?.lastViewedAt || 0)
+  const ageHours = lastViewedAt ? (Date.now() - lastViewedAt) / (1000 * 60 * 60) : Number.POSITIVE_INFINITY
+  const isUnread = !Number.isFinite(lastViewedAt) || ageHours > 24 * 14
+  const isReading = !isUnread && (!hasSummary || !hasNotes)
+  const summaryPending = (hasAnnotations || hasNotes) && !hasSummary
+  return {
+    isUnread,
+    isReading,
+    hasAnnotations,
+    hasNotes,
+    hasSummary,
+    hasTranslation,
+    isStale,
+    summaryPending,
+    annotationCount: Number(annotationEntry?.count || 0),
+    noteCount: Number(notesEntry?.count || 0),
+    summaryStatus: summaryEntry?.status || '',
+    translationStatus: translationEntry?.status || '',
+    staleResourceType: staleResource?.type || '',
+    staleResourceLabel: staleResource?.label || getResourceLabel(staleResource?.type || ''),
+    staleResourcePreview: staleResource?.preview || '',
+  }
+}
+
+function getPaperStatusLabel(flags) {
+  if (flags.summaryPending) return '待补总结'
+  if (flags.isStale) return `${flags.staleResourceLabel || '资源'}待更新`
+  if (flags.isUnread) return '待阅读'
+  if (flags.hasTranslation && flags.hasSummary) return '资料齐全'
+  if (flags.isReading) return '阅读中'
+  if (flags.hasNotes) return '有笔记'
+  return '继续阅读'
+}
+
+function matchesLibraryStatusFilter(filterId, paper, paperResourcesById) {
+  if (!filterId || filterId === 'all') return true
+  const flags = getPaperStatusFlags(paper, getPaperResourceEntries(paper.id, paperResourcesById))
+  if (filterId === 'unread') return flags.isUnread
+  if (filterId === 'reading') return flags.isReading
+  if (filterId === 'summary-pending') return flags.summaryPending
+  if (filterId === 'notes') return flags.hasNotes
+  if (filterId === 'summary') return flags.hasSummary
+  if (filterId === 'translation') return flags.hasTranslation
+  if (filterId === 'stale') return flags.isStale
+  return true
+}
+
+function buildContinueWorkItem(recentPapers, paperResourcesById) {
+  const currentPaper = recentPapers[0]
+  if (!currentPaper) return null
+  const resources = getPaperResourceEntries(currentPaper.id, paperResourcesById)
+  const flags = getPaperStatusFlags(currentPaper, resources)
+  const hintParts = []
+  if (flags.summaryPending) hintParts.push('还没整理总结')
+  if (flags.hasNotes) hintParts.push(`${flags.noteCount || 0} 条笔记可回看`)
+  if (flags.hasTranslation) hintParts.push('已有全文翻译')
+  if (flags.isStale) hintParts.push(flags.staleResourcePreview || `${flags.staleResourceLabel || '资源'}已经过期，建议重新生成`)
+  return {
+    paper: currentPaper,
+    statusLabel: getPaperStatusLabel(flags),
+    statusHint: hintParts[0] || '回到刚才的阅读现场，继续往下推进',
+    statusTags: hintParts.filter((item) => item !== hintParts[0]).slice(0, 3),
+  }
+}
+
+function buildPendingTasks({
+  recentPapers,
+  paperResourcesById,
+  readingDashboard,
+  trashPapers,
+  matrixRuns,
+}) {
+  const tasks = []
+  const overview = readingDashboard?.overview || {}
+  const summaryPendingCount = recentPapers.filter((paper) =>
+    matchesLibraryStatusFilter('summary-pending', paper, paperResourcesById),
+  ).length
+  const unreadCount = recentPapers.filter((paper) =>
+    matchesLibraryStatusFilter('unread', paper, paperResourcesById),
+  ).length
+  const staleCount = recentPapers.filter((paper) =>
+    matchesLibraryStatusFilter('stale', paper, paperResourcesById),
+  ).length
+  const notesReadyCount = Number(overview.papers_with_notes || 0)
+  const trashSoonCount = trashPapers.filter((paper) => {
+    const ms = Number(paper.expiresAt) - Date.now()
+    return ms > 0 && ms <= 3 * 24 * 60 * 60 * 1000
+  }).length
+  const pendingMatrixRun = (matrixRuns || []).find((run) => ['queued', 'running', 'failed'].includes(run?.status))
+
+  if (summaryPendingCount > 0) {
+    tasks.push({
+      id: 'summary-pending',
+      count: summaryPendingCount,
+      title: '篇还没做总结',
+      helper: '适合补成可回看的结论卡片',
+      tone: 'violet',
+    })
+  }
+  if (staleCount > 0) {
+    tasks.push({
+      id: 'stale',
+      count: staleCount,
+      title: '篇内容待更新',
+      helper: '摘要或衍生内容已经和当前标注不一致',
+      tone: 'slate',
+    })
+  }
+  if (unreadCount > 0) {
+    tasks.push({
+      id: 'unread',
+      count: unreadCount,
+      title: '篇新文献待阅读',
+      helper: '先挑一篇开读，首页就会开始记轨迹',
+      tone: 'blue',
+    })
+  }
+  if (pendingMatrixRun) {
+    tasks.push({
+      id: 'matrix-pending',
+      count: Number(pendingMatrixRun.paper_count || pendingMatrixRun.total_count || 0),
+      title: '篇矩阵批次待继续',
+      helper: pendingMatrixRun.status === 'failed' ? '批次生成中断了，回去补齐最划算' : '矩阵还在后台处理，适合回去查看进度',
+      tone: pendingMatrixRun.status === 'failed' ? 'rose' : 'emerald',
+      label: pendingMatrixRun.title || '未命名批次',
+    })
+  }
+  if (trashSoonCount > 0) {
+    tasks.push({
+      id: 'trash-soon',
+      count: trashSoonCount,
+      title: '篇回收站即将到期',
+      helper: '3 天内会被永久清理',
+      tone: 'rose',
+    })
+  }
+  if (!tasks.length && notesReadyCount > 0) {
+    tasks.push({
+      id: 'notes',
+      count: notesReadyCount,
+      title: '篇已有笔记可回看',
+      helper: '如果今天不想开新文献，可以先回顾已有整理',
+      tone: 'emerald',
+    })
+  }
+
+  return tasks.sort((left, right) => {
+    const leftOrder = PENDING_TASK_ORDER.indexOf(left.id)
+    const rightOrder = PENDING_TASK_ORDER.indexOf(right.id)
+    return (leftOrder >= 0 ? leftOrder : 99) - (rightOrder >= 0 ? rightOrder : 99)
+  }).slice(0, 6)
 }
 
 const RESOURCE_MAP_VIEWBOX_SIZE = 100
@@ -418,6 +634,109 @@ function RecentSection({ groupedPapers, onOpenPaper }) {
   )
 }
 
+function ContinueWorkSection({ item, onBrowseLibrary, onOpenPaper, onOpenResource, paperResourcesById }) {
+  if (!item?.paper) {
+    return (
+      <section className="home-continue-card home-continue-card--empty">
+        <div>
+          <p className="panel-label">继续上次工作</p>
+          <h3>先导入一篇论文，首页就会开始帮你接住工作现场</h3>
+          <p>导入后会自动记录最近阅读、资源生成和笔记/总结进度，后面回来就能从这里继续。</p>
+        </div>
+        <div className="home-continue-card__actions">
+          <button type="button" className="home-primary-button" onClick={onBrowseLibrary}>
+            <LibraryBig />
+            <span>去我的文献</span>
+          </button>
+        </div>
+      </section>
+    )
+  }
+
+  const paper = item.paper
+  const resources = getPaperResourceEntries(paper.id, paperResourcesById)
+  const previewResource = resources[0] || null
+
+  return (
+    <section className="home-continue-card">
+      <div className="home-continue-card__body">
+        <div className="home-continue-card__copy">
+          <p className="panel-label">继续上次工作</p>
+          <h3>{paper.title}</h3>
+          <p className="home-continue-card__meta">
+            {paper.folderName || '未分类'}
+            {paper.metadata?.author ? ` / ${paper.metadata.author}` : ''}
+          </p>
+          <div className="home-continue-card__status">
+            <span className="home-paper-pill is-open">{item.statusLabel}</span>
+            <time>{formatDateTime(paper.lastViewedAt)}</time>
+          </div>
+          <p className="home-continue-card__hint">{item.statusHint}</p>
+          {item.statusTags.length ? (
+            <div className="home-continue-card__tags">
+              {item.statusTags.map((tag) => (
+                <span key={tag} className="home-continue-card__tag">{tag}</span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="home-continue-card__actions">
+          <button type="button" className="home-primary-button" onClick={() => onOpenPaper(paper.id)}>
+            <BookCopy />
+            <span>继续阅读</span>
+          </button>
+          <button
+            type="button"
+            className="home-secondary-button"
+            onClick={() => {
+              if (previewResource) {
+                onOpenResource?.(paper, previewResource)
+                return
+              }
+              onBrowseLibrary()
+            }}
+          >
+            <Package2 />
+            <span>{previewResource ? '查看资源' : '去文献列表'}</span>
+          </button>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function PendingTaskSection({ tasks, onTaskClick }) {
+  return (
+    <section className="home-pending-panel">
+      <div className="home-section-head home-section-head--compact">
+        <h3>现在最值得处理的事</h3>
+        <span>点一下直接跳到对应文献或工作区</span>
+      </div>
+
+      {tasks.length ? (
+        <div className="home-pending-grid">
+          {tasks.map((task) => (
+            <button
+              key={task.id}
+              type="button"
+              className={`home-pending-card home-pending-card--${task.tone || 'slate'}`}
+              onClick={() => onTaskClick(task)}
+            >
+              <strong>{task.count}</strong>
+              <span>{task.title}</span>
+              <small>{task.helper}</small>
+              {task.label ? <em>{task.label}</em> : null}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="home-inline-message">当前没有堆着不处理就会耽误的事，可以直接回到你的阅读列表继续推进。</div>
+      )}
+    </section>
+  )
+}
+
 function CategorySection({
   folders,
   highlightPaperId,
@@ -429,6 +748,7 @@ function CategorySection({
   onOpenResource,
   onSaveResourceLayout,
   paperResourcesById = {},
+  statusFilter = 'all',
   recentPapers,
   searchTerm,
   selectedFolderId,
@@ -444,6 +764,10 @@ function CategorySection({
 
   const papersInCategory = recentPapers.filter((paper) => {
     if (paper.folderId !== selectedFolderId) {
+      return false
+    }
+
+    if (!matchesLibraryStatusFilter(statusFilter, paper, paperResourcesById)) {
       return false
     }
 
@@ -464,7 +788,7 @@ function CategorySection({
     setCurrentPage(1)
     setMenuPaperId('')
     setExpandedResourcePaperId('')
-  }, [selectedFolderId, searchTerm])
+  }, [selectedFolderId, searchTerm, statusFilter])
 
   // Jump to paper and auto-scroll page
   const jumpTargetIndex = useMemo(() => {
@@ -539,6 +863,7 @@ function CategorySection({
 
             const resourceRecord = paperResourcesById[String(paper.id)]
             const resources = resourceRecord?.resources || []
+            const flags = getPaperStatusFlags(paper, resources)
             const isResourceExpanded = expandedResourcePaperId === paper.id && resources.length > 0
 
             return (
@@ -555,7 +880,10 @@ function CategorySection({
                   <FileText />
                   <span>{paper.title}</span>
                 </button>
-                <span title={getTranslatedTitle(paper)}>{getTranslatedTitle(paper)}</span>
+                <span title={getTranslatedTitle(paper)}>
+                  {getTranslatedTitle(paper)}
+                  <small className="home-category-paper__status">{getPaperStatusLabel(flags)}</small>
+                </span>
                 <span title={paper.metadata.author || '-'}>{paper.metadata.author || '-'}</span>
                 <span>{paper.metadata.pageCount || 0} 页</span>
                 <div className="home-row-menu-wrap">
@@ -817,6 +1145,7 @@ export function HomePage({
   onMovePaper,
   onOpenFilePicker,
   onOpenPaper,
+  onJumpToPaperEvidence,
   onOpenResource,
   onPermanentlyDeletePaper,
   onRefreshResources,
@@ -833,11 +1162,13 @@ export function HomePage({
   readingStats = null,
   resourceOverview = null,
   trashPapers = [],
+  uiFontScale = 1,
   uncategorizedFolderId,
 }) {
   const [activeSection, setActiveSection] = useState('recent')
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedFolderId, setSelectedFolderId] = useState(uncategorizedFolderId)
+  const [libraryStatusFilter, setLibraryStatusFilter] = useState('all')
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [folderName, setFolderName] = useState('')
   const [showImportMenu, setShowImportMenu] = useState(false)
@@ -845,12 +1176,35 @@ export function HomePage({
   const [editFolderName, setEditFolderName] = useState('')
   const [highlightPaperId, setHighlightPaperId] = useState('')
   const [jumpPaperId, setJumpPaperId] = useState('')
+  const [matrixRuns, setMatrixRuns] = useState([])
 
   useEffect(() => {
     if (uncategorizedFolderId && selectedFolderId === '') {
       setSelectedFolderId(uncategorizedFolderId)
     }
   }, [uncategorizedFolderId, selectedFolderId])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadMatrixRuns() {
+      try {
+        const payload = await fetchResearchMatrixRuns()
+        if (!cancelled) {
+          setMatrixRuns(payload?.runs || [])
+        }
+      } catch {
+        if (!cancelled) {
+          setMatrixRuns([])
+        }
+      }
+    }
+
+    loadMatrixRuns()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const groupedPapers = useMemo(
     () => buildGroupedPapers(recentPapers, searchTerm),
@@ -879,13 +1233,31 @@ export function HomePage({
     )
   }, [recentReadings, searchTerm])
 
-  const paperResourcesById = useMemo(() => {
-    const next = {}
-    ;(resourceOverview?.papers || []).forEach((item) => {
-      next[String(item.paper_id)] = item
-    })
-    return next
-  }, [resourceOverview])
+  const paperResourcesById = useMemo(
+    () => getPaperResourceMap(resourceOverview),
+    [resourceOverview],
+  )
+
+  const continueWorkItem = useMemo(
+    () => buildContinueWorkItem(recentPapers, paperResourcesById),
+    [paperResourcesById, recentPapers],
+  )
+
+  const pendingTasks = useMemo(
+    () => buildPendingTasks({
+      recentPapers,
+      paperResourcesById,
+      readingDashboard,
+      trashPapers,
+      matrixRuns,
+    }),
+    [matrixRuns, paperResourcesById, readingDashboard, recentPapers, trashPapers],
+  )
+
+  const activeLibraryFilterLabel = useMemo(
+    () => LIBRARY_STATUS_FILTERS.find((item) => item.id === libraryStatusFilter)?.label || '全部',
+    [libraryStatusFilter],
+  )
 
   function handleOpenResource(paper, resource, trigger) {
     const paperId = paper?.id ?? paper?.paper_id
@@ -957,6 +1329,8 @@ export function HomePage({
   function handleGlobalSearchClick(paper) {
     setSearchTerm('')
     setSelectedFolderId(paper.folderId)
+    setLibraryStatusFilter('all')
+    setActiveSection('library')
     setHighlightPaperId(paper.id)
     setJumpPaperId(paper.id)
   }
@@ -993,6 +1367,33 @@ export function HomePage({
     if (sectionId === 'trash') {
       onRefreshTrash?.()
     }
+  }
+
+  function handleOpenResourcePreview(paper, resource) {
+    handleOpenResource(paper, resource, null)
+  }
+
+  function handleBrowseLibrary() {
+    setActiveSection('library')
+    setLibraryStatusFilter('all')
+    setSearchTerm('')
+  }
+
+  function handlePendingTaskClick(task) {
+    if (task.id === 'matrix-pending') {
+      setActiveSection('matrix')
+      return
+    }
+
+    if (task.id === 'trash-soon') {
+      setActiveSection('trash')
+      onRefreshTrash?.()
+      return
+    }
+
+    setActiveSection('library')
+    setLibraryStatusFilter(task.id === 'notes' ? 'notes' : task.id)
+    setSearchTerm('')
   }
 
   return (
@@ -1056,7 +1457,10 @@ export function HomePage({
                           className={`home-sidebar-folder-tree__item${
                             selectedFolderId === uncategorizedFolderId ? ' is-active' : ''
                           }`}
-                          onClick={() => setSelectedFolderId(uncategorizedFolderId)}
+                          onClick={() => {
+                            setSelectedFolderId(uncategorizedFolderId)
+                            setLibraryStatusFilter('all')
+                          }}
                         >
                           <span>未分类</span>
                         </button>
@@ -1093,7 +1497,10 @@ export function HomePage({
                               className={`home-sidebar-folder-tree__item${
                                 selectedFolderId === folder.id ? ' is-active' : ''
                               }`}
-                              onClick={() => setSelectedFolderId(folder.id)}
+                              onClick={() => {
+                                setSelectedFolderId(folder.id)
+                                setLibraryStatusFilter('all')
+                              }}
                               onDoubleClick={() => {
                                 if (folder.name !== '未分类') {
                                   setEditingFolderId(folder.id)
@@ -1173,7 +1580,7 @@ export function HomePage({
                 type="search"
                 placeholder={
                   activeSection === 'library'
-                    ? '搜索全部文献标题、作者、关键词…'
+                    ? '搜索当前文件夹标题、作者、关键词…'
                     : '搜索当前工作区文献'
                 }
                 value={searchTerm}
@@ -1202,6 +1609,16 @@ export function HomePage({
 
         {activeSection === 'recent' ? (
           <>
+            <ContinueWorkSection
+              item={continueWorkItem}
+              onBrowseLibrary={handleBrowseLibrary}
+              onOpenPaper={onOpenPaper}
+              onOpenResource={handleOpenResourcePreview}
+              paperResourcesById={paperResourcesById}
+            />
+
+            <PendingTaskSection tasks={pendingTasks} onTaskClick={handlePendingTaskClick} />
+
             <div className="home-heading">
               <div>
                 <p className="panel-label">阅读轨迹</p>
@@ -1240,9 +1657,8 @@ export function HomePage({
         {activeSection === 'insights' ? (
           <ReadingInsightSection
             dashboard={readingDashboard}
-            recentPapers={recentPapers}
-            resourceOverview={resourceOverview}
             timeframe={insightTimeframe}
+            uiFontScale={uiFontScale}
             onTimeframeChange={onInsightTimeframeChange}
           />
         ) : null}
@@ -1258,12 +1674,14 @@ export function HomePage({
             {activeSection === 'library' && '我的文献'}
             {activeSection === 'trash' && '回收站'}
           </h3>
-          {activeSection !== 'library' ? (
+          {activeSection === 'library' ? (
+            <span>当前按 “{activeLibraryFilterLabel}” 查看</span>
+          ) : (
             <span>
               {activeSection === 'recent' && '按最近打开时间排序'}
               {activeSection === 'trash' && '仅保留最近 7 天删除内容'}
             </span>
-          ) : null}
+          )}
         </div>
         ) : null}
 
@@ -1272,27 +1690,44 @@ export function HomePage({
         ) : null}
 
         {activeSection === 'library' ? (
-          <CategorySection
-            folders={folders}
-            highlightPaperId={highlightPaperId}
-            jumpPaperId={jumpPaperId}
-            onClearHighlight={handleClearHighlight}
-            onDeletePaper={onDeletePaper}
-            onMovePaper={onMovePaper}
-            onOpenPaper={onOpenPaper}
-            onOpenResource={handleOpenResource}
-            onSaveResourceLayout={onSaveResourceLayout}
-            paperResourcesById={paperResourcesById}
-            recentPapers={recentPapers}
-            searchTerm={searchTerm}
-            selectedFolderId={selectedFolderId}
-            uncategorizedFolderId={uncategorizedFolderId}
-          />
+          <>
+            <div className="home-status-filter">
+              {LIBRARY_STATUS_FILTERS.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`home-status-filter__chip${libraryStatusFilter === item.id ? ' is-active' : ''}`}
+                  onClick={() => setLibraryStatusFilter(item.id)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+
+            <CategorySection
+              folders={folders}
+              highlightPaperId={highlightPaperId}
+              jumpPaperId={jumpPaperId}
+              onClearHighlight={handleClearHighlight}
+              onDeletePaper={onDeletePaper}
+              onMovePaper={onMovePaper}
+              onOpenPaper={onOpenPaper}
+              onOpenResource={handleOpenResource}
+              onSaveResourceLayout={onSaveResourceLayout}
+              paperResourcesById={paperResourcesById}
+              recentPapers={recentPapers}
+              searchTerm={searchTerm}
+              selectedFolderId={selectedFolderId}
+              statusFilter={libraryStatusFilter}
+              uncategorizedFolderId={uncategorizedFolderId}
+            />
+          </>
         ) : null}
 
         {activeSection === 'matrix' ? (
           <ResearchMatrixPage
             folders={folders}
+            onJumpToPaperEvidence={onJumpToPaperEvidence}
             recentPapers={recentPapers}
             uncategorizedFolderId={uncategorizedFolderId}
           />

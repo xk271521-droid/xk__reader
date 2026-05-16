@@ -1445,6 +1445,26 @@ function App() {
     })
   }
 
+  function handleJumpToPreviewEvidence(source) {
+    if (!resourcePreview?.paperId) {
+      handleJumpToSummaryEvidence(source)
+      return
+    }
+    openPaperResource(resourcePreview.paperId, { type: resourcePreview.resourceType || 'summary_review' })
+    closeResourcePreview()
+    window.setTimeout(() => {
+      handleJumpToSummaryEvidence(source)
+    }, 80)
+  }
+
+  function handleJumpToPaperEvidence(paperId, source) {
+    if (!paperId) return
+    openPaperResource(paperId, { type: 'summary_review' })
+    window.setTimeout(() => {
+      handleJumpToSummaryEvidence(source)
+    }, 80)
+  }
+
   useEffect(() => {
     if (!noteFocus) return undefined
     const timer = window.setTimeout(() => setNoteFocus(null), 2800)
@@ -1599,9 +1619,11 @@ function App() {
     storeUiPreferences(currentUser?.uid, { fontSize: normalizedValue })
   }
 
+  const uiFontScale = getUiFontScale(uiFontSize)
+  const uiTopbarScale = getUiTopbarScale(uiFontSize)
   const appShellStyle = {
-    '--ui-font-scale': getUiFontScale(uiFontSize),
-    '--ui-topbar-scale': getUiTopbarScale(uiFontSize),
+    '--ui-font-scale': uiFontScale,
+    '--ui-topbar-scale': uiTopbarScale,
   }
 
   return (
@@ -1794,6 +1816,7 @@ function App() {
             onMovePaper={assignPaperToFolder}
             onOpenFilePicker={openFilePicker}
             onOpenPaper={switchToPaper}
+            onJumpToPaperEvidence={handleJumpToPaperEvidence}
             onOpenResource={openResourcePreview}
             onPermanentlyDeletePaper={permanentlyDeletePaper}
             onRefreshResources={refreshResourceOverview}
@@ -1810,6 +1833,7 @@ function App() {
             readingStats={readingStats}
             resourceOverview={resourceOverview}
             trashPapers={trashPapers}
+            uiFontScale={uiFontScale}
             uncategorizedFolderId={uncategorizedFolderId}
           />
         </div>
@@ -1830,6 +1854,7 @@ function App() {
               pdfDocument={pdfDocument}
               translation={fullTranslation}
               parseMode={fullTranslationParseMode}
+              uiFontScale={uiFontScale}
               onParseModeChange={setFullTranslationParseMode}
               onRegenerate={() => handleFullTranslate({ force: true })}
               onBack={() => setIsFullTranslationOpen(false)}
@@ -1944,6 +1969,7 @@ function App() {
                 chatInitialSuggestionsLoading={activeInitialSuggestionsLoading}
                 chatFollowupLoadingMessageId={activeFollowupLoadingMessageId}
                 providerLabel={providerLabel}
+                uiFontScale={uiFontScale}
                 onChatInputChange={function (value) {
                   setChatInput(function (previous) {
                     return {
@@ -2002,7 +2028,9 @@ function App() {
       {resourcePreview ? (
         <ResourcePreviewModal
           preview={resourcePreview}
+          uiFontScale={uiFontScale}
           onClose={closeResourcePreview}
+          onJumpToEvidence={handleJumpToPreviewEvidence}
         />
       ) : null}
     </div>

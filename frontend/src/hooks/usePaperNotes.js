@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { createBlankNotebook, createDefaultNotebook } from '../components/reader/noteTree'
+import { createNotebookFromTemplate } from '../components/reader/noteTree'
 import { getStoredAuthToken } from '../services/authApi'
 
 async function apiFetch(url, options = {}) {
@@ -65,9 +65,7 @@ export function usePaperNotes(paperId) {
   const createNotebookDraft = useCallback((kind = 'blank') => {
     setNotebooks((previous) => {
       const sortOrder = previous.length
-      const notebook = kind === 'default'
-        ? createDefaultNotebook(sortOrder)
-        : createBlankNotebook(sortOrder)
+      const notebook = createNotebookFromTemplate(kind, sortOrder)
       return [...previous, notebook]
     })
   }, [])

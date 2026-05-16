@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useTransition } from 'react'
+import { useEffect, useMemo, useRef, useState, useTransition } from 'react'
 import {
   CheckCircle2,
   ChevronLeft,
@@ -30,21 +30,21 @@ import {
   fetchResearchMatrixRun,
   fetchResearchMatrixRuns,
   refreshResearchMatrixRun,
+  prepareResearchMatrixDraftSources,
+  rewriteResearchMatrixDraftSection,
   retryPendingResearchMatrixRun,
   updateResearchMatrixRun,
   updateResearchMatrixRunPaper,
+  updateResearchMatrixRunOutline,
+  refreshResearchMatrixInsights,
 } from '../../services/paperReaderApi'
 
 const FIELD_CONFIG = [
   { key: 'research_question', label: '研究问题', scope: 'paper', multiline: true },
-  { key: 'core_metrics', label: '核心变量/指标', scope: 'paper', multiline: true, multiValue: true },
   { key: 'method_route', label: '方法路线', scope: 'paper', multiline: true },
-  { key: 'data_sample', label: '数据与样本', scope: 'paper', multiline: true },
   { key: 'main_findings', label: '核心发现', scope: 'paper', multiline: true },
   { key: 'innovations', label: '创新点', scope: 'paper', multiline: true, multiValue: true },
   { key: 'limitations', label: '局限与风险', scope: 'paper', multiline: true, multiValue: true },
-  { key: 'review_role', label: '综述定位', scope: 'run', multiline: true },
-  { key: 'comparison_tags', label: '可对比标签', scope: 'paper', multiline: true, multiValue: true },
 ]
 
 const FIELD_MAP = Object.fromEntries(FIELD_CONFIG.map((field) => [field.key, field]))
@@ -64,13 +64,25 @@ const RUN_STATUS_LABELS = {
   failed: '生成失败',
 }
 
-const DRAFT_REQUIRED_TYPES = ['overview', 'review', 'reproduction']
+const MATRIX_REQUIRED_TYPES = ['review']
+const REVIEW_WORKSPACE_SOURCE_TYPES = ['overview', 'review', 'reproduction']
 
 const SUMMARY_TYPE_LABELS = {
-  overview: '整篇总结',
   review: '综述卡片',
-  reproduction: '复现总结',
 }
+
+const GROUPING_MODE_LABELS = {
+  topic_first: '主题优先',
+  method_first: '方法优先',
+}
+
+const WORKFLOW_STAGES = [
+  { key: 'matrix', label: '文献矩阵', icon: Columns3 },
+  { key: 'insights', label: '比较导读', icon: ScrollText },
+  { key: 'outline', label: '综述大纲', icon: ListTree },
+  { key: 'drafts', label: '分节草稿', icon: PenSquare },
+  { key: 'integrated', label: '初稿整合', icon: FileText },
+]
 
 function formatDate(value) {
   if (!value) return '--'
@@ -89,6 +101,71 @@ function formatDate(value) {
 
 function getRunDisplayTitle(run) {
   return (run?.title || '未命名批次').trim() || '未命名批次'
+}
+
+function normalizeVersionBaseTitle(title) {
+  return getRunDisplayTitle({ title }).replace(/\s*-\s*(主题优先|方法优先)$/, '')
+}
+
+function getGroupingModeLabel(mode) {
+  return GROUPING_MODE_LABELS[mode] || GROUPING_MODE_LABELS.topic_first
+}
+
+function isRunProcessing(run) {
+  return RUNNING_STATUSES.has(run?.status)
+}
+
+function getRunStabilityStatus(run) {
+  if (!run) {
+    return {
+      tone: 'idle',
+      label: '等待开始',
+      helper: '',
+    }
+  }
+  if (run.status === 'completed') {
+    return {
+      tone: 'completed',
+      label: '已完成',
+      helper: run.updated_at ? `更新于 ${formatDate(run.updated_at)}` : '当前批次已完成',
+    }
+  }
+  if (run.status === 'failed') {
+    return {
+      tone: 'failed',
+      label: '需要处理',
+      helper: run.error_message || run.last_worker_error || '生成中断，请刷新或继续补齐。',
+    }
+  }
+  const workerStatus = String(run.worker_status || '')
+  if (run.status === 'queued') {
+    return {
+      tone: 'recovering',
+      label: '排队或自动恢复中',
+      helper: workerStatus === 'failed'
+        ? '后台任务正在重新接续。'
+        : '后台正在安排当前批次。',
+    }
+  }
+  if (workerStatus === 'failed') {
+    return {
+      tone: 'recovering',
+      label: '自动续跑中',
+      helper: '后台检测到中断，正在尝试恢复。',
+    }
+  }
+  return {
+    tone: 'running',
+    label: '正常生成中',
+    helper: '后台正在生成，完成后会自动刷新。',
+  }
+}
+
+function getRunEvidenceCount(run) {
+  const rowCount = Number(run?.matrix?.rows?.length || 0)
+  const readyCount = Number(run?.ready_count || 0)
+  const paperCount = Number(run?.paper_count || 0)
+  return Math.max(rowCount, readyCount, paperCount)
 }
 
 function getPaperTitle(paper) {
@@ -229,6 +306,58 @@ function getOutlinePayload(run) {
   return run?.drafts?.review_outline || null
 }
 
+function getDraftVariants(run) {
+  if (run?.draft_variants && typeof run.draft_variants === 'object') return run.draft_variants
+  if (run?.drafts?.modes && typeof run.drafts.modes === 'object') return run.drafts.modes
+  if (run?.drafts && typeof run.drafts === 'object' && Object.keys(run.drafts).length) {
+    const fallbackMode = run?.grouping_mode || 'topic_first'
+    return { [fallbackMode]: run.drafts }
+  }
+  return {}
+}
+
+function getAvailableGroupingModes(run) {
+  const variants = getDraftVariants(run)
+  if (Array.isArray(run?.grouping_modes) && run.grouping_modes.length) {
+    if (
+      run.grouping_modes.length === 1
+      && !Object.keys(variants).length
+      && run
+      && (run.status !== 'completed' || run?.draft_status !== 'completed')
+    ) {
+      return ['topic_first', 'method_first']
+    }
+    return run.grouping_modes
+  }
+  const modes = ['topic_first', 'method_first'].filter((mode) => variants[mode])
+  if (!modes.length && run && (run.status !== 'completed' || run?.draft_status !== 'completed')) {
+    return ['topic_first', 'method_first']
+  }
+  return modes.length ? modes : ['topic_first']
+}
+
+function buildRunForGroupingMode(run, groupingMode = 'topic_first') {
+  if (!run) return null
+  const variants = getDraftVariants(run)
+  const availableModes = getAvailableGroupingModes(run)
+  const nextMode = availableModes.includes(groupingMode) ? groupingMode : availableModes[0]
+  const selectedDrafts = variants[nextMode] || run?.drafts || {}
+  return {
+    ...run,
+    grouping_mode: nextMode,
+    grouping_modes: availableModes,
+    drafts: selectedDrafts,
+    draft_variants: variants,
+  }
+}
+
+function getInitialGroupingMode(run, preferredMode = null) {
+  const availableModes = getAvailableGroupingModes(run)
+  if (preferredMode && availableModes.includes(preferredMode)) return preferredMode
+  const defaultMode = run?.grouping_mode || 'topic_first'
+  return availableModes.includes(defaultMode) ? defaultMode : (availableModes[0] || 'topic_first')
+}
+
 function getTopicGroups(run) {
   const outline = getOutlinePayload(run)
   return Array.isArray(outline?.grouped_outlines) && outline.grouped_outlines.length
@@ -250,6 +379,28 @@ function toTitleKey(value) {
 function titleInAllowedSet(allowedTitles, value) {
   const key = toTitleKey(value)
   return key ? allowedTitles.has(key) : false
+}
+
+function hasObjectEntries(value) {
+  return Boolean(value && typeof value === 'object' && Object.keys(value).length)
+}
+
+function filterOutlineSectionsByTitles(sections, allowedTitles) {
+  if (!Array.isArray(sections) || !allowedTitles?.size) return Array.isArray(sections) ? sections : []
+  return sections.reduce((result, section) => {
+    const nextSourceTitles = Array.isArray(section?.source_titles)
+      ? section.source_titles.filter((title) => titleInAllowedSet(allowedTitles, title))
+      : []
+    if (Array.isArray(section?.source_titles) && section.source_titles.length && !nextSourceTitles.length) {
+      return result
+    }
+    result.push({
+      ...section,
+      source_titles: nextSourceTitles,
+      support_count: nextSourceTitles.length || Number(section?.support_count || 0),
+    })
+    return result
+  }, [])
 }
 
 function filterDraftByTitles(draft, allowedTitles) {
@@ -299,7 +450,9 @@ function filterRunByTopicGroup(run, groupId) {
   const missing = (run?.matrix?.missing || []).filter((item) => titleInAllowedSet(allowedTitles, item?.title))
   const stale = (run?.matrix?.stale || []).filter((item) => titleInAllowedSet(allowedTitles, item?.title))
   const nextDrafts = { ...(run?.drafts || {}) }
-  if (group?.drafts && typeof group.drafts === 'object') {
+  const hasGroupDrafts = hasObjectEntries(group?.drafts)
+  const hasGroupReviewOutline = hasObjectEntries(group?.review_outline)
+  if (hasGroupDrafts) {
     Object.entries(group.drafts).forEach(([key, value]) => {
       nextDrafts[key] = value
     })
@@ -309,7 +462,7 @@ function filterRunByTopicGroup(run, groupId) {
       nextDrafts[key] = filterDraftByTitles(nextDrafts[key], allowedTitles)
     })
   }
-  if (nextDrafts.review_outline && group?.review_outline) {
+  if (nextDrafts.review_outline && hasGroupReviewOutline) {
     nextDrafts.review_outline = {
       ...nextDrafts.review_outline,
       ...group.review_outline,
@@ -317,10 +470,13 @@ function filterRunByTopicGroup(run, groupId) {
       active_group_label: group.label,
       active_group_titles: group.paper_titles || [],
     }
-  } else if (nextDrafts.review_outline && Array.isArray(group?.sections)) {
+  } else if (nextDrafts.review_outline) {
+    const outlineSections = Array.isArray(group?.sections) && group.sections.length
+      ? group.sections
+      : filterOutlineSectionsByTitles(nextDrafts.review_outline.outline_sections, allowedTitles)
     nextDrafts.review_outline = {
       ...nextDrafts.review_outline,
-      outline_sections: group.sections,
+      outline_sections: outlineSections,
       active_group_id: group.group_id,
       active_group_label: group.label,
       active_group_titles: group.paper_titles || [],
@@ -366,6 +522,72 @@ function normalizeDraftItems(draft) {
   return Array.isArray(draft?.items) ? draft.items.filter((item) => item?.quote || item?.paper_title) : []
 }
 
+function dedupeReadableNotes(items = []) {
+  const seen = new Set()
+  const nextItems = []
+  items.forEach((item) => {
+    const value = String(item || '').replace(/\s+/gu, ' ').trim()
+    if (!value) return
+    const key = value.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    nextItems.push(value)
+  })
+  return nextItems
+}
+
+function shouldLiftDraftAsideText(value) {
+  const note = String(value || '').replace(/\s+/gu, ' ').trim()
+  if (!note) return false
+  if (/^\d+(?:\s*[-,，]\s*\d+)*$/u.test(note)) return true
+  if (
+    /\b(?:19|20)\d{2}[a-z]?\b/u.test(note)
+    && /(?:et al\.?|等|,|，|;|；)/iu.test(note)
+    && /[A-Za-z\u4E00-\u9FFF]{2,}/u.test(note)
+  ) return true
+  return /(?:来源|source|review|overview|reproduction|citation|参考|参见|详见|见图|见表|页码|page|p\.\s*\d+|doi|appendix|附录|section|章节|文献)/iu.test(note)
+}
+
+function buildReadableDraftParagraph(paragraph) {
+  const originalText = String(paragraph?.text || '').replace(/\s+/gu, ' ').trim()
+  if (!originalText) {
+    return {
+      text: '',
+      liftedNotes: [],
+    }
+  }
+
+  const liftedNotes = []
+  const collectNote = (value) => {
+    const note = String(value || '').replace(/\s+/gu, ' ').trim()
+    if (!note) return
+    liftedNotes.push(note.replace(/^[：:;；，,\s]+|[：:;；，,\s]+$/gu, ''))
+  }
+
+  let nextText = originalText.replace(/(?:\s*(?:\[[\d,\-\s]+\]|【[\d,\-\s]+】))+$/gu, (match) => {
+    collectNote(match)
+    return ''
+  })
+
+  nextText = nextText.replace(/([（(])([^()（）]{2,80})([）)])/gu, (match, _open, inner) => {
+    if (!shouldLiftDraftAsideText(inner)) return match
+    collectNote(inner)
+    return ''
+  })
+
+  nextText = nextText
+    .replace(/\s+([，。！？；：])/gu, '$1')
+    .replace(/([（(])\s+/gu, '$1')
+    .replace(/\s+([）)])/gu, '$1')
+    .replace(/\s{2,}/gu, ' ')
+    .trim()
+
+  return {
+    text: nextText || originalText,
+    liftedNotes: dedupeReadableNotes(liftedNotes),
+  }
+}
+
 function formatCitationFootnotes(citations = []) {
   if (!Array.isArray(citations) || !citations.length) return '当前段落缺少明确脚注，请回查本批次来源卡片。'
   return citations.map((citation, index) => {
@@ -374,6 +596,36 @@ function formatCitationFootnotes(citations = []) {
     const page = citation?.page ? ` p.${citation.page}` : ''
     return `[${index + 1}] ${title} · ${cardType}${page}`
   }).join('；')
+}
+
+function DraftCitationList({ citations = [], onJumpToEvidence }) {
+  if (!Array.isArray(citations) || !citations.length) {
+    return <div className="matrix-drafts-view__footnote">当前段落缺少明确脚注，请回查本批次来源卡片。</div>
+  }
+  return (
+    <div className="matrix-drafts-view__citations">
+      {citations.map((citation, index) => (
+        <div key={`${citation.paper_title || 'citation'}-${index}`} className="matrix-drafts-view__citation-item">
+          <strong>[{index + 1}]</strong>
+          <span>{citation.paper_title || '未命名论文'} · {citation.source_card_type || 'review'}{citation.page ? ` · p.${citation.page}` : ''}</span>
+          {citation.paper_id && citation.page ? (
+            <button
+              type="button"
+              className="matrix-link-button"
+              onClick={() => onJumpToEvidence?.(citation.paper_id, {
+                page: citation.page,
+                quote: citation.quote || '',
+                start_char: citation.start_char ?? null,
+                end_char: citation.end_char ?? null,
+              })}
+            >
+              查看原文
+            </button>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function buildDraftCopyText(draft) {
@@ -403,6 +655,34 @@ function buildDraftCopyText(draft) {
     })
   }
   return lines.join('\n')
+}
+
+function DraftProgressPanel({ run, eyebrow = '准备中', title = '准备综述来源', description = '' }) {
+  const total = Number(run?.draft_total_count || 0)
+  const ready = Number(run?.draft_ready_count || 0)
+  const failed = Number(run?.draft_failed_count || 0)
+  const progress = Math.max(0, Math.min(100, Number(run?.draft_progress_percent || (total ? (ready / total) * 100 : 0)) || 0))
+  const stageLabel = run?.draft_stage_label || '正在准备来源卡片'
+  return (
+    <div className="matrix-draft-progress" role="status" aria-live="polite">
+      <span className="matrix-draft-progress__eyebrow">{eyebrow}</span>
+      <div className="matrix-draft-progress__head">
+        <div>
+          <strong>{title}</strong>
+          <span>{stageLabel}</span>
+        </div>
+        <b>{Math.round(progress)}%</b>
+      </div>
+      <div className="matrix-draft-progress__bar" aria-hidden="true">
+        <span style={{ width: `${progress}%` }} />
+      </div>
+      <div className="matrix-draft-progress__meta">
+        <span>{total ? `${ready}/${total} 个来源卡片已就绪` : '正在建立来源卡片队列'}</span>
+        {failed ? <span>{failed} 个来源需要继续补齐</span> : null}
+      </div>
+      {description ? <p>{description}</p> : null}
+    </div>
+  )
 }
 
 function buildIntegratedCopyText(run) {
@@ -499,7 +779,7 @@ function buildSelectablePapers(papers, folders, uncategorizedFolderId, statuses)
   return papers.map((paper) => {
     const paperId = paper.id
     const summaryStatuses = statuses.get(paperId) || {}
-    const entries = DRAFT_REQUIRED_TYPES.map((type) => ({
+    const entries = MATRIX_REQUIRED_TYPES.map((type) => ({
       type,
       status: summaryStatuses[type]?.status || 'idle',
     }))
@@ -511,17 +791,17 @@ function buildSelectablePapers(papers, folders, uncategorizedFolderId, statuses)
       .map((entry) => entry.type)
     let sourceLabel = '来源卡片待准备'
     let sourceTone = 'idle'
-    if (sourceReadyCount === DRAFT_REQUIRED_TYPES.length) {
-      sourceLabel = '草稿来源已齐'
+    if (sourceReadyCount === MATRIX_REQUIRED_TYPES.length) {
+      sourceLabel = '综述卡片已齐'
       sourceTone = 'generated'
     } else if (hasRunningSource) {
-      sourceLabel = `来源补齐中 ${sourceReadyCount}/${DRAFT_REQUIRED_TYPES.length}`
+      sourceLabel = `综述卡片补齐中 ${sourceReadyCount}/${MATRIX_REQUIRED_TYPES.length}`
       sourceTone = 'running'
     } else if (hasFailedSource) {
-      sourceLabel = `来源缺失 ${sourceReadyCount}/${DRAFT_REQUIRED_TYPES.length}`
+      sourceLabel = `综述卡片缺失 ${sourceReadyCount}/${MATRIX_REQUIRED_TYPES.length}`
       sourceTone = 'failed'
     } else if (sourceReadyCount > 0) {
-      sourceLabel = `来源待补齐 ${sourceReadyCount}/${DRAFT_REQUIRED_TYPES.length}`
+      sourceLabel = `综述卡片待补齐 ${sourceReadyCount}/${MATRIX_REQUIRED_TYPES.length}`
       sourceTone = 'idle'
     }
     return {
@@ -530,8 +810,8 @@ function buildSelectablePapers(papers, folders, uncategorizedFolderId, statuses)
       author: getPaperAuthor(paper),
       folderName: getFolderName(paper, folders, uncategorizedFolderId),
       sourceReadyCount,
-      sourceTotalCount: DRAFT_REQUIRED_TYPES.length,
-      sourceReady: sourceReadyCount === DRAFT_REQUIRED_TYPES.length,
+      sourceTotalCount: MATRIX_REQUIRED_TYPES.length,
+      sourceReady: sourceReadyCount === MATRIX_REQUIRED_TYPES.length,
       hasRunningSource,
       hasFailedSource,
       sourceLabel,
@@ -608,28 +888,19 @@ function CircleProgress({ value = 0, label = '', status = 'completed' }) {
 }
 
 function getRunProgressMeta(run) {
-  const draftStatus = run?.draft_status || 'idle'
-  const draftTotal = Number(run?.draft_total_count || 0)
-  const draftReady = Number(run?.draft_ready_count || 0)
   const runTotal = Number(run?.total_count || run?.paper_count || 0)
   const runReady = Number(run?.ready_count || 0)
-  const showDraftProgress = draftStatus !== 'completed' && draftTotal > 0
-  if (showDraftProgress) {
-    const derivedDraftProgress = draftTotal > 0 ? Math.round((draftReady / draftTotal) * 100) : 0
-    return {
-      value: Math.min(Number(run?.draft_progress_percent || 0), derivedDraftProgress),
-      status: draftStatus,
-      label: `${draftReady}/${draftTotal || 0}`,
-      detail: `${run?.draft_stage_label || '综述草稿处理中'}${draftTotal ? ` · ${draftReady}/${draftTotal}` : ''}`,
-      helper: draftTotal ? `综述草稿来源 ${draftReady}/${draftTotal}` : '综述草稿来源准备中',
-    }
-  }
+  const stage = run?.stage || ''
+  const stageLabel = run?.stage_label || RUN_STATUS_LABELS[run?.status] || run?.status || '已完成'
+  const helper = stage === 'building_matrix'
+    ? '综述卡片已齐，正在整理矩阵'
+    : (runTotal ? `矩阵基础进度 ${runReady}/${runTotal}` : '矩阵基础进度已完成')
   return {
     value: Number(run?.progress_percent || 0),
     status: run?.status || 'completed',
     label: `${runReady}/${runTotal || 0}`,
-    detail: `${run?.stage_label || RUN_STATUS_LABELS[run?.status] || run?.status || '已完成'}${runTotal ? ` · ${runReady}/${runTotal}` : ''}`,
-    helper: runTotal ? `矩阵基础进度 ${runReady}/${runTotal}` : '矩阵基础进度已完成',
+    detail: `${stageLabel}${runTotal ? ` · ${runReady}/${runTotal}` : ''}`,
+    helper,
   }
 }
 
@@ -745,11 +1016,16 @@ function buildGroupedRunView(run, nextMode) {
   if (!run) return null
   const drafts = run?.drafts || {}
   const reviewOutline = drafts?.review_outline || {}
-  const groupedOutlines = buildLocalTopicGroups(run, nextMode).map((group) => ({
-    ...group,
-    section_count: Array.isArray(reviewOutline?.outline_sections) ? reviewOutline.outline_sections.length : 0,
-    sections: Array.isArray(reviewOutline?.outline_sections) ? reviewOutline.outline_sections : [],
-  }))
+  const outlineSections = Array.isArray(reviewOutline?.outline_sections) ? reviewOutline.outline_sections : []
+  const groupedOutlines = buildLocalTopicGroups(run, nextMode).map((group) => {
+    const allowedTitles = new Set((group.paper_titles || []).map((title) => toTitleKey(title)).filter(Boolean))
+    const sections = filterOutlineSectionsByTitles(outlineSections, allowedTitles)
+    return {
+      ...group,
+      section_count: sections.length,
+      sections,
+    }
+  })
   if (!groupedOutlines.length) return {
     ...run,
     grouping_mode: nextMode,
@@ -767,8 +1043,8 @@ function buildGroupedRunView(run, nextMode) {
     paper_titles: Array.isArray(group.paper_titles) ? group.paper_titles : [],
     section_count: Number(group.section_count || 0),
     sections: Array.isArray(group.sections) ? group.sections : [],
-    drafts: group.drafts || {},
-    review_outline: group.review_outline || {},
+    ...(hasObjectEntries(group.drafts) ? { drafts: group.drafts } : {}),
+    ...(hasObjectEntries(group.review_outline) ? { review_outline: group.review_outline } : {}),
     diagnostic: Boolean(group.diagnostic),
   }))
   return {
@@ -789,18 +1065,26 @@ function buildGroupedRunView(run, nextMode) {
 function getRunProgressSummary(run) {
   const matrixReady = Number(run?.ready_count || 0)
   const matrixTotal = Number(run?.total_count || run?.paper_count || 0)
-  const draftReady = Number(run?.draft_ready_count || 0)
-  const draftTotal = Number(run?.draft_total_count || 0)
-  const draftStatus = run?.draft_status || 'idle'
   const matrixStageLabel = run?.stage_label || RUN_STATUS_LABELS[run?.status] || '已完成'
   const draftStageLabel = run?.draft_stage_label || '综述草稿处理中'
   return {
     matrixLine: matrixTotal ? `矩阵综述卡片 ${matrixReady}/${matrixTotal}` : '矩阵综述卡片待准备',
-    draftLine: draftTotal ? `草稿来源卡片 ${draftReady}/${draftTotal}` : '草稿来源卡片待准备',
+    draftLine: '',
     matrixStageLabel,
     draftStageLabel,
-    draftStatus,
+    draftStatus: 'idle',
   }
+}
+
+function sanitizeNoticeText(notice, currentRun) {
+  const text = String(notice?.text || '')
+  if (!text) return ''
+  if (/\?{3,}/.test(text)) {
+    return currentRun?.status === 'completed'
+      ? `批次“${getRunDisplayTitle(currentRun)}”已完成，可以继续查看矩阵和综述工作流。`
+      : '当前任务状态已更新，请继续查看工作流。'
+  }
+  return text
 }
 
 function MatrixRunRail({
@@ -840,8 +1124,8 @@ function MatrixRunRail({
           const isActive = activeRunId === run.id
           const menuOpen = menuOpenId === run.id
           const progressMeta = getRunProgressMeta(run)
-          const isRunning = RUNNING_STATUSES.has(run.status) || run?.draft_status === 'running'
-          const isFailed = run.status === 'failed' || run?.draft_status === 'failed'
+          const isRunning = isRunProcessing(run)
+          const isFailed = run.status === 'failed'
           const hasDeletedPapers = Boolean(run.has_deleted_papers)
           const showProgress = isRunning || isFailed
           const runDisplayTitle = getRunDisplayTitle(run)
@@ -866,6 +1150,7 @@ function MatrixRunRail({
                       <span className="matrix-run-card__eyebrow-row">
                         {isActive ? <span className="matrix-run-card__badge is-active">当前批次</span> : null}
                         {run.has_updates ? <span className="matrix-run-card__badge is-warning">有更新</span> : null}
+                        {hasDeletedPapers ? <span className="matrix-run-card__badge is-danger">来源缺失</span> : null}
                       </span>
                     ) : null}
                     <span className="matrix-run-card__title-row">
@@ -902,15 +1187,6 @@ function MatrixRunRail({
                           {runDisplayTitle}
                         </span>
                       )}
-                      <span className="matrix-run-card__title-side">
-                        {showProgress ? (
-                          <CircleProgress
-                            value={progressMeta.value}
-                            status={progressMeta.status}
-                            label={progressMeta.label}
-                          />
-                        ) : null}
-                      </span>
                     </span>
                     <span className="matrix-run-card__meta">
                       {run.paper_count} 篇 · {formatDate(run.created_at)}
@@ -921,11 +1197,16 @@ function MatrixRunRail({
                       </span>
                     ) : null}
                     {showProgress ? (
-                      <span className={`matrix-run-card__progress is-${progressMeta.status}`}>
-                        <span
-                          className="matrix-run-card__progress-bar"
-                          style={{ width: `${Math.max(0, Math.min(100, Number(progressMeta.value || 0)))}%` }}
-                        />
+                      <span className="matrix-run-card__progress-row">
+                        <span className={`matrix-run-card__progress is-${progressMeta.status}`}>
+                          <span
+                            className="matrix-run-card__progress-bar"
+                            style={{ width: `${Math.max(0, Math.min(100, Number(progressMeta.value || 0)))}%` }}
+                          />
+                        </span>
+                        <strong className={`matrix-run-card__progress-value is-${progressMeta.status}`}>
+                          {`${Math.round(Number(progressMeta.value || 0))}%`}
+                        </strong>
                       </span>
                     ) : null}
                     {showProgress ? (
@@ -964,7 +1245,7 @@ function MatrixRunRail({
                       {run.has_updates ? (
                         <button type="button" onClick={() => onRefreshRun(run.id)}>
                           <RefreshCcw size={14} />
-                          <span>刷新新版</span>
+                          <span>生成新版本</span>
                         </button>
                       ) : null}
                       <button type="button" className="is-danger" onClick={() => onDeleteRun(run.id)}>
@@ -988,136 +1269,103 @@ function MatrixRunRail({
 }
 
 function MatrixContentHeader({
-  activeTab,
   currentRun,
+  activeStage = 'matrix',
   exportMenuOpen,
-  topicGroups = [],
-  activeTopicGroupId = 'all',
-  groupingMode = 'topic_first',
   busy = false,
-  onChangeTab,
-  onChangeTopicGroup,
-  onChangeGroupingMode,
+  onRetryRun,
   onRefreshStatus,
   onExport,
+  onStageChange,
   onToggleExportMenu,
 }) {
   const exportDisabled = !currentRun || currentRun.status !== 'completed'
-  const showTopicGroups = topicGroups.length > 1
-  const groupingModeDisabled = busy || !currentRun?.id || currentRun?.status !== 'completed' || currentRun?.draft_status !== 'completed'
+  const runProcessing = isRunProcessing(currentRun)
+  const progressMeta = currentRun ? getRunProgressMeta(currentRun) : null
+  const stability = getRunStabilityStatus(currentRun)
+  const runMetaLine = currentRun
+    ? (
+      runProcessing
+        ? progressMeta?.detail
+        : `${getRunEvidenceCount(currentRun)} 篇文献 · ${formatDate(currentRun.created_at)}`
+    )
+    : ''
   return (
     <header className="matrix-content-header">
       <div className="matrix-content-header__main">
         <div className="matrix-content-tabs" role="tablist" aria-label="当前批次内容切换">
-          <button
-            type="button"
-            className={`matrix-content-tab${activeTab === 'matrix' ? ' is-active' : ''}`}
-            role="tab"
-            aria-selected={activeTab === 'matrix'}
-            onClick={() => onChangeTab('matrix')}
-          >
-            <Columns3 size={15} />
-            <span>文献矩阵</span>
-          </button>
-          <button
-            type="button"
-            className={`matrix-content-tab${activeTab === 'outline' ? ' is-active' : ''}`}
-            role="tab"
-            aria-selected={activeTab === 'outline'}
-            onClick={() => onChangeTab('outline')}
-          >
-            <ListTree size={15} />
-            <span>综述大纲</span>
-          </button>
-          <button
-            type="button"
-            className={`matrix-content-tab${activeTab === 'drafts' ? ' is-active' : ''}`}
-            role="tab"
-            aria-selected={activeTab === 'drafts'}
-            onClick={() => onChangeTab('drafts')}
-          >
-            <ScrollText size={15} />
-            <span>综述草稿</span>
-          </button>
-        </div>
-        <div className="matrix-content-header__actions">
-          <div className="matrix-topic-mode">
-            <button
-              type="button"
-              className={`matrix-topic-mode__chip${groupingMode === 'topic_first' ? ' is-active' : ''}`}
-              onClick={() => onChangeGroupingMode?.('topic_first')}
-              disabled={groupingModeDisabled}
-              title={groupingModeDisabled ? '请先等当前批次矩阵和草稿都完成，再切换分组逻辑。' : undefined}
-            >
-              主题优先
-            </button>
-            <button
-              type="button"
-              className={`matrix-topic-mode__chip${groupingMode === 'method_first' ? ' is-active' : ''}`}
-              onClick={() => onChangeGroupingMode?.('method_first')}
-              disabled={groupingModeDisabled}
-              title={groupingModeDisabled ? '请先等当前批次矩阵和草稿都完成，再切换分组逻辑。' : undefined}
-            >
-              方法优先
-            </button>
-          </div>
-          <button
-            type="button"
-            className="matrix-secondary-button"
-            onClick={onRefreshStatus}
-            disabled={busy || !currentRun?.id}
-          >
-            <RefreshCcw size={14} />
-            刷新并补齐
-          </button>
-          <div className="matrix-action-popover">
-            <button
-              type="button"
-              className="matrix-run-rail__icon"
-              title="导出"
-              aria-expanded={exportMenuOpen}
-              disabled={exportDisabled}
-              onClick={onToggleExportMenu}
-            >
-              <Download />
-            </button>
-            {exportMenuOpen && !exportDisabled ? (
-              <div className="matrix-run-card__menu matrix-run-card__menu--right">
-                <button type="button" onClick={() => onExport('excel')}>
-                  <FileSpreadsheet size={14} />
-                  <span>Excel</span>
-                </button>
-                <button type="button" onClick={() => onExport('word')}>
-                  <FileText size={14} />
-                  <span>Word</span>
-                </button>
-              </div>
-            ) : null}
-          </div>
+          {WORKFLOW_STAGES.map((stage) => {
+            const Icon = stage.icon
+            const isActive = activeStage === stage.key
+            return (
+              <button
+                key={stage.key}
+                type="button"
+                className={`matrix-content-tab${isActive ? ' is-active' : ''}`}
+                role="tab"
+                aria-selected={isActive}
+                onClick={() => onStageChange?.(stage.key)}
+              >
+                <Icon size={15} />
+                <span>{stage.label}</span>
+              </button>
+            )
+          })}
         </div>
       </div>
 
-      {showTopicGroups ? (
-        <div className="matrix-topic-switcher">
-          <span className="matrix-topic-switcher__label">主题范围</span>
-          <div className="matrix-topic-switcher__chips">
+      {currentRun ? (
+        <div className="matrix-content-header__context">
+          <div className="matrix-content-header__primary">
+            <strong>{getRunDisplayTitle(currentRun)}</strong>
+            <span>{runMetaLine}</span>
+          </div>
+          <div className="matrix-content-header__actions">
+            {runProcessing ? <span className="matrix-content-header__passive">后台自动更新中</span> : null}
             <button
               type="button"
-              className={`matrix-topic-switcher__chip${activeTopicGroupId === 'all' ? ' is-active' : ''}`}
-              onClick={() => onChangeTopicGroup?.('all')}
+              className="matrix-soft-button matrix-soft-button--quiet"
+              onClick={onRefreshStatus}
+              disabled={busy || !currentRun?.id}
             >
-              全部论文
+              <RefreshCcw size={14} />
+              刷新状态
             </button>
-            {topicGroups.map((group, index) => (
+            {currentRun.status === 'failed' && !currentRun?.has_deleted_papers ? (
               <button
                 type="button"
-                key={group.group_id || `${group.label || 'group'}-${index}`}
-                className={`matrix-topic-switcher__chip${activeTopicGroupId === group.group_id ? ' is-active' : ''}`}
-                onClick={() => onChangeTopicGroup?.(group.group_id)}
+                className="matrix-primary-button matrix-primary-button--compact"
+                onClick={() => onRetryRun?.(currentRun.id)}
+                disabled={busy || !currentRun?.id}
               >
-                {group.label || `主题 ${index + 1}`}
+                <RotateCcw size={14} />
+                继续补齐
               </button>
-            ))}
+            ) : null}
+            <div className="matrix-action-popover">
+              <button
+                type="button"
+                className="matrix-run-rail__icon"
+                title="导出"
+                aria-expanded={exportMenuOpen}
+                disabled={exportDisabled}
+                onClick={onToggleExportMenu}
+              >
+                <Download />
+              </button>
+              {exportMenuOpen && !exportDisabled ? (
+                <div className="matrix-run-card__menu matrix-run-card__menu--right">
+                  <button type="button" onClick={() => onExport('excel')}>
+                    <FileSpreadsheet size={14} />
+                    <span>Excel</span>
+                  </button>
+                  <button type="button" onClick={() => onExport('word')}>
+                    <FileText size={14} />
+                    <span>Word</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
       ) : null}
@@ -1200,7 +1448,7 @@ function MatrixCreateDialog({
         <header className="matrix-dialog__header">
           <div>
             <strong>选择论文生成矩阵</strong>
-            <p>确认后会立即创建批次，缺少综述草稿来源卡片的论文会在后台继续补齐，你可以先去处理其他事。</p>
+            <p>确认后会立即创建批次。系统会先补齐单篇综述卡，再继续准备整篇总结和复现总结。</p>
           </div>
           <button type="button" className="matrix-run-rail__icon" onClick={onClose} disabled={busy} aria-label="关闭">
             <X />
@@ -1224,7 +1472,7 @@ function MatrixCreateDialog({
 
         <div className="matrix-dialog__meta">
           <span>已选 {selectedIds.size}/50 篇</span>
-          {missingCount ? <span>{missingCount} 篇还缺草稿来源，创建后会在后台继续补齐</span> : <span>所选论文都已具备综述草稿来源</span>}
+          {missingCount ? <span>{missingCount} 篇还缺单篇综述卡，创建后会在后台继续补齐</span> : <span>所选论文都已具备单篇综述卡，创建后会继续准备整篇总结和复现总结</span>}
         </div>
 
         <div className="matrix-paper-pick-list matrix-paper-pick-list--dialog">
@@ -1314,10 +1562,37 @@ function MatrixCellEditorDialog({ busy, editingCell, onClose, onSave }) {
   )
 }
 
-function ResearchMatrixTable({ run, onEditCell }) {
+function ResearchMatrixTable({ run, busy = false, onEditCell, onRefreshInsights }) {
   const rows = run?.matrix?.rows || []
   const fields = useMemo(() => normalizeFields(run?.matrix?.fields), [run])
   const [previewCell, setPreviewCell] = useState(null)
+  const headerScrollRef = useRef(null)
+  const tableScrollRef = useRef(null)
+  const populatedCellCount = rows.reduce(
+    (count, row) => count + fields.reduce((fieldCount, field) => fieldCount + (row[field.key] ? 1 : 0), 0),
+    0,
+  )
+  const totalCellCount = rows.length * fields.length
+  const staleCount = rows.filter((row) => row.is_stale).length
+  const tableWidth = Math.max(1280, 260 + (fields.length * 168))
+  const dimensionSummaries = fields.map((field) => ({
+    ...field,
+    readyCount: rows.reduce((count, row) => count + (row[field.key] ? 1 : 0), 0),
+  }))
+
+  function syncHeaderScroll(scrollLeft) {
+    if (headerScrollRef.current) {
+      headerScrollRef.current.scrollLeft = scrollLeft
+    }
+  }
+
+  function handleTableScroll(event) {
+    syncHeaderScroll(event.currentTarget.scrollLeft)
+  }
+
+  useEffect(() => {
+    syncHeaderScroll(tableScrollRef.current?.scrollLeft || 0)
+  }, [fields.length, rows.length])
 
   if (!run) {
     return (
@@ -1345,71 +1620,131 @@ function ResearchMatrixTable({ run, onEditCell }) {
 
   return (
     <section className="research-matrix-table">
-      <div className="research-matrix-table__toolbar">
-        <div className="research-matrix-table__summary">
-          <strong>矩阵表格</strong>
-          <span>{rows.length} 行 · {fields.length} 个字段</span>
-        </div>
-      </div>
-      <div className="research-matrix-table__scroll">
-        <table>
-          <thead>
-            <tr>
-              <th className="is-sticky">论文标题</th>
-              {fields.map((field) => <th key={field.key}>{field.label}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.paper_id || row.title}>
-                <td className="is-sticky">
-                  <strong title={row.title}>{row.title}</strong>
-                  <span>{row.is_stale ? '需刷新' : '已就绪'}</span>
-                </td>
-                {fields.map((field) => {
-                  const cellValue = row[field.key] || ''
-                  const previewKey = `${row.paper_id}-${field.key}`
-                  return (
-                    <td
-                      key={field.key}
-                      title={cellValue || '暂无内容'}
-                      onMouseEnter={(event) => showPreview(event, previewKey, field.label, cellValue)}
-                      onMouseMove={(event) => showPreview(event, previewKey, field.label, cellValue)}
-                      onMouseLeave={() => hidePreview(previewKey)}
-                    >
-                      <button
-                        type="button"
-                        className="matrix-cell-button"
-                        onClick={() => onEditCell({
-                          paperId: row.paper_id,
-                          paperTitle: row.title,
-                          fieldKey: field.key,
-                          label: field.label,
-                          scope: field.scope || 'paper',
-                          multiValue: field.multiValue,
-                          value: cellValue,
-                        })}
-                      >
-                        {cellValue ? (
-                          <span className="matrix-cell-compact">
-                            <span>{cellValue}</span>
-                            <PenSquare className="matrix-cell-button__icon" />
-                          </span>
-                        ) : (
-                          <span className="matrix-cell-empty">
-                            <em>点击补充</em>
-                            <PenSquare className="matrix-cell-button__icon" />
-                          </span>
-                        )}
-                      </button>
-                    </td>
-                  )
-                })}
-              </tr>
+      <div className="matrix-reading-flow">
+        <section className="matrix-reading-overview">
+          <div className="matrix-reading-overview__hero">
+            <div className="matrix-reading-overview__copy">
+              <span className="matrix-reading-overview__eyebrow">连续比较工作台</span>
+              <h3>沿着同一组比较维度向下阅读这批论文</h3>
+              <p>
+                先在上面看导读和维度概况，下面仍然是完整矩阵表格。
+                随着论文篇数增加，表格会继续往下展开，可以直接用滚轮向下查看。
+              </p>
+            </div>
+            <div className="matrix-reading-overview__stats" aria-label="当前批次概况">
+              <article className="matrix-reading-stat">
+                <strong>{rows.length}</strong>
+                <span>论文样本</span>
+              </article>
+              <article className="matrix-reading-stat">
+                <strong>{fields.length}</strong>
+                <span>比较维度</span>
+              </article>
+              <article className="matrix-reading-stat">
+                <strong>{totalCellCount ? `${populatedCellCount}/${totalCellCount}` : '--'}</strong>
+                <span>已补齐字段</span>
+              </article>
+              <article className="matrix-reading-stat">
+                <strong>{staleCount ? `${staleCount} 篇` : '已同步'}</strong>
+                <span>{staleCount ? '待刷新' : '状态'}</span>
+              </article>
+            </div>
+          </div>
+
+          <div className="matrix-reading-overview__dimensions" aria-label="比较维度索引">
+            {dimensionSummaries.map((field) => (
+              <article key={field.key} className="matrix-reading-dimension">
+                <strong>{field.label}</strong>
+                <span>{`${field.readyCount}/${rows.length || 0} 篇已补齐`}</span>
+              </article>
             ))}
-          </tbody>
-        </table>
+          </div>
+
+        </section>
+
+        <section className="research-matrix-table__panel">
+          <div className="research-matrix-table__toolbar">
+            <div className="research-matrix-table__summary">
+              <strong>矩阵表格</strong>
+              <span>{rows.length} 行 · {fields.length} 个字段</span>
+            </div>
+          </div>
+
+          <div className="research-matrix-table__sticky-head">
+            <div className="research-matrix-table__sticky-head-scroll" ref={headerScrollRef}>
+              <table className="research-matrix-table__head-table" style={{ width: `${tableWidth}px` }} aria-hidden="true">
+                <thead>
+                  <tr>
+                    <th className="is-sticky">论文标题</th>
+                    {fields.map((field) => <th key={field.key}>{field.label}</th>)}
+                  </tr>
+                </thead>
+              </table>
+            </div>
+          </div>
+
+          <div className="research-matrix-table__scroll" ref={tableScrollRef} onScroll={handleTableScroll}>
+            <table style={{ width: `${tableWidth}px` }}>
+              <thead className="research-matrix-table__ghost-head">
+                <tr>
+                  <th className="is-sticky">论文标题</th>
+                  {fields.map((field) => <th key={field.key}>{field.label}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.paper_id || row.title}>
+                    <td className="is-sticky">
+                      <strong title={row.title}>{row.title}</strong>
+                      <span>{row.is_stale ? '需刷新' : '已就绪'}</span>
+                    </td>
+                    {fields.map((field) => {
+                      const cellValue = row[field.key] || ''
+                      const previewKey = `${row.paper_id}-${field.key}`
+                      return (
+                        <td
+                          key={field.key}
+                          title={cellValue || '暂无内容'}
+                          onMouseEnter={(event) => showPreview(event, previewKey, field.label, cellValue)}
+                          onMouseMove={(event) => showPreview(event, previewKey, field.label, cellValue)}
+                          onMouseLeave={() => hidePreview(previewKey)}
+                        >
+                          <button
+                            type="button"
+                            className="matrix-cell-button"
+                            onClick={() => onEditCell({
+                              paperId: row.paper_id,
+                              paperTitle: row.title,
+                              fieldKey: field.key,
+                              label: field.label,
+                              scope: field.scope || 'paper',
+                              multiValue: field.multiValue,
+                              value: cellValue,
+                            })}
+                          >
+                            {cellValue ? (
+                              <span className="matrix-cell-compact">
+                                <span>{cellValue}</span>
+                                <PenSquare className="matrix-cell-button__icon" />
+                              </span>
+                            ) : (
+                              <span className="matrix-cell-empty">
+                                <em>点击补充</em>
+                                <PenSquare className="matrix-cell-button__icon" />
+                              </span>
+                            )}
+                          </button>
+                        </td>
+                      )
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
+
       {previewCell ? (
         <aside
           className="matrix-cell-preview"
@@ -1425,13 +1760,14 @@ function ResearchMatrixTable({ run, onEditCell }) {
   )
 }
 
-function MatrixDraftsView({ run, onCopySection, onCopyAll }) {
+function MatrixDraftsView({ run, onCopySection, onCopyAll, onRewriteSection, rewritingSectionKey = '', onJumpToEvidence }) {
   const drafts = getOrderedDraftSections(run)
   const draftStatus = run?.draft_status || 'idle'
   const total = run?.draft_total_count || 0
   const ready = run?.draft_ready_count || 0
   const failed = run?.draft_failed_count || 0
   const progress = run?.draft_progress_percent || 0
+  const evidenceCount = getRunEvidenceCount(run)
   const hasDraftContent = drafts.some(([, draft]) => (
     normalizeDraftParagraphs(draft).length
     || normalizeDraftItems(draft).length
@@ -1449,25 +1785,16 @@ function MatrixDraftsView({ run, onCopySection, onCopyAll }) {
 
   if ((draftStatus === 'running' && !hasDraftContent) || (draftStatus === 'idle' && !drafts.length)) {
     return (
-      <section className="matrix-drafts-view">
-        <div className="matrix-pending-view__hero matrix-drafts-view__hero">
-          <CircleProgress value={progress} status={draftStatus} label={`${ready}/${total || '--'}`} />
-          <div className="matrix-pending-view__summary">
-            <span className="matrix-pending-view__eyebrow">综述草稿任务流</span>
-            <h3>{run?.title || '当前批次'}</h3>
-            <p>{stageLabel}</p>
-            <small>
-              {total ? `${ready}/${total} 个来源卡片已就绪` : '正在准备来源卡片'}
-              {failed ? ` · ${failed} 个来源需要补齐` : ''}
-            </small>
-          </div>
-        </div>
+      <section className="matrix-drafts-view matrix-drafts-view--pending">
+        <DraftProgressPanel
+          run={run}
+          eyebrow="分节草稿"
+          title="正在准备分节草稿"
+          description={progress >= 100 ? '来源卡已齐，正在整理分节正文。' : '系统会用当前批次论文的 overview、review 和 reproduction 来源卡生成分节正文。'}
+        />
         {run?.draft_error_message ? (
           <div className="matrix-inline-message">{run.draft_error_message}</div>
         ) : null}
-        <div className="matrix-drafts-view__pending-copy">
-          <p>草稿只会使用当前批次论文的 `overview + review + reproduction`。如果来源还不够硬，完成后会明确标出“依据较弱，建议回查原文”。</p>
-        </div>
       </section>
     )
   }
@@ -1476,13 +1803,14 @@ function MatrixDraftsView({ run, onCopySection, onCopyAll }) {
     <section className="matrix-drafts-view">
       <div className="matrix-drafts-view__header">
         <div className="matrix-drafts-view__summary">
-          <span className="matrix-drafts-view__eyebrow">草稿视图</span>
-          <strong>证据链驱动的单列长文稿</strong>
+          <span className="matrix-drafts-view__eyebrow">草稿正文</span>
+          <strong>按当前批次自动整理的连续综述正文</strong>
+          <span className="matrix-drafts-view__support">{`基于当前批次 ${evidenceCount} 篇已补齐文献整理`}</span>
         </div>
         <div className="matrix-drafts-view__header-actions">
-          <span>{drafts.length} 节</span>
-          <button type="button" className="matrix-secondary-button" onClick={onCopyAll}>
-            复制整稿
+          <span>{`${drafts.length} 节内容`}</span>
+          <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={onCopyAll}>
+            复制正文
           </button>
         </div>
       </div>
@@ -1494,8 +1822,9 @@ function MatrixDraftsView({ run, onCopySection, onCopyAll }) {
         ))}
       </div>
       <div className="matrix-drafts-view__document">
-        {drafts.map(([key, draft]) => (
-          <article key={key} id={`draft-section-${key}`} className="matrix-drafts-view__section">
+        <div className="matrix-drafts-view__paper">
+          {drafts.map(([key, draft]) => (
+            <article key={key} id={`draft-section-${key}`} className="matrix-drafts-view__section">
             <div className="matrix-drafts-view__section-head">
               <div>
                 <h3>{draft.title}</h3>
@@ -1507,9 +1836,14 @@ function MatrixDraftsView({ run, onCopySection, onCopyAll }) {
                   <small className="matrix-drafts-view__meta">规则回退稿</small>
                 ) : null}
               </div>
-              <button type="button" className="matrix-soft-button" onClick={() => onCopySection(draft)}>
+              <div className="matrix-drafts-view__section-actions">
+                <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={() => onRewriteSection?.(key)} disabled={rewritingSectionKey === key}>
+                  {rewritingSectionKey === key ? '重写中' : '重写本节'}
+                </button>
+                <button type="button" className="matrix-soft-button matrix-soft-button--quiet matrix-drafts-view__copy-button" onClick={() => onCopySection(draft)}>
                 复制本节
-              </button>
+                </button>
+              </div>
             </div>
 
             {normalizeDraftItems(draft).length ? (
@@ -1520,37 +1854,172 @@ function MatrixDraftsView({ run, onCopySection, onCopyAll }) {
                     <div className="matrix-drafts-view__quote-meta">
                       <span>{item.paper_title || '未命名论文'} · {item.source_card_type || 'review'} · p.{item.page || '?'}</span>
                       {item.usage_note ? <em>{item.usage_note}</em> : null}
+                      {item.paper_id && item.page ? (
+                        <button
+                          type="button"
+                          className="matrix-link-button"
+                          onClick={() => onJumpToEvidence?.(item.paper_id, {
+                            page: item.page,
+                            quote: item.quote || '',
+                            start_char: item.start_char ?? null,
+                            end_char: item.end_char ?? null,
+                          })}
+                        >
+                          查看原文
+                        </button>
+                      ) : null}
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
               <div className="matrix-drafts-view__body">
-                {normalizeDraftParagraphs(draft).map((paragraph, index) => (
-                  <div key={`${key}-paragraph-${index}`} className={`matrix-drafts-view__paragraph${paragraph.confidence === 'weak' ? ' is-weak' : ''}`}>
-                    <p>{paragraph.text}</p>
-                    <div className="matrix-drafts-view__footnote">{formatCitationFootnotes(paragraph.citations || [])}</div>
-                    {paragraph.confidence === 'weak' ? (
-                      <div className="matrix-drafts-view__warning">依据较弱，建议回查原文。</div>
-                    ) : null}
-                  </div>
-                ))}
-                {!normalizeDraftParagraphs(draft).length && draft?.content ? (
-                  <div className="matrix-drafts-view__paragraph is-weak">
-                    <p>{draft.content}</p>
-                    <div className="matrix-drafts-view__footnote">{(draft.source_titles || []).join('；') || '当前缺少明确脚注'}</div>
-                  </div>
-                ) : null}
+                {normalizeDraftParagraphs(draft).map((paragraph, index) => {
+                  const readableParagraph = buildReadableDraftParagraph(paragraph)
+                  return (
+                    <div key={`${key}-paragraph-${index}`} className={`matrix-drafts-view__paragraph${paragraph.confidence === 'weak' ? ' is-weak' : ''}`}>
+                      <p>{readableParagraph.text}</p>
+                      {readableParagraph.liftedNotes.length ? (
+                        <div className="matrix-drafts-view__aside">
+                          补充说明：{readableParagraph.liftedNotes.join('；')}
+                        </div>
+                      ) : null}
+                      <DraftCitationList citations={paragraph.citations || []} onJumpToEvidence={onJumpToEvidence} />
+                      {paragraph.confidence === 'weak' ? (
+                        <div className="matrix-drafts-view__warning">依据较弱，建议回查原文。</div>
+                      ) : null}
+                    </div>
+                  )
+                })}
+                {!normalizeDraftParagraphs(draft).length && draft?.content ? (() => {
+                  const readableParagraph = buildReadableDraftParagraph({ text: draft.content })
+                  return (
+                    <div className="matrix-drafts-view__paragraph is-weak">
+                      <p>{readableParagraph.text}</p>
+                      {readableParagraph.liftedNotes.length ? (
+                        <div className="matrix-drafts-view__aside">
+                          补充说明：{readableParagraph.liftedNotes.join('；')}
+                        </div>
+                      ) : null}
+                      <div className="matrix-drafts-view__footnote">{(draft.source_titles || []).join('；') || '当前缺少明确脚注'}</div>
+                    </div>
+                  )
+                })() : null}
               </div>
             )}
-          </article>
-        ))}
+            </article>
+          ))}
+        </div>
       </div>
     </section>
   )
 }
 
-function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', onCopyAll }) {
+function IntegratedDraftView({ run, onCopyAll, onRewriteSection, rewritingSectionKey = '', onJumpToEvidence }) {
+  const drafts = run?.drafts || {}
+  const finalDraft = drafts.final_integrated_review || null
+  const draftStatus = run?.draft_status || 'idle'
+  const quoteItems = normalizeDraftItems(drafts.quotable_sentences)
+  const paragraphs = normalizeDraftParagraphs(finalDraft)
+  const hasContent = Boolean(finalDraft?.copy_ready || paragraphs.length || finalDraft?.content)
+  const evidenceCount = getRunEvidenceCount(run)
+
+  if (!run) {
+    return (
+      <section className="matrix-drafts-empty">
+        <h3>初稿整合</h3>
+        <p>先选择一条历史批次，这里会展示整合后的综述初稿。</p>
+      </section>
+    )
+  }
+
+  if (!hasContent) {
+    return (
+      <section className="matrix-drafts-view matrix-drafts-view--pending matrix-integrated-view">
+        <DraftProgressPanel
+          run={run}
+          eyebrow="初稿整合"
+          title={draftStatus === 'running' ? '正在准备整合初稿' : '等待分节草稿完成'}
+          description={Number(run?.draft_progress_percent || 0) >= 100 ? '来源卡已齐，正在整理连续综述初稿。' : '来源卡和分节草稿齐后，这里会展示连续综述初稿。'}
+        />
+      </section>
+    )
+  }
+
+  return (
+    <section className="matrix-drafts-view matrix-integrated-view">
+      <div className="matrix-drafts-view__header">
+        <div className="matrix-drafts-view__summary">
+          <span className="matrix-drafts-view__eyebrow">整合初稿</span>
+          <strong>{finalDraft?.title || '综述初稿'}</strong>
+          <span className="matrix-drafts-view__support">{`基于当前批次 ${evidenceCount} 篇文献的分节草稿整合`}</span>
+        </div>
+        <div className="matrix-drafts-view__header-actions">
+          <button
+            type="button"
+            className="matrix-soft-button matrix-soft-button--quiet"
+            onClick={() => onRewriteSection?.('final_integrated_review')}
+            disabled={rewritingSectionKey === 'final_integrated_review'}
+          >
+            {rewritingSectionKey === 'final_integrated_review' ? '重整中' : '重新整合'}
+          </button>
+          <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={onCopyAll}>
+            复制初稿
+          </button>
+        </div>
+      </div>
+
+      <div className="matrix-integrated-view__layout">
+        <article className="matrix-drafts-view__paper matrix-integrated-view__paper">
+          <div className="matrix-drafts-view__body">
+            {paragraphs.map((paragraph, index) => {
+              const readableParagraph = buildReadableDraftParagraph(paragraph)
+              return (
+                <div key={`integrated-paragraph-${index}`} className={`matrix-drafts-view__paragraph${paragraph.confidence === 'weak' ? ' is-weak' : ''}`}>
+                  <p>{readableParagraph.text}</p>
+                  {readableParagraph.liftedNotes.length ? (
+                    <div className="matrix-drafts-view__aside">
+                      补充说明：{readableParagraph.liftedNotes.join('；')}
+                    </div>
+                  ) : null}
+                  <DraftCitationList citations={paragraph.citations || []} onJumpToEvidence={onJumpToEvidence} />
+                  {paragraph.confidence === 'weak' ? (
+                    <div className="matrix-drafts-view__warning">依据较弱，建议回查原文。</div>
+                  ) : null}
+                </div>
+              )
+            })}
+          </div>
+        </article>
+
+        {quoteItems.length ? (
+          <aside className="matrix-integrated-view__sources">
+            <span>可回查原句</span>
+            {quoteItems.slice(0, 8).map((item, index) => (
+              <button
+                key={`${item.paper_title || 'quote'}-${index}`}
+                type="button"
+                className="matrix-integrated-view__source"
+                onClick={() => item.paper_id && item.page ? onJumpToEvidence?.(item.paper_id, {
+                  page: item.page,
+                  quote: item.quote || '',
+                  start_char: item.start_char ?? null,
+                  end_char: item.end_char ?? null,
+                }) : null}
+                disabled={!item.paper_id || !item.page}
+              >
+                <strong>{item.paper_title || '未命名论文'} · p.{item.page || '?'}</strong>
+                <small>{item.quote || item.usage_note || '查看来源'}</small>
+              </button>
+            ))}
+          </aside>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
+function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', onCopyAll, onSaveOutline, saving = false }) {
   const outline = run?.drafts?.review_outline || null
   const topicDiagnostic = run?.drafts?.topic_diagnostic || null
   const sections = Array.isArray(outline?.outline_sections) ? outline.outline_sections : []
@@ -1561,11 +2030,20 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
   const showGroupingControls = topicGroups.length > 1
   const isDiagnostic = Boolean(outline?.diagnostic && groups.length > 1)
   const activeGroupLabel = outline?.active_group_label || ''
+  const evidenceCount = getRunEvidenceCount(run)
   const outlineTitle = activeGroupLabel ? `${activeGroupLabel} · 综述大纲` : '当前批次综述大纲'
   const briefTitle = isDiagnostic ? '当前批次建议先按主题分开整理，再分别写小综述。' : '当前批次主题比较集中，可以直接沿着下面的大纲继续写。'
   const briefMeta = isDiagnostic
     ? `已识别 ${groups.length} 个主题组，建议先切换到单个主题组，再查看对应矩阵和草稿。`
     : '先看这一页的章节目标和要点，再进入综述草稿会更清楚。'
+  const [draftSections, setDraftSections] = useState([])
+
+  useEffect(() => {
+    setDraftSections(sections.map((section) => ({
+      ...section,
+      points: Array.isArray(section.points) ? section.points.join('\n') : '',
+    })))
+  }, [outline?.active_group_label, sections])
 
   if (!run) {
     return (
@@ -1578,10 +2056,13 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
 
   if (!outline && !topicDiagnostic) {
     return (
-      <section className="matrix-drafts-view">
-        <div className="matrix-drafts-view__pending-copy">
-          <p>大纲正在准备中，完成后这里会先展示主题分组和章节结构，再进入综述草稿。</p>
-        </div>
+      <section className="matrix-drafts-view matrix-drafts-view--pending">
+        <DraftProgressPanel
+          run={run}
+          eyebrow="综述大纲"
+          title="正在准备综述大纲"
+          description={Number(run?.draft_progress_percent || 0) >= 100 ? '来源卡已齐，正在整理主题分组和章节结构。' : '来源卡补齐后会先生成主题分组和章节结构，再进入分节草稿。'}
+        />
       </section>
     )
   }
@@ -1592,10 +2073,16 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
         <div className="matrix-drafts-view__summary">
           <span className="matrix-drafts-view__eyebrow">提纲视图</span>
           <strong>{isDiagnostic ? '当前批次建议先分组，再分别写小综述' : outlineTitle}</strong>
+          <span className="matrix-drafts-view__support">{`基于当前批次 ${evidenceCount} 篇已补齐文献自动归纳`}</span>
         </div>
         <div className="matrix-drafts-view__header-actions">
-          <span>{sections.length || 0} 节</span>
-          <button type="button" className="matrix-secondary-button" onClick={onCopyAll}>
+          <span>{`${sections.length || 0} 节结构`}</span>
+          {draftSections.length ? (
+            <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={() => onSaveOutline?.(draftSections)} disabled={saving}>
+              {saving ? '保存中' : '保存大纲'}
+            </button>
+          ) : null}
+          <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={onCopyAll}>
             复制大纲
           </button>
         </div>
@@ -1629,11 +2116,11 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
         </section>
 
         {isDiagnostic ? (
-          <section className="matrix-outline-groups-shell">
-            <div className="matrix-outline-groups-shell__head">
+          <details className="matrix-outline-groups-shell">
+            <summary className="matrix-outline-groups-shell__head">
               <strong>主题分组建议</strong>
-              <span>这块只在混合主题批次出现</span>
-            </div>
+              <span>展开查看混合主题的拆分方向</span>
+            </summary>
             <div className="matrix-outline-groups">
               {groups.map((group, index) => (
                 <section key={`${group.label || 'group'}-${index}`} className="matrix-outline-group">
@@ -1645,7 +2132,7 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
                 </section>
               ))}
             </div>
-          </section>
+          </details>
         ) : null}
 
         {(consensusPoints.length || divergencePoints.length || gapPoints.length) ? (
@@ -1677,32 +2164,52 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
           </div>
         ) : null}
 
-        {sections.length ? (
+        {draftSections.length ? (
           <div className="matrix-outline-document">
-            {sections.map((section, index) => (
+            {draftSections.map((section, index) => (
               <article key={section.key || index} className="matrix-outline-section">
                 <div className="matrix-outline-section__head">
                   <div>
                     <span className="matrix-outline-section__index">{`${index + 1}`.padStart(2, '0')}</span>
                     <div className="matrix-outline-section__heading">
-                      <h3>{section.title || `章节 ${index + 1}`}</h3>
-                      <span>{section.goal || '章节目标'}</span>
+                      <input
+                        className="matrix-outline-edit__title"
+                        value={section.title || ''}
+                        onChange={(event) => {
+                          const value = event.target.value
+                          setDraftSections((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, title: value } : item))
+                        }}
+                        placeholder={`章节 ${index + 1}`}
+                      />
+                      <input
+                        className="matrix-outline-edit__goal"
+                        value={section.goal || ''}
+                        onChange={(event) => {
+                          const value = event.target.value
+                          setDraftSections((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, goal: value } : item))
+                        }}
+                        placeholder="章节目标"
+                      />
                     </div>
                   </div>
                 </div>
 
                 <div className="matrix-outline-card">
-                  {Array.isArray(section.points) && section.points.length ? (
-                    <div className="matrix-outline-card__block">
+                  <div className="matrix-outline-card__block">
                       <div className="matrix-outline-card__label">
                         <Network size={15} />
                         <span>本节要点</span>
                       </div>
-                      <ul className="matrix-outline-card__list">
-                        {section.points.map((point, pointIndex) => <li key={`${section.key}-point-${pointIndex}`}>{point}</li>)}
-                      </ul>
-                    </div>
-                  ) : null}
+                      <textarea
+                        className="matrix-outline-edit__points"
+                        value={section.points || ''}
+                        onChange={(event) => {
+                          const value = event.target.value
+                          setDraftSections((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, points: value } : item))
+                        }}
+                        placeholder="每行一个要点"
+                      />
+                  </div>
 
                   {section.summary ? (
                     <div className="matrix-outline-card__block matrix-outline-card__block--summary">
@@ -1710,7 +2217,15 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
                         <ScrollText size={15} />
                         <span>写作目的</span>
                       </div>
-                      <p className="matrix-outline-card__summary">{section.summary}</p>
+                      <textarea
+                        className="matrix-outline-edit__summary"
+                        value={section.summary || ''}
+                        onChange={(event) => {
+                          const value = event.target.value
+                          setDraftSections((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, summary: value } : item))
+                        }}
+                        placeholder="写作目的"
+                      />
                     </div>
                   ) : null}
 
@@ -1735,37 +2250,118 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
   )
 }
 
+function MatrixInsightsPanel({ busy, run, onRefreshInsights }) {
+  const insights = run?.insights || {}
+  const status = insights.status || 'idle'
+  const consensus = Array.isArray(insights.consensus) ? insights.consensus : []
+  const differences = Array.isArray(insights.differences) ? insights.differences : []
+  const gaps = Array.isArray(insights.gaps) ? insights.gaps : []
+  const hasContent = consensus.length || differences.length || gaps.length
+
+  if (!run || (!hasContent && status === 'idle')) return null
+
+  return (
+    <section className="matrix-insights-panel">
+      <div className="matrix-insights-panel__header">
+        <div className="matrix-insights-panel__title">
+          <strong>比较导读</strong>
+          <span>
+            {status === 'running'
+              ? '正在汇总这批论文的共识、分歧与空白'
+              : status === 'stale'
+                ? '导读已过期，建议基于最新矩阵重新整理'
+                : status === 'failed'
+                  ? '导读生成失败'
+                  : insights.updated_at
+                    ? `更新于 ${formatDate(insights.updated_at)}`
+                    : '当前还没有导读摘要'}
+          </span>
+        </div>
+        {(status === 'stale' || status === 'failed') ? (
+          <button
+            type="button"
+            className={`matrix-soft-button matrix-soft-button--quiet${status === 'failed' ? ' is-warn' : ''}`}
+            onClick={onRefreshInsights}
+            disabled={busy || !run?.id}
+          >
+            <RefreshCcw size={14} />
+            重新整理
+          </button>
+        ) : null}
+      </div>
+
+      {status === 'running' ? (
+        <div className="matrix-inline-message is-success">系统正在后台归纳比较导读，新的共识、分歧和研究空白会自动补到这里。</div>
+      ) : null}
+      {status === 'stale' ? (
+        <div className="matrix-inline-message">当前矩阵已经更新过，导读还是旧版本。建议刷新一次，让上面的阅读导向和下面的论文内容保持一致。</div>
+      ) : null}
+      {status === 'failed' ? (
+        <div className="matrix-inline-message">{insights.error_message || '导读整理失败，请稍后重试。'}</div>
+      ) : null}
+
+      {hasContent ? (
+        <div className="matrix-insights-panel__stream">
+          {consensus.length ? (
+            <article className="matrix-insight-line">
+              <h3>当前共识</h3>
+              <div className="matrix-insight-line__body">
+                {consensus.map((item, index) => <p key={`consensus-${index}`}>{item}</p>)}
+              </div>
+            </article>
+          ) : null}
+          {differences.length ? (
+            <article className="matrix-insight-line">
+              <h3>主要分歧</h3>
+              <div className="matrix-insight-line__body">
+                {differences.map((item, index) => <p key={`differences-${index}`}>{item}</p>)}
+              </div>
+            </article>
+          ) : null}
+          {gaps.length ? (
+            <article className="matrix-insight-line">
+              <h3>研究空白</h3>
+              <div className="matrix-insight-line__body">
+                {gaps.map((item, index) => <p key={`gaps-${index}`}>{item}</p>)}
+              </div>
+            </article>
+          ) : null}
+        </div>
+      ) : status !== 'running' ? (
+        <div className="matrix-insights-panel__empty">向下逐篇补充并刷新后，这里会自动汇总当前批次的共识、分歧与研究空白。</div>
+      ) : null}
+    </section>
+  )
+}
+
+
+
 function PendingRunView({ busy, run, onOpenRunPapers, onRetryRun, onRefreshStatus }) {
-  const draftStatus = run?.draft_status || 'idle'
-  const draftStageLabel = run?.draft_stage_label || '综述草稿处理中'
-  const draftTotal = run?.draft_total_count || 0
-  const draftReady = run?.draft_ready_count || 0
-  const draftFailed = run?.draft_failed_count || 0
-  const draftProgress = run?.draft_progress_percent || 0
   const matrixStageLabel = run?.stage_label || RUN_STATUS_LABELS[run?.status] || run?.status || '处理中'
   const matrixTotal = run?.total_count || run?.paper_count || 0
   const matrixReady = run?.ready_count || 0
   const matrixFailed = run?.failed_count || 0
+  const stability = getRunStabilityStatus(run)
+
 
   return (
     <section className="matrix-pending-view">
       <div className="matrix-pending-view__hero">
-        <CircleProgress value={draftProgress} status={draftStatus} label={`${draftReady}/${draftTotal || '--'}`} />
         <div className="matrix-pending-view__summary">
           <span className="matrix-pending-view__eyebrow">处理中批次</span>
           <h3>{run?.title || '当前批次'}</h3>
-          <p>{draftStageLabel}</p>
+          <p>{stability.label}</p>
           <small>
-            {draftTotal ? `草稿来源 ${draftReady}/${draftTotal}` : '正在准备草稿来源'}
-            {draftFailed ? ` · ${draftFailed} 个来源需要继续补齐` : ''}
+            {matrixTotal ? `矩阵综述卡片 ${matrixReady}/${matrixTotal}` : '正在准备矩阵综述卡片'}
+            {matrixFailed ? ` · ${matrixFailed} 篇需要继续补齐` : ''}
           </small>
         </div>
       </div>
 
       {run?.has_deleted_papers && run?.deleted_paper_message ? (
         <div className="matrix-inline-message">{run.deleted_paper_message}</div>
-      ) : (run?.draft_error_message || run?.error_message) ? (
-        <div className="matrix-inline-message">{run?.draft_error_message || run?.error_message}</div>
+      ) : run?.error_message ? (
+        <div className="matrix-inline-message">{run?.error_message}</div>
       ) : null}
 
       <div className="matrix-pending-view__summary">
@@ -1778,19 +2374,22 @@ function PendingRunView({ busy, run, onOpenRunPapers, onRetryRun, onRefreshStatu
       </div>
 
       <div className="matrix-pending-view__actions">
-        <button type="button" className="matrix-secondary-button" onClick={onRefreshStatus} disabled={busy}>
-          <RefreshCcw size={14} />
-          刷新并补齐
-        </button>
-        <button type="button" className="matrix-secondary-button" onClick={() => onOpenRunPapers(run.id)} disabled={busy}>
+        <span className="matrix-pending-view__passive">后台会自动更新这批内容，你可以先去看别的批次或文献。</span>
+        <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={() => onOpenRunPapers(run.id)} disabled={busy}>
           <Eye size={14} />
           查看论文状态
         </button>
-        {(run?.status === 'failed' || run?.draft_status === 'failed') && !run?.has_deleted_papers ? (
-          <button type="button" className="matrix-primary-button" onClick={() => onRetryRun(run.id)} disabled={busy}>
-            <RotateCcw size={14} />
-            继续补齐
-          </button>
+        {run?.status === 'failed' && !run?.has_deleted_papers ? (
+          <>
+            <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={onRefreshStatus} disabled={busy}>
+              <RefreshCcw size={14} />
+              立即刷新
+            </button>
+            <button type="button" className="matrix-primary-button" onClick={() => onRetryRun(run.id)} disabled={busy}>
+              <RotateCcw size={14} />
+              继续补齐
+            </button>
+          </>
         ) : null}
       </div>
 
@@ -1813,6 +2412,7 @@ function PendingRunView({ busy, run, onOpenRunPapers, onRetryRun, onRefreshStatu
 
 export function ResearchMatrixPage({
   folders = [],
+  onJumpToPaperEvidence,
   recentPapers = [],
   uncategorizedFolderId,
 }) {
@@ -1831,10 +2431,13 @@ export function ResearchMatrixPage({
   const [runMenuOpenId, setRunMenuOpenId] = useState(null)
   const [reviewStatuses, setReviewStatuses] = useState(new Map())
   const [showRunPapers, setShowRunPapers] = useState(false)
-  const [activeTab, setActiveTab] = useState('matrix')
   const [activeTopicGroupId, setActiveTopicGroupId] = useState('all')
   const [groupingMode, setGroupingMode] = useState('topic_first')
+  const [activeStage, setActiveStage] = useState('matrix')
   const [editingCell, setEditingCell] = useState(null)
+  const [savingOutline, setSavingOutline] = useState(false)
+  const [rewritingSectionKey, setRewritingSectionKey] = useState('')
+  const [preparingDraftSources, setPreparingDraftSources] = useState(false)
   const [editingRunId, setEditingRunId] = useState(null)
   const [editingRunTitle, setEditingRunTitle] = useState('')
 
@@ -1847,12 +2450,28 @@ export function ResearchMatrixPage({
     () => runs.some((run) => RUNNING_STATUSES.has(run.status) || run?.draft_status === 'running') || RUNNING_STATUSES.has(currentRun?.status) || currentRun?.draft_status === 'running',
     [currentRun?.draft_status, currentRun?.status, runs],
   )
-
-  const topicGroups = useMemo(() => getTopicGroups(currentRun), [currentRun])
-  const displayRun = useMemo(
-    () => filterRunByTopicGroup(currentRun, activeTopicGroupId),
-    [activeTopicGroupId, currentRun],
+  const hasPendingInsights = useMemo(
+    () => {
+      const currentStatus = currentRun?.insights?.status
+      if (currentStatus === 'running') return true
+      return runs.some((run) => run?.insights?.status === 'running')
+    },
+    [currentRun?.insights?.status, runs],
   )
+
+  const displayRun = currentRun
+
+  function applyRunDetail(detail) {
+    if (!detail?.id) return
+    setCurrentRun(detail)
+    setRuns((previous) => {
+      const exists = previous.some((run) => run.id === detail.id)
+      const nextRuns = exists
+        ? previous.map((run) => (run.id === detail.id ? { ...run, ...detail } : run))
+        : [detail, ...previous]
+      return nextRuns
+    })
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -1865,9 +2484,10 @@ export function ResearchMatrixPage({
         if (nextRuns[0]) {
           const detail = await fetchResearchMatrixRun(nextRuns[0].id)
           if (!cancelled) {
-            setCurrentRun(detail)
+            applyRunDetail(detail)
             setActiveTopicGroupId('all')
-            setGroupingMode(detail?.drafts?.review_outline?.grouping_mode || detail?.grouping_mode || 'topic_first')
+            setGroupingMode(getInitialGroupingMode(detail))
+            setActiveStage('matrix')
             if (detail?.has_deleted_papers && detail?.deleted_paper_message) {
               setNotice({ type: 'error', text: detail.deleted_paper_message })
             }
@@ -1890,7 +2510,7 @@ export function ResearchMatrixPage({
       const next = new Map()
       await Promise.all(recentPapers.slice(0, 120).map(async (paper) => {
         const paperStatuses = {}
-        await Promise.all(DRAFT_REQUIRED_TYPES.map(async (summaryType) => {
+        await Promise.all(MATRIX_REQUIRED_TYPES.map(async (summaryType) => {
           try {
             const status = await fetchPaperSummaryStatus(paper.id, summaryType)
             paperStatuses[summaryType] = status
@@ -1915,6 +2535,14 @@ export function ResearchMatrixPage({
   }, [recentPapers, showCreateDialog])
 
   useEffect(() => {
+    if (!displayRun?.id) return
+    if (!['outline', 'drafts', 'integrated'].includes(activeStage)) return
+    if (displayRun?.draft_status === 'completed') return
+    if (preparingDraftSources) return
+    handlePrepareDraftSources()
+  }, [activeStage, displayRun?.draft_status, displayRun?.id])
+
+  useEffect(() => {
     const handler = () => {
       setExportMenuOpen(false)
       setRunMenuOpenId(null)
@@ -1926,32 +2554,35 @@ export function ResearchMatrixPage({
   }, [])
 
   useEffect(() => {
-    if (!hasPendingRuns) return undefined
+    if (!hasPendingRuns && !hasPendingInsights) return undefined
     let cancelled = false
     const intervalId = window.setInterval(async () => {
       try {
-        const runPayload = await fetchResearchMatrixRuns()
+        const [runPayload, detail] = await Promise.all([
+          fetchResearchMatrixRuns(),
+          currentRun?.id ? fetchResearchMatrixRun(currentRun.id) : Promise.resolve(null),
+        ])
         if (cancelled) return
-        const nextRuns = runPayload?.runs || []
+        const detailMap = new Map()
+        if (detail?.id) detailMap.set(detail.id, detail)
+        const nextRuns = (runPayload?.runs || []).map((run) => detailMap.get(run.id) || run)
         setRuns(nextRuns)
-        if (currentRun?.id && (RUNNING_STATUSES.has(currentRun.status) || currentRun?.draft_status === 'running')) {
-          const detail = await fetchResearchMatrixRun(currentRun.id)
-          if (!cancelled) {
-            setCurrentRun(detail)
-            if (detail.status === 'completed' && detail.draft_status === 'completed') {
-              setNotice({ type: 'success', text: `批次“${detail.title}”已完成，可以直接查看矩阵了。` })
-            }
+        if (detail?.id && !cancelled) {
+          applyRunDetail(detail)
+          setGroupingMode((current) => getInitialGroupingMode(detail, current))
+          if (detail.status === 'completed') {
+            setNotice({ type: 'success', text: `批次“${getRunDisplayTitle(detail)}”已完成，可以继续查看矩阵和综述工作流。` })
           }
         }
       } catch {
         // keep silent during polling
       }
-    }, 2000)
+    }, 1200)
     return () => {
       cancelled = true
       window.clearInterval(intervalId)
     }
-  }, [currentRun?.id, currentRun?.status, hasPendingRuns])
+  }, [currentRun?.id, currentRun?.insights?.status, currentRun?.status, hasPendingInsights, hasPendingRuns])
 
   function stopMenuBubble(event) {
     event.stopPropagation()
@@ -1986,8 +2617,9 @@ export function ResearchMatrixPage({
     setRuns(nextRuns)
     if (selectFirst && nextRuns[0]) {
       const detail = await fetchResearchMatrixRun(nextRuns[0].id)
-      setCurrentRun(detail)
+      applyRunDetail(detail)
       setActiveTopicGroupId('all')
+      setGroupingMode(getInitialGroupingMode(detail))
     }
     if (selectFirst && !nextRuns.length) {
       setCurrentRun(null)
@@ -2000,8 +2632,9 @@ export function ResearchMatrixPage({
     setNotice(null)
     try {
       const detail = currentRun?.id === runId ? currentRun : await fetchResearchMatrixRun(runId)
-      setCurrentRun(detail)
+      applyRunDetail(detail)
       setActiveTopicGroupId('all')
+      setGroupingMode(getInitialGroupingMode(detail))
       setShowRunPapers(true)
       setRunMenuOpenId(null)
     } catch (err) {
@@ -2046,36 +2679,37 @@ export function ResearchMatrixPage({
     })
   }
 
-  async function handleCreateRun() {
+async function handleCreateRunInBackground() {
     if (selectedIds.size < 1 || creatingRun) return
     const paperIds = Array.from(selectedIds)
-    const nextGroupingMode = groupingMode
+    const preserveCurrentView = Boolean(currentRun?.id)
     setCreatingRun(true)
     setNotice(null)
     setShowCreateDialog(false)
     resetCreateSelection()
-    setNotice({ type: 'success', text: '已加入后台生成，你可以继续处理别的事。' })
+    setNotice({ type: 'success', text: '批次已加入后台生成，你可以继续处理其他内容。' })
     try {
       const detail = await createResearchMatrixRun({
         title: '',
         paper_ids: paperIds,
         include_reproduction: true,
-        grouping_mode: nextGroupingMode,
       })
-      setCurrentRun(detail)
-      setActiveTopicGroupId('all')
-      setGroupingMode(detail?.drafts?.review_outline?.grouping_mode || detail?.grouping_mode || nextGroupingMode)
+      if (!preserveCurrentView) {
+        applyRunDetail(detail)
+        setActiveTopicGroupId('all')
+        setActiveStage('matrix')
+      }
       setRuns((previous) => [detail, ...previous.filter((run) => run.id !== detail.id)])
       loadRuns(false).catch(() => {})
       setNotice({
         type: 'success',
         text: detail.status === 'completed'
-          ? '当前批次已直接生成完成。'
-          : '批次已加入后台生成，你可以继续查看别的文献或批次。',
+          ? '新批次已生成完成。'
+          : '新批次已加入后台生成，你可以继续处理其他内容。',
       })
     } catch (err) {
       setShowCreateDialog(true)
-      setNotice({ type: 'error', text: err.message || '生成矩阵失败' })
+      setNotice({ type: 'error', text: err.message || '生成新批次失败' })
     } finally {
       setCreatingRun(false)
     }
@@ -2089,9 +2723,9 @@ export function ResearchMatrixPage({
     setEditingRunId(null)
     try {
       const detail = await fetchResearchMatrixRun(runId)
-      setCurrentRun(detail)
+      applyRunDetail(detail)
       setActiveTopicGroupId('all')
-      setGroupingMode(detail?.drafts?.review_outline?.grouping_mode || detail?.grouping_mode || 'topic_first')
+      setActiveStage('matrix')
       if (detail?.has_deleted_papers && detail?.deleted_paper_message) {
         setNotice({ type: 'error', text: detail.deleted_paper_message })
       }
@@ -2109,27 +2743,16 @@ export function ResearchMatrixPage({
     try {
       const latestRun = await fetchResearchMatrixRun(currentRun.id)
       if (latestRun?.has_deleted_papers) {
-        setCurrentRun(latestRun)
+        applyRunDetail(latestRun)
         setNotice({ type: 'error', text: latestRun.deleted_paper_message || '当前批次引用的原论文已删除，请重新建批次。' })
         return
       }
-      const shouldRecheck = (
-        latestRun?.status !== 'completed'
-        || latestRun?.draft_status !== 'completed'
-        || latestRun?.missing_count
-        || latestRun?.draft_failed_count
-        || ((latestRun?.draft_ready_count || 0) < (latestRun?.draft_total_count || 0))
-      )
-      const detail = shouldRecheck
-        ? await retryPendingResearchMatrixRun(currentRun.id)
-        : latestRun
-      setCurrentRun(detail)
-      setGroupingMode(detail?.drafts?.review_outline?.grouping_mode || detail?.grouping_mode || groupingMode)
+      applyRunDetail(latestRun)
+      if (latestRun.status !== 'completed') {
+        setActiveStage('matrix')
+      }
       await loadRuns(false)
-      setNotice({
-        type: 'success',
-        text: shouldRecheck ? '已刷新当前批次，并重新检查缺失卡片。' : '当前批次状态已刷新。',
-      })
+      setNotice({ type: 'success', text: '当前批次状态已刷新。' })
     } catch (err) {
       setNotice({ type: 'error', text: err.message || '刷新当前批次失败' })
     } finally {
@@ -2137,7 +2760,7 @@ export function ResearchMatrixPage({
     }
   }
 
-  async function handleRefreshRun(runId) {
+  async function handleRefreshRunInBackground(runId) {
     const targetRunId = runId || currentRun?.id
     if (!targetRunId) return
     setBusy(true)
@@ -2146,44 +2769,45 @@ export function ResearchMatrixPage({
     try {
       const latestRun = await fetchResearchMatrixRun(targetRunId)
       if (latestRun?.has_deleted_papers) {
-        setCurrentRun(latestRun)
-        setNotice({ type: 'error', text: latestRun.deleted_paper_message || '当前批次引用的原论文已删除，请重新建批次。' })
+        if (currentRun?.id === targetRunId) {
+          applyRunDetail(latestRun)
+        }
+        setNotice({ type: 'error', text: latestRun.deleted_paper_message || '当前批次引用的原论文已删除，请重新创建批次。' })
         return
       }
-      const currentTitle = currentRun?.id === targetRunId
+      const baseTitle = currentRun?.id === targetRunId
         ? currentRun.title
         : latestRun?.title || runs.find((run) => run.id === targetRunId)?.title
       const detail = await refreshResearchMatrixRun(targetRunId, {
-        title: `${getRunDisplayTitle({ title: currentTitle })} - 新版本`,
+        title: `${normalizeVersionBaseTitle(baseTitle)} - 新版本`,
         grouping_mode: groupingMode,
       })
-      setCurrentRun(detail)
-      await loadRuns(false)
+      applyRunDetail(detail)
+      setActiveTopicGroupId('all')
+      setActiveStage('matrix')
+      loadRuns(false).catch(() => {})
       setNotice({
         type: 'success',
         text: detail.status === 'completed'
-          ? '已基于当前来源生成一个新版本批次。'
-          : '已创建新版本批次，后台会继续补齐矩阵和草稿。',
+          ? '已生成新的批次版本。'
+          : '已创建新的后台批次，你可以继续处理其他内容。',
       })
     } catch (err) {
-      setNotice({ type: 'error', text: err.message || '刷新批次失败' })
+      setNotice({ type: 'error', text: err.message || '创建新版本批次失败' })
     } finally {
       setBusy(false)
     }
   }
 
-  async function handleChangeGroupingMode(nextMode) {
-    if (!currentRun || busy || groupingMode === nextMode) return
+  function handleGenerateVersion() {
+    if (!currentRun?.id) return
+    handleRefreshRunInBackground(currentRun.id)
+  }
+
+  function handleChangeGroupingMode(nextMode) {
+    if (!currentRun || nextMode === groupingMode) return
     setGroupingMode(nextMode)
     setActiveTopicGroupId('all')
-    setNotice(null)
-    const detail = buildGroupedRunView(currentRun, nextMode)
-    setCurrentRun(detail)
-    setRuns((previous) => previous.map((run) => (run.id === currentRun.id ? { ...run, grouping_mode: nextMode } : run)))
-    setNotice({
-      type: 'success',
-      text: nextMode === 'method_first' ? '已切换到方法优先视图。' : '已切换到主题优先视图。',
-    })
   }
 
   async function handleRetryRun(runId) {
@@ -2201,6 +2825,7 @@ export function ResearchMatrixPage({
       const detail = await retryPendingResearchMatrixRun(runId)
       if (currentRun?.id === runId) {
         setCurrentRun(detail)
+        setActiveStage('matrix')
       }
       await loadRuns(false)
       setNotice({ type: 'success', text: '已重新加入后台任务，继续补齐当前批次。' })
@@ -2315,9 +2940,154 @@ export function ResearchMatrixPage({
     exportRunWord(displayRun)
   }
 
+  async function handleRefreshInsights() {
+    if (!currentRun?.id) return
+    setBusy(true)
+    setNotice(null)
+    try {
+      const detail = await refreshResearchMatrixInsights(currentRun.id)
+      setCurrentRun(detail)
+      await loadRuns(false)
+      setNotice({ type: 'success', text: '比较导读已开始刷新。' })
+    } catch (err) {
+      setNotice({ type: 'error', text: err.message || '刷新比较导读失败' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleSaveOutline(nextSections) {
+    if (!displayRun?.id || !Array.isArray(nextSections)) return
+    setSavingOutline(true)
+    setNotice(null)
+    try {
+      const payload = {
+        outline_sections: nextSections.map((section) => ({
+          ...section,
+          title: String(section.title || '').trim(),
+          goal: String(section.goal || '').trim(),
+          summary: String(section.summary || '').trim(),
+          points: String(section.points || '')
+            .split('\n')
+            .map((item) => item.trim())
+            .filter(Boolean),
+        })),
+      }
+      const detail = await updateResearchMatrixRunOutline(displayRun.id, payload)
+      setCurrentRun(detail)
+      await loadRuns(false)
+      setNotice({ type: 'success', text: '综述大纲已保存。' })
+    } catch (err) {
+      setNotice({ type: 'error', text: err.message || '保存综述大纲失败' })
+    } finally {
+      setSavingOutline(false)
+    }
+  }
+
+  async function handleRewriteDraftSection(sectionKey) {
+    if (!displayRun?.id || !sectionKey || rewritingSectionKey) return
+    setRewritingSectionKey(sectionKey)
+    setNotice(null)
+    try {
+      const detail = await rewriteResearchMatrixDraftSection(displayRun.id, { section_key: sectionKey })
+      setCurrentRun(detail)
+      await loadRuns(false)
+      setNotice({ type: 'success', text: '本节草稿已基于当前证据重新整理。' })
+    } catch (err) {
+      setNotice({ type: 'error', text: err.message || '重写本节草稿失败' })
+    } finally {
+      setRewritingSectionKey('')
+    }
+  }
+
+  async function handlePrepareDraftSources() {
+    if (!displayRun?.id || preparingDraftSources) return
+    setPreparingDraftSources(true)
+    setNotice({ type: 'success', text: '正在补齐综述大纲和草稿需要的来源卡，请稍候。' })
+    try {
+      const detail = await prepareResearchMatrixDraftSources(displayRun.id, {
+        summary_types: ['overview', 'reproduction'],
+      })
+      setCurrentRun(detail)
+      await loadRuns(false)
+    } catch (err) {
+      setNotice({ type: 'error', text: err.message || '准备综述来源卡失败' })
+    } finally {
+      setPreparingDraftSources(false)
+    }
+  }
+
   function beginEditCell(cell) {
     if (!displayRun || displayRun.status !== 'completed') return
     setEditingCell(cell)
+  }
+
+  function renderStageContent() {
+    if (currentRun && currentRun.status !== 'completed') {
+      return (
+        <PendingRunView
+          busy={busy}
+          run={displayRun}
+          onOpenRunPapers={openRunPapers}
+          onRetryRun={handleRetryRun}
+          onRefreshStatus={handleRefreshCurrentRunStatus}
+        />
+      )
+    }
+    if (activeStage === 'insights') {
+      return (
+        <section className="matrix-stage-shell">
+          <MatrixInsightsPanel
+            busy={busy}
+            run={displayRun}
+            onRefreshInsights={handleRefreshInsights}
+          />
+        </section>
+      )
+    }
+    if (activeStage === 'outline') {
+      return (
+        <ReviewOutlineView
+          run={displayRun}
+          topicGroups={displayRun?.dashboard?.topic_groups || []}
+          activeTopicGroupId={activeTopicGroupId}
+          onCopyAll={handleCopyOutline}
+          onSaveOutline={handleSaveOutline}
+          saving={savingOutline}
+        />
+      )
+    }
+    if (activeStage === 'drafts') {
+      return (
+        <MatrixDraftsView
+          run={displayRun}
+          onCopySection={handleCopyDraftSection}
+          onCopyAll={handleCopyAllDrafts}
+          onRewriteSection={handleRewriteDraftSection}
+          rewritingSectionKey={rewritingSectionKey}
+          onJumpToEvidence={onJumpToPaperEvidence}
+        />
+      )
+    }
+    if (activeStage === 'integrated') {
+      return (
+        <IntegratedDraftView
+          run={displayRun}
+          onCopyAll={handleCopyAllDrafts}
+          onRewriteSection={handleRewriteDraftSection}
+          rewritingSectionKey={rewritingSectionKey}
+          onJumpToEvidence={onJumpToPaperEvidence}
+        />
+      )
+    }
+    return (
+      <ResearchMatrixTable
+        run={displayRun}
+        busy={busy}
+        onEditCell={beginEditCell}
+        onRefreshInsights={handleRefreshInsights}
+      />
+    )
   }
 
   return (
@@ -2333,7 +3103,7 @@ export function ResearchMatrixPage({
         onDeleteRun={handleDeleteRun}
         onEditingRunTitleChange={setEditingRunTitle}
         onOpenRunPapers={openRunPapers}
-        onRefreshRun={handleRefreshRun}
+        onRefreshRun={handleRefreshRunInBackground}
         onRenameRun={startRenameRun}
         onSaveRunTitle={handleSaveRunTitle}
         onRetryRun={handleRetryRun}
@@ -2351,54 +3121,28 @@ export function ResearchMatrixPage({
 
       <main className="research-matrix-main">
         <MatrixContentHeader
-          activeTab={activeTab}
           currentRun={displayRun}
+          activeStage={activeStage}
           exportMenuOpen={exportMenuOpen}
-          topicGroups={topicGroups}
-          activeTopicGroupId={activeTopicGroupId}
-          groupingMode={groupingMode}
           busy={busy}
-          onChangeTab={setActiveTab}
-          onChangeTopicGroup={setActiveTopicGroupId}
-          onChangeGroupingMode={handleChangeGroupingMode}
+          onRetryRun={handleRetryRun}
           onRefreshStatus={handleRefreshCurrentRunStatus}
           onExport={handleExport}
+          onStageChange={setActiveStage}
           onToggleExportMenu={(event) => {
             stopMenuBubble(event)
             setExportMenuOpen((value) => !value)
           }}
         />
 
-        {notice ? <div className={`matrix-inline-message${notice.type === 'success' ? ' is-success' : ''}`}>{notice.text}</div> : null}
+        {notice ? (
+          <div className={`matrix-inline-message${notice.type === 'success' ? ' is-success' : ''}`}>
+            {sanitizeNoticeText(notice, displayRun)}
+          </div>
+        ) : null}
 
         <div className="research-matrix-main__content">
-          {currentRun && currentRun.status !== 'completed' && !['drafts', 'outline'].includes(activeTab) ? (
-            <PendingRunView
-              busy={busy}
-              run={displayRun}
-              onOpenRunPapers={openRunPapers}
-              onRetryRun={handleRetryRun}
-              onRefreshStatus={handleRefreshCurrentRunStatus}
-            />
-          ) : activeTab === 'matrix' ? (
-            <ResearchMatrixTable
-              run={displayRun}
-              onEditCell={beginEditCell}
-            />
-          ) : activeTab === 'outline' ? (
-            <ReviewOutlineView
-              run={displayRun}
-              topicGroups={topicGroups}
-              activeTopicGroupId={activeTopicGroupId}
-              onCopyAll={handleCopyOutline}
-            />
-          ) : (
-            <MatrixDraftsView
-              run={displayRun}
-              onCopySection={handleCopyDraftSection}
-              onCopyAll={handleCopyAllDrafts}
-            />
-          )}
+          {renderStageContent()}
         </div>
       </main>
 
@@ -2412,7 +3156,7 @@ export function ResearchMatrixPage({
         selectedIds={selectedIds}
         uncategorizedFolderId={uncategorizedFolderId}
         onClose={closeCreateDialog}
-        onConfirm={handleCreateRun}
+        onConfirm={handleCreateRunInBackground}
         onFolderChange={setSelectedFolderId}
         onSearchChange={setSearchTerm}
         onTogglePaper={togglePaper}

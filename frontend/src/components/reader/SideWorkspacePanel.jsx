@@ -36,9 +36,12 @@ import {
   addRootNode,
   addTextBlock,
   buildNodeChildren,
+  createTemplateDescriptor,
+  createTemplateFromNotebook,
   deleteBlock,
   deleteNode,
   deleteNotebook,
+  NOTEBOOK_TEMPLATES,
   toggleNotebookCollapsed,
   updateBlockContent,
   updateNodeTitle,
@@ -56,6 +59,19 @@ import {
   parseRichNoteContent,
   serializeRichNoteContent,
 } from './richNoteContent'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog'
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from '../ui/tabs'
 
 function buildPaperTitle(fileName) {
   if (!fileName) return 'Untitled paper'
@@ -70,6 +86,74 @@ function buildCompactModelLabel(providerLabel) {
     .filter(Boolean)
   const rawLabel = parts[1] || parts[0] || ''
   return rawLabel.replace(/^智谱\s*/i, '').replace(/\s*\(官方\)\s*/g, '').trim() || '模型已连接'
+}
+
+const NOTEBOOK_TEMPLATE_ICON_MAP = {
+  blank: NotebookPen,
+  default: Layers3,
+  review_writing: FileText,
+  experiment_design: FlaskConical,
+  clinical_research: ClipboardCopy,
+  critical_reading: Highlighter,
+  paper_reproduction: RefreshCw,
+  related_work_compare: Layers3,
+  proposal_research: NotebookPen,
+  figure_deep_read: ImageIcon,
+  writing_citation: Type,
+}
+
+const CUSTOM_TEMPLATE_STORAGE_KEY = 'xk:note-custom-templates:v1'
+
+function stripTemplateDescriptor(template) {
+  return {
+    id: template.id,
+    title: template.title,
+    description: template.description,
+    accent: template.accent,
+    nodes: Array.isArray(template.nodes) ? template.nodes : [],
+  }
+}
+
+function readStoredCustomTemplates() {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_TEMPLATE_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((template) => createTemplateDescriptor(template))
+  } catch {
+    return []
+  }
+}
+
+function writeStoredCustomTemplates(templates) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(
+    CUSTOM_TEMPLATE_STORAGE_KEY,
+    JSON.stringify((templates || []).map((template) => stripTemplateDescriptor(template))),
+  )
+}
+
+const BLANK_NOTEBOOK_TEMPLATE = createTemplateDescriptor({
+  id: 'blank',
+  title: '空白笔记本',
+  description: '先创建一个笔记本，再自由添加标题和笔记内容。',
+  accent: '#64748b',
+  nodes: [
+    {
+      title: '从这里开始',
+      colorIndex: 0,
+      blocks: ['创建笔记本后，你可以自由添加一级标题、子标题和正文内容。'],
+      children: ['自定义一级标题', '自定义二级标题'],
+    },
+  ],
+})
+
+const BLANK_NOTEBOOK_TEMPLATE_OPTION = {
+  ...BLANK_NOTEBOOK_TEMPLATE,
+  createKind: 'blank',
+  footerText: '自由搭建',
 }
 
 const infoTabs = [
@@ -532,17 +616,30 @@ function NotesPanel({
 }) {
   const [prefs, setPrefs] = useState(() => readNotePrefs(paperId))
   const [colorMenuOpen, setColorMenuOpen] = useState(false)
+  const [templateMenuOpen, setTemplateMenuOpen] = useState(false)
+  const [templateDialogTab, setTemplateDialogTab] = useState('system')
+  const [customTemplates, setCustomTemplates] = useState(() => readStoredCustomTemplates())
   const [colorCommand, setColorCommand] = useState(null)
   const notesStyle = useMemo(() => buildNotesStyle(prefs), [prefs])
+  const systemTemplateOptions = useMemo(
+    () => [BLANK_NOTEBOOK_TEMPLATE_OPTION, ...NOTEBOOK_TEMPLATES],
+    [],
+  )
 
   useEffect(() => {
     setPrefs(readNotePrefs(paperId))
     setColorMenuOpen(false)
+    setTemplateMenuOpen(false)
+    setTemplateDialogTab('system')
   }, [paperId])
 
   useEffect(() => {
     writeNotePrefs(paperId, prefs)
   }, [paperId, prefs])
+
+  useEffect(() => {
+    setCustomTemplates(readStoredCustomTemplates())
+  }, [])
 
   function changeDraft(updater) {
     onDraftChange?.(updater(notebooks || []))
@@ -586,6 +683,98 @@ function NotesPanel({
     updatePrefs((current) => ({ ...current, color: normalized }))
     setColorCommand({ id: Date.now(), color: normalized })
     setColorMenuOpen(false)
+  }
+
+  function openNotebookTemplateDialog(nextTab = 'system') {
+    setColorMenuOpen(false)
+    setTemplateDialogTab(nextTab)
+    setTemplateMenuOpen(true)
+  }
+
+  function handleCreateNotebook(kind) {
+    setTemplateMenuOpen(false)
+    onCreateNotebook?.(kind)
+  }
+
+  function handleCreateCustomTemplateNotebook() {
+    const nextIndex = customTemplates.length + 1
+    handleCreateNotebook({
+      id: `custom-draft:${Date.now()}`,
+      title: `自建模板草稿 ${nextIndex}`,
+      description: '从空白笔记本开始搭建自定义模板',
+      accent: '#8b5cf6',
+      nodes: [],
+    })
+  }
+
+  function handleSaveNotebookAsTemplate(notebookId) {
+    const notebook = (notebooks || []).find((item) => item.id === notebookId)
+    if (!notebook) return
+    if (!Array.isArray(notebook.nodes) || notebook.nodes.length === 0) {
+      window.alert('先在笔记本里添加标题结构，再存为模板。')
+      return
+    }
+
+    const existing = customTemplates.find((item) => item.title === notebook.title)
+    const savedTemplate = createTemplateFromNotebook(notebook, {
+      id: existing?.id || `custom:${Date.now()}`,
+      description: existing?.description || `来自笔记本“${notebook.title || '未命名笔记本'}”的自建模板`,
+      accent: existing?.accent || '#8b5cf6',
+    })
+
+    const nextTemplates = [
+      savedTemplate,
+      ...customTemplates.filter((item) => item.id !== savedTemplate.id && item.title !== savedTemplate.title),
+    ]
+    setCustomTemplates(nextTemplates)
+    writeStoredCustomTemplates(nextTemplates)
+    setTemplateDialogTab('custom')
+    window.alert(existing ? `已更新自建模板：${savedTemplate.title}` : `已保存为自建模板：${savedTemplate.title}`)
+  }
+
+  function renderTemplateCard(template) {
+    const Icon = NOTEBOOK_TEMPLATE_ICON_MAP[template.id] || FileText
+    return (
+      <button
+        key={template.id}
+        type="button"
+        className="notes-template-card"
+        onClick={() => handleCreateNotebook(template.createKind || template)}
+      >
+        <div className="notes-template-preview" aria-hidden="true">
+          {template.previewSections?.slice(0, 5).map((section, sectionIndex) => (
+            <div key={`${template.id}:${section.title}:${sectionIndex}`} className="notes-template-preview__section">
+              <div className="notes-template-preview__header">
+                <span className={`note-tree-index color-${(section.colorIndex || 0) % 6}`}>{sectionIndex + 1}</span>
+                <strong>{section.title}</strong>
+              </div>
+              {section.hint ? <div className="notes-template-preview__hint">{section.hint}</div> : null}
+              {section.children?.slice(0, 3).map((child, childIndex) => (
+                <div key={`${section.title}:${child.title}:${childIndex}`} className="notes-template-preview__branch">
+                  <span className="notes-template-preview__dot" />
+                  <div className="notes-template-preview__branch-copy">
+                    <span>{child.title}</span>
+                    {child.children?.length ? (
+                      <small>{child.children.join(' / ')}</small>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+
+        <div className="notes-template-card__footer">
+          <span className="notes-template-card__label">
+            <Icon size={15} />
+            {template.title}
+          </span>
+          <span className="notes-template-card__footer-meta">
+            {template.footerText || `${template.sectionCount} 个分区`}
+          </span>
+        </div>
+      </button>
+    )
   }
 
   function renderBlock(notebookId, nodeId, block) {
@@ -702,10 +891,10 @@ function NotesPanel({
               <span className="note-tree-dot" />
             )}
 
-            <input
+            <AutoGrowTextarea
               className="note-tree-title-input"
               value={node.title || ''}
-              size={Math.max(4, Math.min(24, (node.title || '').length + 1))}
+              placeholder="标题"
               onFocus={() => touchTarget(notebookId, node.id)}
               onChange={(event) => {
                 const value = event.target.value
@@ -750,13 +939,9 @@ function NotesPanel({
     <div className="workspace-panel__content notes-workspace" style={notesStyle}>
       <div className="notes-topbar">
         <div className="notes-topbar__main">
-          <button type="button" className="notes-command" onClick={() => onCreateNotebook?.('blank')}>
+          <button type="button" className="notes-command" onClick={() => openNotebookTemplateDialog('system')}>
             <NotebookPen size={15} />
-            <span>新建</span>
-          </button>
-          <button type="button" className="notes-command" onClick={() => onCreateNotebook?.('default')}>
-            <Plus size={15} />
-            <span>模板</span>
+            <span>新建笔记本</span>
           </button>
           <button type="button" className="notes-command is-primary" onClick={() => onSaveNotebooks?.(notebooks || [])} disabled={saving}>
             <Save size={15} />
@@ -772,7 +957,10 @@ function NotesPanel({
               title="字体颜色"
               aria-label="字体颜色"
               aria-expanded={colorMenuOpen}
-              onClick={() => setColorMenuOpen((current) => !current)}
+              onClick={() => {
+                setTemplateMenuOpen(false)
+                setColorMenuOpen((current) => !current)
+              }}
             >
               <Palette size={15} />
               <span className="notes-color-dot" style={{ background: prefs.color }} />
@@ -830,12 +1018,79 @@ function NotesPanel({
         </div>
       </div>
 
+      <Dialog open={templateMenuOpen} onOpenChange={setTemplateMenuOpen}>
+        <DialogContent className="notes-template-dialog" showCloseButton>
+          <DialogHeader className="notes-template-dialog__header">
+            <DialogTitle>新建笔记本</DialogTitle>
+            <DialogDescription>
+              先选择一个模板来初始化笔记本，创建后再到笔记本里继续加标题和记笔记。
+            </DialogDescription>
+          </DialogHeader>
+
+          <Tabs
+            value={templateDialogTab}
+            onValueChange={setTemplateDialogTab}
+            className="notes-template-tabs"
+          >
+            <TabsList variant="line" className="notes-template-tabs__list">
+              <TabsTrigger value="system">系统模板</TabsTrigger>
+              <TabsTrigger value="custom">自建模板</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="system" className="notes-template-tabs__panel">
+              <div className="notes-template-grid" role="menu" aria-label="系统笔记本模板">
+                {systemTemplateOptions.map((template) => renderTemplateCard(template))}
+              </div>
+            </TabsContent>
+
+            <TabsContent value="custom" className="notes-template-tabs__panel">
+              {customTemplates.length ? (
+                <div className="notes-template-custom-shell">
+                  <div className="notes-template-custom-bar">
+                    <p>先创建笔记本并整理标题结构，再在笔记本右侧点击“存为模板”。</p>
+                    <button
+                      type="button"
+                      className="notes-command"
+                      onClick={handleCreateCustomTemplateNotebook}
+                    >
+                      <Plus size={15} />
+                      <span>新建模板笔记本</span>
+                    </button>
+                  </div>
+                  <div className="notes-template-grid" role="menu" aria-label="自建阅读笔记模板">
+                    {customTemplates.map((template) => renderTemplateCard(template))}
+                  </div>
+                </div>
+              ) : (
+                <div className="notes-template-empty">
+                  <NotebookPen size={18} />
+                  <strong>先建一个笔记本，再把它存成模板</strong>
+                  <p>流程是：新建模板笔记本，搭好标题和提示内容，然后在笔记本右侧点击“存为模板”。</p>
+                  <button
+                    type="button"
+                    className="notes-command"
+                    onClick={handleCreateCustomTemplateNotebook}
+                  >
+                    <Plus size={15} />
+                    <span>新建模板笔记本</span>
+                  </button>
+                </div>
+              )}
+            </TabsContent>
+          </Tabs>
+        </DialogContent>
+      </Dialog>
+
       <div className="notes-text-tree-shell">
         {loading ? <p className="muted">正在加载笔记...</p> : null}
         {!loading && (notebooks || []).length === 0 ? (
           <div className="notes-empty-state">
             <NotebookPen size={18} />
-            <p>新建一个笔记本，开始整理这篇文献。</p>
+            <p>先新建一个笔记本，再在笔记本里整理标题和阅读笔记。</p>
+            <button type="button" className="notes-command" onClick={() => openNotebookTemplateDialog('system')}>
+              <NotebookPen size={15} />
+              <span>新建笔记本</span>
+            </button>
           </div>
         ) : null}
 
@@ -853,16 +1108,19 @@ function NotesPanel({
               >
                 {notebook.collapsed ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
               </button>
-              <input
+              <AutoGrowTextarea
                 className="note-notebook__title"
                 value={notebook.title || ''}
-                size={Math.max(6, Math.min(24, (notebook.title || '').length + 1))}
+                placeholder="笔记本名称"
                 onChange={(event) => {
                   const value = event.target.value
                   changeDraft((current) => updateNotebookTitle(current, notebook.id, value))
                 }}
               />
               <div className="note-text-tree-actions">
+                {renderIconButton('存为模板', <Layers3 size={14} />, () => {
+                  handleSaveNotebookAsTemplate(notebook.id)
+                })}
                 {renderIconButton('添加一级标题', <Plus size={14} />, () => {
                   changeDraft((current) => updateNotebookById(current, notebook.id, (item) =>
                     addRootNode(item, item.nodes.filter((node) => node.level === 1).length),
@@ -1484,6 +1742,8 @@ const QUALITY_SUMMARY_STATUS_LABELS = {
   failed: '失败',
 }
 
+QUALITY_SUMMARY_STATUS_LABELS.stale = '待更新'
+
 const QUALITY_SUMMARY_STAGE_LABELS = {
   idle: '等待生成',
   extracting_context: '提取全文',
@@ -1529,6 +1789,17 @@ function normalizeQualitySummaryPayload(payload) {
 
 function visualQualitySummaryStatus(status) {
   return status === 'running' ? 'generating' : status
+}
+
+function getQualitySummaryDisplayStatus(state) {
+  if (state?.status === 'running') return 'running'
+  if (state?.isStale) return 'stale'
+  return state?.status || 'idle'
+}
+
+function getAnnotationSummaryTotal(summary) {
+  return (Array.isArray(summary?.annotation_groups) ? summary.annotation_groups : [])
+    .reduce((total, group) => total + Number(group?.count || 0), 0)
 }
 
 function formatQualitySummaryTime(value) {
@@ -1583,6 +1854,96 @@ function renderSummaryBodyText(value) {
         const bullet = block.match(/^[-*•]\s*(.+)$/)
         return bullet ? <p className="summary-body__bullet" key={`${block}-${index}`}>{bullet[1]}</p> : <p key={`${block}-${index}`}>{block}</p>
       })}
+    </div>
+  )
+}
+
+function renderReviewFieldBlocks(blocks, onJumpToEvidence) {
+  if (!Array.isArray(blocks) || !blocks.length) return null
+  return (
+    <section className="summary-field-blocks" aria-label="综述核心字段">
+      {blocks.map((block, index) => (
+        <article className="summary-field-block" key={block.key || index} style={{ '--summary-section-index': index }}>
+          <div className="summary-field-block__head">
+            <span className="summary-field-block__index">{String(index + 1).padStart(2, '0')}</span>
+            <div>
+              <h4>{block.title || block.key}</h4>
+              {block.summary ? <p>{block.summary}</p> : null}
+            </div>
+          </div>
+          {Array.isArray(block.items) && block.items.length ? (
+            <ol className="summary-field-block__items">
+              {block.items.map((item, itemIndex) => (
+                <li key={item.id || `${block.key}-${itemIndex}`}>
+                  <div className="summary-field-block__item-copy">
+                    <strong>{String(itemIndex + 1).padStart(2, '0')}</strong>
+                    <span>{item.text}</span>
+                  </div>
+                  {(item.source_quote || item.source_pages?.length) ? (
+                    <button
+                      className="summary-source-link summary-source-link--inline"
+                      type="button"
+                      disabled={!item.source_pages?.length}
+                      onClick={() => onJumpToEvidence?.({
+                        page: item.source_pages?.[0],
+                        quote: item.source_quote || item.text || '',
+                        start_char: item.start_char ?? null,
+                        end_char: item.end_char ?? null,
+                        source_type: 'paper',
+                      })}
+                    >
+                      {item.source_pages?.length ? `论文｜第 ${item.source_pages[0]} 页` : '论文来源'}
+                      {item.source_quote ? `：${item.source_quote}` : ''}
+                    </button>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          ) : null}
+        </article>
+      ))}
+    </section>
+  )
+}
+
+function EvidenceList({ evidence = [], onJumpToEvidence, summaryText = '已核验来源依据' }) {
+  const [expanded, setExpanded] = useState(false)
+  const visibleItems = expanded ? evidence : evidence.slice(0, 3)
+  const hiddenCount = Math.max(0, evidence.length - visibleItems.length)
+  if (!Array.isArray(evidence) || !evidence.length) return null
+  return (
+    <div className="summary-evidence">
+      <button
+        className="summary-evidence__summary"
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+      >
+        {summaryText} {evidence.length} 条
+      </button>
+      <ul>
+        {visibleItems.map((item, evidenceIndex) => (
+          <li key={`${item.quote}-${evidenceIndex}`}>
+            <strong>{renderEvidenceSourceLabel(item)}</strong>
+            <button
+              className="summary-source-link"
+              type="button"
+              disabled={!item.page}
+              onClick={() => onJumpToEvidence?.(item)}
+            >
+              {item.quote}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {evidence.length > 3 ? (
+        <button
+          className="summary-evidence__toggle"
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? '收起多余依据' : `展开剩余 ${hiddenCount} 条依据`}
+        </button>
+      ) : null}
     </div>
   )
 }
@@ -1953,14 +2314,20 @@ function QualityLiteratureSummaryPanel({
 
   function applySummaryStatus(typeId, payload, options = {}) {
     const next = normalizeQualitySummaryPayload(payload)
-    setSummaryState((current) => ({
-      ...current,
-      [typeId]: {
-        ...current[typeId],
-        ...next,
-        justCompleted: options.flash || (current[typeId]?.status === 'running' && next.status === 'generated'),
-      },
-    }))
+    setSummaryState((current) => {
+      const previous = current[typeId] || {}
+      const shouldKeepPreviousSummary = !next.summary && previous.summary && (next.status === 'running' || next.isStale)
+      return {
+        ...current,
+        [typeId]: {
+          ...previous,
+          ...next,
+          summary: shouldKeepPreviousSummary ? previous.summary : next.summary,
+          preview: shouldKeepPreviousSummary ? (previous.summary?.preview || previous.preview || next.preview) : next.preview,
+          justCompleted: options.flash || (previous.status === 'running' && next.status === 'generated'),
+        },
+      }
+    })
     if (next.status === 'generated') {
       window.setTimeout(() => {
         setSummaryState((current) => ({
@@ -2053,6 +2420,9 @@ function QualityLiteratureSummaryPanel({
     setSummaryState((current) => {
       const previous = current.annotations
       if (!previous?.summary || previous.status === 'running') return current
+      const previousTotal = getAnnotationSummaryTotal(previous.summary)
+      const currentTotal = Array.isArray(annotations) ? annotations.length : 0
+      if (previousTotal === 0 && currentTotal === 0) return current
       return {
         ...current,
         annotations: {
@@ -2060,8 +2430,7 @@ function QualityLiteratureSummaryPanel({
           status: 'idle',
           stage: 'idle',
           progress: 0,
-          summary: null,
-          preview: '标注已变化，请重新生成标注总结。',
+          preview: previous.summary?.preview || previous.preview,
           errorMessage: '',
           isStale: true,
           justCompleted: false,
@@ -2105,8 +2474,8 @@ function QualityLiteratureSummaryPanel({
     }
   }
 
-  async function beginGenerateAndWait(typeId) {
-    const first = await beginGenerate(typeId)
+  async function beginGenerateAndWait(typeId, options = {}) {
+    const first = await beginGenerate(typeId, options)
     if (!first || first.status !== 'running') return first
     for (let attempt = 0; attempt < 120; attempt += 1) {
       await qualityDelay(2000)
@@ -2118,14 +2487,17 @@ function QualityLiteratureSummaryPanel({
   }
 
   function handleCardClick(type) {
-    const current = summaryState[type.id]
     setActiveSummaryId(type.id)
-    if (current?.status === 'idle' || current?.status === 'failed') beginGenerate(type.id, { open: true })
   }
 
   function handleRegenerate(typeId) {
     const current = summaryState[typeId]
-    if (current?.status === 'generated' && !window.confirm('重新生成会消耗一次 AI 调用，并覆盖当前版本。确定继续吗？')) return
+    if (current?.status === 'generated' || current?.isStale) {
+      const confirmText = current?.isStale
+        ? '更新生成会消耗一次 AI 调用，并覆盖当前旧版本。确定继续吗？'
+        : '重新生成会消耗一次 AI 调用，并覆盖当前版本。确定继续吗？'
+      if (!window.confirm(confirmText)) return
+    }
     beginGenerate(typeId, { open: true, force: true })
   }
 
@@ -2135,8 +2507,9 @@ function QualityLiteratureSummaryPanel({
     try {
       for (const type of QUALITY_SUMMARY_TYPES) {
         const current = summaryState[type.id]
-        if (current?.status === 'generated' || current?.status === 'running') continue
-        await beginGenerateAndWait(type.id)
+        if (current?.status === 'running') continue
+        if (current?.status === 'generated' && !current?.isStale) continue
+        await beginGenerateAndWait(type.id, { force: Boolean(current?.isStale) })
       }
     } finally {
       setIsGeneratingAll(false)
@@ -2160,17 +2533,21 @@ function QualityLiteratureSummaryPanel({
     const rawAnnotationTotal = getAnnotationGroupTotal(rawAnnotationGroups)
     const liveAnnotationTotal = annotations.length
     const annotationCountMismatch = activeType.id === 'annotations' && rawSummary && rawAnnotationTotal !== liveAnnotationTotal
-    const summary = annotationCountMismatch ? null : rawSummary
+    const needsManualRefresh = Boolean(activeSummary?.isStale || annotationCountMismatch)
+    const summary = rawSummary
     const sections = summary?.sections || []
     const assistantPanels = getQualityAssistantPanels(summary)
     const annotationGroups = getAnnotationGroups(summary)
+    const reviewFieldBlocks = Array.isArray(summary?.review_field_blocks) ? summary.review_field_blocks : []
     const annotationTotal = getAnnotationGroupTotal(annotationGroups)
+    const annotationTotalLabel = needsManualRefresh ? '上次生成时有效标注' : '当前有效标注'
     const hideFallbackSections = activeType.id === 'annotations' && summary && annotationTotal === 0 && !sections.length
     const displaySections = sections.length
       ? sections
       : hideFallbackSections
         ? []
         : [{ heading: activeType.title, body: isRunning ? '正在分析论文结构和证据来源。' : activeType.emptyHint, keywords: [], evidence: [] }]
+    const resolvedDisplaySections = displaySections
     const Icon = activeType.Icon
     return (
       <div className={`workspace-panel__content summary-panel ${activeType.themeClass}`}>
@@ -2202,7 +2579,7 @@ function QualityLiteratureSummaryPanel({
           <div className="summary-detail__actions">
             <button className="summary-primary-action" type="button" disabled={isRunning || !paperId} onClick={() => handleRegenerate(activeType.id)}>
               {isRunning ? <Loader2 size={15} className="summary-spin" /> : <RefreshCw size={15} />}
-              {isRunning ? '生成中...' : summary ? '重新生成' : '生成'}
+              {isRunning ? '生成中...' : needsManualRefresh ? '更新生成' : summary ? '重新生成' : '生成'}
             </button>
             <div className="summary-export-wrap">
               <button
@@ -2230,7 +2607,7 @@ function QualityLiteratureSummaryPanel({
               <p>先提取全文和证据，再生成对应板块内容。复现和组会稿会更慢一些。</p>
             </div>
           ) : null}
-          {activeSummary?.isStale || annotationCountMismatch ? <div className="summary-stale-note">标注已变化，旧版标注总结已隐藏。重新生成后会只读取当前仍存在的高亮和划线。</div> : null}
+          {needsManualRefresh ? <div className="summary-stale-note">标注已变化，正在显示上一次生成的标注总结。点击“更新生成”后才会读取当前仍存在的高亮和划线。</div> : null}
           {!activeSummary?.isStale && !annotationCountMismatch && activeSummary?.errorMessage ? <div className="summary-error-note">{activeSummary.errorMessage}</div> : null}
           {summary?.highlights?.length ? (
             <section className="summary-highlight-block" aria-label="关键结论">
@@ -2247,12 +2624,13 @@ function QualityLiteratureSummaryPanel({
               </div>
             </section>
           ) : null}
+          {activeType.id === 'review' && reviewFieldBlocks.length ? renderReviewFieldBlocks(reviewFieldBlocks, onJumpToEvidence) : null}
           {activeType.id === 'annotations' && summary ? (
             <section className="summary-annotation-block" aria-label="标注清单">
               <div className="summary-annotation-block__head">
                 <div>
                   <strong>标注清单</strong>
-                  <span>{annotationTotal} 条当前有效标注</span>
+                  <span>{annotationTotal} 条{annotationTotalLabel}</span>
                 </div>
                 {liveAnnotationTotal ? (
                   <button className="summary-clear-annotations" type="button" onClick={onClearAnnotations}>
@@ -2296,9 +2674,9 @@ function QualityLiteratureSummaryPanel({
               )}
             </section>
           ) : null}
-          {displaySections.length ? (
+          {resolvedDisplaySections.length ? (
             <div className="summary-section-list">
-              {displaySections.map((section, index) => (
+              {resolvedDisplaySections.map((section, index) => (
                 <article className={`summary-section ${!sections.length ? 'is-preview' : ''}`} key={`${section.heading}-${index}`} style={{ '--summary-section-index': index }}>
                   <span className="summary-section__index">{String(index + 1).padStart(2, '0')}</span>
                   <div>
@@ -2310,24 +2688,7 @@ function QualityLiteratureSummaryPanel({
                     ) : null}
                     {renderSummaryBodyText(section.body)}
                     {section.evidence?.length ? (
-                      <details className="summary-evidence">
-                        <summary>已核验来源依据 {section.evidence.length} 条</summary>
-                        <ul>
-                          {section.evidence.map((item, evidenceIndex) => (
-                          <li key={`${item.quote}-${evidenceIndex}`}>
-                            <strong>{renderEvidenceSourceLabel(item)}</strong>
-                            <button
-                              className="summary-source-link"
-                              type="button"
-                              disabled={!item.page}
-                              onClick={() => onJumpToEvidence?.(item)}
-                            >
-                              {item.quote}
-                            </button>
-                          </li>
-                          ))}
-                        </ul>
-                      </details>
+                      <EvidenceList evidence={section.evidence} onJumpToEvidence={onJumpToEvidence} />
                     ) : null}
                   </div>
                 </article>
@@ -2394,9 +2755,11 @@ function QualityLiteratureSummaryPanel({
         <div className="summary-card-grid">
           {QUALITY_SUMMARY_TYPES.map((type) => {
             const state = summaryState[type.id]
-            const status = state?.status || 'idle'
+            const status = getQualitySummaryDisplayStatus(state)
             const visualStatus = visualQualitySummaryStatus(status)
-            const preview = state?.preview || state?.summary?.preview || type.emptyHint
+            const preview = state?.isStale
+              ? (state?.summary?.preview || state?.preview || type.emptyHint)
+              : (state?.preview || state?.summary?.preview || type.emptyHint)
             const Icon = type.Icon
             return (
               <button
@@ -2410,14 +2773,14 @@ function QualityLiteratureSummaryPanel({
                     <Icon size={19} />
                   </span>
                   <span className={`summary-status summary-status--${visualStatus}`}>
-                    {status === 'running' ? <Loader2 size={12} className="summary-spin" /> : null}
+                    {state?.status === 'running' ? <Loader2 size={12} className="summary-spin" /> : null}
                     {QUALITY_SUMMARY_STATUS_LABELS[status] || QUALITY_SUMMARY_STATUS_LABELS.idle}
                   </span>
                 </div>
                 <h4>{type.title}</h4>
                 <p className="summary-card__subtitle">{type.subtitle}</p>
                 <p className={`summary-card__preview ${status === 'idle' ? 'is-muted' : ''}`}>{preview}</p>
-                {status === 'running' ? (
+                {state?.status === 'running' ? (
                   <div className="summary-card__progress">
                     <span style={{ width: `${Math.max(0, Math.min(100, state?.progress || 0))}%` }} />
                   </div>
@@ -2475,6 +2838,7 @@ export function SideWorkspacePanel({
   chatInitialSuggestionsLoading,
   chatFollowupLoadingMessageId,
   providerLabel,
+  uiFontScale = 1,
   onChatInputChange,
   onChatSubmit,
   onRefreshInitialSuggestions,
@@ -2485,7 +2849,7 @@ export function SideWorkspacePanel({
   if (!activePanel) return null
 
   return (
-    <aside className="workspace-panel" style={{ width }}>
+    <aside className="workspace-panel" style={{ width, '--ui-reader-scale': uiFontScale }}>
       {activePanel === 'info' ? <InfoPanel fileName={fileName} metadata={metadata} /> : null}
       {activePanel === 'notes' ? (
         <NotesPanel

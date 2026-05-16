@@ -16,8 +16,12 @@ from app.models import PaperSummary, ResearchMatrixRun, User
 from app.schemas.research_matrix import (
     ResearchDashboardResponse,
     ResearchMatrixCreateRequest,
+    ResearchMatrixDraftSectionRewriteRequest,
     ResearchMatrixGenerateMissingRequest,
     ResearchMatrixGenerateMissingResponse,
+    ResearchMatrixGroupingModeUpdateRequest,
+    ResearchMatrixOutlineUpdateRequest,
+    ResearchMatrixPrepareDraftSourcesRequest,
     ResearchMatrixRefreshRequest,
     ResearchMatrixRunListResponse,
     ResearchMatrixRunPaperUpdateRequest,
@@ -34,11 +38,19 @@ from app.services.research_matrix import (
     get_owned_papers,
     inspect_run_source_state,
     is_run_worker_stale,
+    prepare_missing_run_draft_sources,
     rename_matrix_run,
+    refresh_run_insights,
     retry_pending_run,
+    rewrite_matrix_run_draft_section,
     run_matrix_run_task,
     serialize_run_detail,
     serialize_run_list_item,
+    sync_run_draft_snapshot,
+    sync_run_draft_progress,
+    sync_run_matrix_snapshot,
+    update_matrix_run_grouping_mode,
+    update_matrix_run_outline,
     update_matrix_run_paper,
 )
 
@@ -116,6 +128,9 @@ def list_matrix_runs(
         .order_by(ResearchMatrixRun.created_at.desc(), ResearchMatrixRun.id.desc())
         .limit(80)
     ).all()
+    for run in runs:
+        if run.status == "queued":
+            _spawn_matrix_run_task(run.id, None)
     return ResearchMatrixRunListResponse(
         runs=[serialize_run_list_item(db, run, current_user.id) for run in runs]
     )
@@ -144,6 +159,14 @@ def create_matrix_run_endpoint(
     except ValueError:
         raise HTTPException(status_code=404, detail="没有可用的文献") from None
     run = _load_run(db, run.id, current_user.id)
+    for summary_id in prepare_missing_run_draft_sources(
+        db,
+        run,
+        provider_id=payload.provider_id,
+        summary_types=("overview", "reproduction"),
+    ):
+        background_tasks.add_task(run_paper_summary_task, summary_id, payload.provider_id)
+    sync_run_draft_progress(db, run)
     if run.status in {"queued", "running"}:
         _spawn_matrix_run_task(run.id, payload.provider_id)
     return ResearchMatrixRunResponse(**serialize_run_detail(db, run, current_user.id))
@@ -156,6 +179,28 @@ def get_matrix_run(
     db: Annotated[Session, Depends(get_db)],
 ) -> ResearchMatrixRunResponse:
     run = _load_run(db, run_id, current_user.id)
+    if run.status == "queued":
+        _spawn_matrix_run_task(run.id, None)
+    draft_state = (run.config_json or {}).get("draft_state") if isinstance(run.config_json, dict) else {}
+    if (draft_state or {}).get("status") != "completed":
+        sync_run_draft_progress(db, run)
+        run = _load_run(db, run_id, current_user.id)
+        refreshed_draft_state = (run.config_json or {}).get("draft_state") if isinstance(run.config_json, dict) else {}
+        if (refreshed_draft_state or {}).get("status") == "completed":
+            sync_run_draft_snapshot(db, run)
+            run = _load_run(db, run_id, current_user.id)
+    if run.status in {"queued", "running"} and run.ready_count >= run.total_count and run.total_count:
+        sync_run_matrix_snapshot(db, run, current_user.id)
+        run = _load_run(db, run_id, current_user.id)
+        source_state = (run.config_json or {}).get("draft_state") if isinstance(run.config_json, dict) else {}
+        if (source_state or {}).get("status") == "completed":
+            run.status = "completed"
+            run.stage = "completed"
+            run.progress_percent = 100
+            run.error_message = None
+            db.add(run)
+            db.commit()
+            db.refresh(run)
     return ResearchMatrixRunResponse(**serialize_run_detail(db, run, current_user.id))
 
 
@@ -170,6 +215,32 @@ def update_matrix_run(
     run = rename_matrix_run(db, run, title=payload.title)
     run = _load_run(db, run.id, current_user.id)
     return ResearchMatrixRunResponse(**serialize_run_detail(db, run, current_user.id))
+
+
+@router.patch("/runs/{run_id}/grouping-mode", response_model=ResearchMatrixRunResponse)
+def update_matrix_run_grouping_mode_endpoint(
+    run_id: int,
+    payload: ResearchMatrixGroupingModeUpdateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ResearchMatrixRunResponse:
+    run = _load_run(db, run_id, current_user.id)
+    _raise_if_run_source_deleted(db, run, current_user.id)
+    try:
+        updated = update_matrix_run_grouping_mode(
+            db,
+            run,
+            user_id=current_user.id,
+            grouping_mode=payload.grouping_mode,
+        )
+    except ValueError as exc:
+        mapping = {
+            "run_not_completed": (409, "当前批次尚未完成，暂不能切换生成模式"),
+            "run_missing": (404, "文献矩阵记录不存在"),
+        }
+        status_code, detail = mapping.get(str(exc), (400, str(exc)))
+        raise HTTPException(status_code=status_code, detail=detail) from None
+    return ResearchMatrixRunResponse(**serialize_run_detail(db, updated, current_user.id))
 
 
 @router.patch("/runs/{run_id}/papers/{paper_id}", response_model=ResearchMatrixRunResponse)
@@ -203,6 +274,102 @@ def update_matrix_run_paper_endpoint(
         status_code, detail = mapping.get(str(exc), (400, str(exc)))
         raise HTTPException(status_code=status_code, detail=detail) from None
     return ResearchMatrixRunResponse(**serialize_run_detail(db, updated, current_user.id))
+
+
+@router.patch("/runs/{run_id}/outline", response_model=ResearchMatrixRunResponse)
+def update_matrix_run_outline_endpoint(
+    run_id: int,
+    payload: ResearchMatrixOutlineUpdateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ResearchMatrixRunResponse:
+    run = _load_run(db, run_id, current_user.id)
+    _raise_if_run_source_deleted(db, run, current_user.id)
+    try:
+        updated = update_matrix_run_outline(
+            db,
+            run,
+            outline_sections=payload.outline_sections,
+        )
+    except ValueError as exc:
+        mapping = {
+            "run_not_completed": (409, "当前批次尚未完成，暂不能编辑大纲"),
+            "outline_missing": (400, "没有可保存的大纲内容"),
+            "run_missing": (404, "文献矩阵记录不存在"),
+        }
+        status_code, detail = mapping.get(str(exc), (400, str(exc)))
+        raise HTTPException(status_code=status_code, detail=detail) from None
+    return ResearchMatrixRunResponse(**serialize_run_detail(db, updated, current_user.id))
+
+
+@router.post("/runs/{run_id}/drafts:rewrite-section", response_model=ResearchMatrixRunResponse)
+def rewrite_matrix_run_draft_section_endpoint(
+    run_id: int,
+    payload: ResearchMatrixDraftSectionRewriteRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ResearchMatrixRunResponse:
+    run = _load_run(db, run_id, current_user.id)
+    _raise_if_run_source_deleted(db, run, current_user.id)
+    try:
+        updated = rewrite_matrix_run_draft_section(
+            db,
+            run,
+            section_key=payload.section_key,
+        )
+    except ValueError as exc:
+        mapping = {
+            "run_not_completed": (409, "当前批次尚未完成，暂不能重写草稿"),
+            "draft_section_invalid": (400, "无效的草稿章节"),
+            "draft_section_missing": (404, "当前批次里没有这节草稿"),
+            "draft_sources_missing": (409, "当前草稿来源还没齐，暂时不能重写"),
+            "run_missing": (404, "文献矩阵记录不存在"),
+        }
+        status_code, detail = mapping.get(str(exc), (400, str(exc)))
+        raise HTTPException(status_code=status_code, detail=detail) from None
+    return ResearchMatrixRunResponse(**serialize_run_detail(db, updated, current_user.id))
+
+
+@router.post("/runs/{run_id}/drafts:prepare-sources", response_model=ResearchMatrixRunResponse)
+def prepare_matrix_run_draft_sources_endpoint(
+    run_id: int,
+    payload: ResearchMatrixPrepareDraftSourcesRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ResearchMatrixRunResponse:
+    run = _load_run(db, run_id, current_user.id)
+    _raise_if_run_source_deleted(db, run, current_user.id)
+    summary_ids = prepare_missing_run_draft_sources(
+        db,
+        run,
+        provider_id=payload.provider_id,
+        summary_types=tuple(payload.summary_types or ["overview", "reproduction"]),
+    )
+    for summary_id in summary_ids:
+        background_tasks.add_task(run_paper_summary_task, summary_id, payload.provider_id)
+    refreshed = _load_run(db, run_id, current_user.id)
+    return ResearchMatrixRunResponse(**serialize_run_detail(db, refreshed, current_user.id))
+
+
+@router.post("/runs/{run_id}/insights:refresh", response_model=ResearchMatrixRunResponse)
+def refresh_matrix_run_insights(
+    run_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ResearchMatrixRunResponse:
+    run = _load_run(db, run_id, current_user.id)
+    _raise_if_run_source_deleted(db, run, current_user.id)
+    try:
+        refreshed = refresh_run_insights(db, run)
+    except ValueError as exc:
+        mapping = {
+            "run_not_completed": (409, "当前批次尚未完成，暂不能刷新比较导读"),
+            "run_missing": (404, "当前批次不存在"),
+        }
+        status_code, detail = mapping.get(str(exc), (400, str(exc)))
+        raise HTTPException(status_code=status_code, detail=detail) from None
+    return ResearchMatrixRunResponse(**serialize_run_detail(db, refreshed, current_user.id))
 
 
 @router.post("/runs/{run_id}/refresh", response_model=ResearchMatrixRunResponse, status_code=status.HTTP_201_CREATED)

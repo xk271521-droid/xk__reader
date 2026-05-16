@@ -42,14 +42,10 @@ from app.services.paper_summary import (
 
 MATRIX_FIELDS = [
     ("research_question", "研究问题"),
-    ("core_metrics", "核心变量/指标"),
     ("method_route", "方法路线"),
-    ("data_sample", "数据与样本"),
     ("main_findings", "核心发现"),
     ("innovations", "创新点"),
     ("limitations", "局限与风险"),
-    ("review_role", "综述定位"),
-    ("comparison_tags", "可对比标签"),
 ]
 
 RUN_STAGE_LABELS = {
@@ -62,7 +58,7 @@ RUN_STAGE_LABELS = {
     "failed": "生成失败",
 }
 
-LIST_FIELDS = {"core_metrics", "innovations", "limitations", "comparison_tags"}
+LIST_FIELDS = {"innovations", "limitations"}
 RUN_ONLY_FIELDS = {"review_role", "batch_note"}
 STRUCTURED_FIELD_SET = set(REVIEW_STRUCTURED_FIELD_ORDER)
 
@@ -84,6 +80,23 @@ RESOURCE_LABELS = {
 WORKER_HEARTBEAT_TIMEOUT_SECONDS = 90
 WORKER_HEARTBEAT_INTERVAL_SECONDS = 5
 WORKER_MAX_RETRIES = 2
+
+
+INSIGHT_STATUS_LABELS = {
+    "idle": "等待生成",
+    "running": "正在整理",
+    "completed": "已完成",
+    "stale": "需要刷新",
+    "failed": "整理失败",
+}
+
+INSIGHT_FIELD_KEYS = [
+    "research_question",
+    "method_route",
+    "main_findings",
+    "innovations",
+    "limitations",
+]
 
 
 def iso(value: datetime | None) -> str | None:
@@ -168,6 +181,30 @@ def is_run_worker_stale(run: ResearchMatrixRun) -> bool:
     return (now - heartbeat).total_seconds() > WORKER_HEARTBEAT_TIMEOUT_SECONDS
 
 
+def normalize_run_runtime_state(db: Session, run: ResearchMatrixRun) -> ResearchMatrixRun:
+    if run.status not in {"queued", "running"}:
+        return run
+    if not is_run_worker_stale(run):
+        return run
+    if int(run.worker_retry_count or 0) >= WORKER_MAX_RETRIES:
+        run.status = "failed"
+        run.stage = "failed"
+        run.error_message = compact_text(
+            run.last_worker_error or "批次生成中断且已达到最大自动重试次数，请手动继续补齐。",
+            600,
+        )
+        mark_run_worker_failed(db, run, run.error_message or "批次生成失败")
+        refreshed = load_run_with_papers(db, run.id)
+        return refreshed or run
+    run.status = "queued"
+    run.stage = "queued"
+    run.error_message = None
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
 def compact_text(value: Any, limit: int = 220) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= limit:
@@ -237,6 +274,19 @@ def build_row_from_review_summary(
         )
     review_content = get_review_summary_content(review.content_json if isinstance(review.content_json, dict) else {})
     structured = dict(review_content.get("structured_fields") or {})
+    field_blocks = {
+        str(block.get("key") or ""): block
+        for block in (review_content.get("review_field_blocks") or [])
+        if isinstance(block, dict)
+    }
+
+    def block_summary(field_key: str, fallback: Any, *, limit: int = 260) -> str:
+        block = field_blocks.get(field_key) or {}
+        summary_text = str(block.get("summary") or "").strip()
+        if summary_text:
+            return compact_text(summary_text, limit)
+        return compact_text(fallback, limit)
+
     row = build_empty_row(
         paper,
         folder_name,
@@ -245,14 +295,11 @@ def build_row_from_review_summary(
         review_stale=review_stale,
     )
     row["summary_updated_at"] = iso(review.updated_at)
-    row["research_question"] = compact_text(structured.get("research_question"), 260)
-    row["core_metrics"] = compact_text(join_list(structured.get("core_metrics")), 180)
-    row["method_route"] = compact_text(structured.get("method_route"), 260)
-    row["data_sample"] = compact_text(structured.get("data_sample"), 220)
-    row["main_findings"] = compact_text(structured.get("main_findings"), 260)
-    row["innovations"] = compact_text(join_list(structured.get("innovations")), 220)
-    row["limitations"] = compact_text(join_list(structured.get("limitations")), 220)
-    row["comparison_tags"] = compact_text(join_list(structured.get("comparison_tags")), 160)
+    row["research_question"] = block_summary("research_question", structured.get("research_question"))
+    row["method_route"] = block_summary("method_route", structured.get("method_route"))
+    row["main_findings"] = block_summary("main_findings", structured.get("main_findings"))
+    row["innovations"] = block_summary("innovations", join_list(structured.get("innovations")), limit=220)
+    row["limitations"] = block_summary("limitations", join_list(structured.get("limitations")), limit=220)
     row["preview"] = compact_text(review_content.get("preview"), 180)
     row["highlights"] = [compact_text(item, 120) for item in (review_content.get("highlights") or [])[:4]]
     return row
@@ -424,6 +471,7 @@ def build_rule_drafts(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 DRAFT_REQUIRED_SUMMARY_TYPES = ("overview", "review", "reproduction")
+GROUPING_MODES = ("topic_first", "method_first")
 DRAFT_STAGE_LABELS = {
     "idle": "待准备",
     "preparing_sources": "准备来源卡片",
@@ -458,10 +506,11 @@ DRAFT_SECTION_TITLES = {
 
 
 REVIEW_SECTION_HINTS = {
+    "background_motivation": ("研究背景", "背景", "动机"),
     "research_question": ("研究问题", "对象"),
-    "core_metrics": ("关键变量", "指标"),
     "method_route": ("方法路线", "方法"),
-    "data_sample": ("数据与样本", "样本", "数据"),
+    "data_experiment": ("数据", "样本", "实验设置", "数据与实验设置"),
+    "baselines_metrics": ("基线", "对比", "评价指标", "对比基线与评价指标"),
     "main_findings": ("核心发现", "结论"),
     "innovations": ("创新点",),
     "limitations": ("局限", "风险"),
@@ -578,6 +627,181 @@ def apply_draft_payload_to_run(
         failed_count=draft_state["failed_count"],
         error_message=draft_state["error_message"],
     )
+
+
+def ensure_insight_state(config: dict[str, Any] | None) -> dict[str, Any]:
+    current = dict(config or {})
+    state = dict(current.get("insights_state") or {})
+    status = str(state.get("status") or "idle")
+    current["insights_state"] = {
+        "status": status,
+        "stage_label": INSIGHT_STATUS_LABELS.get(status, status),
+        "updated_at": state.get("updated_at"),
+        "error_message": state.get("error_message"),
+        "stale": bool(state.get("stale")) if status != "completed" else False,
+    }
+    return current
+
+
+def set_run_insight_state(
+    run: ResearchMatrixRun,
+    *,
+    status: str,
+    stale: bool = False,
+    error_message: str | None = None,
+    updated_at: str | None = None,
+) -> None:
+    config = ensure_insight_state(run.config_json if isinstance(run.config_json, dict) else {})
+    config["insights_state"] = {
+        "status": status,
+        "stage_label": INSIGHT_STATUS_LABELS.get(status, status),
+        "updated_at": updated_at,
+        "error_message": compact_text(error_message, 600) if error_message else None,
+        "stale": bool(stale),
+    }
+    run.config_json = config
+
+
+def serialize_insight_state(run: ResearchMatrixRun) -> dict[str, Any]:
+    config = ensure_insight_state(run.config_json if isinstance(run.config_json, dict) else {})
+    state = dict(config.get("insights_state") or {})
+    payload = dict((run.dashboard_snapshot or {}).get("insights") or {})
+    text_fragments = [
+        *list(payload.get("consensus") or []),
+        *list(payload.get("differences") or []),
+        *list(payload.get("gaps") or []),
+    ]
+    if any("?" in str(item or "") for item in text_fragments):
+        clean_payload = build_fallback_insights(insight_source_rows(run))
+        dashboard = dict(run.dashboard_snapshot or {})
+        dashboard["insights"] = clean_payload
+        run.dashboard_snapshot = dashboard
+        payload = clean_payload
+        set_run_insight_state(run, status="completed", stale=False, error_message=None, updated_at=iso(utcnow()))
+    return {
+        "insights": {
+            "status": state.get("status", "idle"),
+            "stage_label": state.get("stage_label", INSIGHT_STATUS_LABELS["idle"]),
+            "updated_at": state.get("updated_at"),
+            "stale": bool(state.get("stale")),
+            "consensus": list(payload.get("consensus") or []),
+            "differences": list(payload.get("differences") or []),
+            "gaps": list(payload.get("gaps") or []),
+            "error_message": state.get("error_message"),
+        }
+    }
+
+
+def insight_source_rows(run: ResearchMatrixRun) -> list[dict[str, Any]]:
+    rows = []
+    for item in sorted(run.papers, key=lambda value: value.sort_order):
+        row = dict(item.row_snapshot or {})
+        if not row:
+            continue
+        if not any(row.get(key) for key in INSIGHT_FIELD_KEYS):
+            continue
+        rows.append(row)
+    return rows
+
+
+def join_non_empty(parts: list[str]) -> str:
+    return "；".join([part for part in parts if str(part or "").strip()])
+
+
+def build_fallback_insights(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "consensus": ["当前批次还没有足够内容形成稳定共识，建议先补齐论文矩阵中的关键字段。"],
+            "differences": ["当前批次还没有抽出明确差异，建议优先核对研究问题、方法路线和核心发现。"],
+            "gaps": ["当前批次还没有整理出明确研究空白，可在补齐局限与风险后再归纳。"],
+        }
+
+    question_values = [compact_text(row.get("research_question"), 220) for row in rows if row.get("research_question")]
+    method_values = [compact_text(row.get("method_route"), 220) for row in rows if row.get("method_route")]
+    finding_values = [compact_text(row.get("main_findings"), 220) for row in rows if row.get("main_findings")]
+    innovation_values = [compact_text(row.get("innovations"), 220) for row in rows if row.get("innovations")]
+    limitation_values = [compact_text(row.get("limitations"), 220) for row in rows if row.get("limitations")]
+
+    consensus = []
+    if question_values:
+        consensus.append(f"这批论文的研究问题主要集中在：{join_non_empty(question_values[:3])}。")
+    if method_values:
+        consensus.append(f"方法路线层面，当前样本主要围绕：{join_non_empty(method_values[:3])}。")
+    if finding_values:
+        consensus.append(f"核心发现层面，已经能归纳出：{join_non_empty(finding_values[:3])}。")
+
+    differences = []
+    if len(method_values) > 1:
+        differences.append(f"方法选择上仍存在明显分化，主要表现为：{join_non_empty(method_values[:4])}。")
+    if len(innovation_values) > 1:
+        differences.append(f"创新点分布并不一致，当前主要差异集中在：{join_non_empty(innovation_values[:4])}。")
+    if len(finding_values) > 1:
+        differences.append(f"不同论文在结果表述和结论强调上也有差别，集中体现在：{join_non_empty(finding_values[:4])}。")
+
+    gaps = []
+    if limitation_values:
+        gaps.append(f"现有研究暴露出的共性局限主要包括：{join_non_empty(limitation_values[:4])}。")
+    gaps.append("后续写作中可以继续追问样本规模、实验边界、适用场景和泛化能力是否充分说明。")
+
+    return {
+        "consensus": consensus[:3] or ["当前批次的显性共识还不够强，建议先回到矩阵核对研究问题和核心发现。"],
+        "differences": differences[:3] or ["当前差异点还不够集中，建议补充更多方法与结果描述后再比较。"],
+        "gaps": gaps[:3],
+    }
+
+
+def build_run_insights_payload(db: Session, run: ResearchMatrixRun) -> dict[str, Any]:
+    rows = insight_source_rows(run)
+    fallback = build_fallback_insights(rows)
+    return fallback
+
+
+def sync_run_insights_snapshot(db: Session, run: ResearchMatrixRun) -> None:
+    set_run_insight_state(run, status="running", stale=False, error_message=None)
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    try:
+        insights = build_run_insights_payload(db, run)
+        dashboard = dict(run.dashboard_snapshot or {})
+        dashboard["insights"] = insights
+        run.dashboard_snapshot = dashboard
+        set_run_insight_state(run, status="completed", stale=False, error_message=None, updated_at=iso(utcnow()))
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+    except Exception as exc:
+        set_run_insight_state(run, status="failed", stale=False, error_message=f"比较导读整理失败：{exc}")
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+
+
+def mark_run_insights_stale(db: Session, run: ResearchMatrixRun) -> None:
+    current = dict((run.dashboard_snapshot or {}).get("insights") or {})
+    dashboard = dict(run.dashboard_snapshot or {})
+    dashboard["insights"] = current
+    run.dashboard_snapshot = dashboard
+    set_run_insight_state(
+        run,
+        status="stale" if current else "idle",
+        stale=bool(current),
+        error_message=None,
+        updated_at=iso(utcnow()) if current else None,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+
+def refresh_run_insights(db: Session, run: ResearchMatrixRun) -> ResearchMatrixRun:
+    if run.status != "completed":
+        raise ValueError("run_not_completed")
+    sync_run_insights_snapshot(db, run)
+    refreshed = load_run_with_papers(db, run.id)
+    if not refreshed:
+        raise ValueError("run_missing")
+    return refreshed
 
 
 def serialize_draft_state(run: ResearchMatrixRun) -> dict[str, Any]:
@@ -712,12 +936,32 @@ def paragraph_item(
     }
 
 
-def citation_item(*, paper_title: str, source_card_type: str, page: int | None = None) -> dict[str, Any]:
-    return {
+def citation_item(
+    *,
+    paper_id: int | None = None,
+    paper_title: str,
+    source_card_type: str,
+    page: int | None = None,
+    quote: str = "",
+    start_char: int | None = None,
+    end_char: int | None = None,
+    source_section: str = "",
+) -> dict[str, Any]:
+    payload = {
+        "paper_id": paper_id,
         "paper_title": paper_title,
         "source_card_type": source_card_type,
         "page": page,
     }
+    if quote:
+        payload["quote"] = quote
+    if start_char is not None:
+        payload["start_char"] = start_char
+    if end_char is not None:
+        payload["end_char"] = end_char
+    if source_section:
+        payload["source_section"] = source_section
+    return payload
 
 
 def summary_content_payload(state: dict[str, Any] | None) -> dict[str, Any]:
@@ -836,10 +1080,11 @@ def tokenize_topic_text(value: Any) -> list[str]:
 def summarize_bundle_topics(bundle: dict[str, Any]) -> dict[str, Any]:
     topic_tokens: list[str] = []
     for value in [
+        bundle["review_fields"].get("background_motivation"),
         bundle["review_fields"].get("research_question"),
         bundle["review_fields"].get("method_route"),
+        bundle["review_fields"].get("baselines_metrics"),
         bundle["review_fields"].get("main_findings"),
-        bundle["review_fields"].get("comparison_tags"),
         bundle["overview_preview"],
     ]:
         topic_tokens.extend(tokenize_topic_text(value))
@@ -853,8 +1098,10 @@ def summarize_bundle_topics(bundle: dict[str, Any]) -> dict[str, Any]:
     method_text = " ".join(
         str(value or "")
         for value in [
+            bundle["review_fields"].get("background_motivation"),
             bundle["review_fields"].get("research_question"),
             bundle["review_fields"].get("method_route"),
+            bundle["review_fields"].get("baselines_metrics"),
             bundle["overview_preview"],
         ]
     ).lower()
@@ -876,6 +1123,118 @@ def overlap_score(left: set[str], right: set[str]) -> float:
         return 0.0
     common = len(left & right)
     return common / max(1, min(len(left), len(right)))
+
+
+def merge_topic_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    merged_tokens: list[str] = []
+    seen_tokens: set[str] = set()
+    for row in rows:
+        for token in row.get("tokens") or []:
+            normalized = str(token or "").strip()
+            if not normalized or normalized in seen_tokens:
+                continue
+            seen_tokens.add(normalized)
+            merged_tokens.append(normalized)
+    return {
+        "rows": list(rows),
+        "tokens": set(merged_tokens),
+    }
+
+
+def max_review_group_count(paper_count: int) -> int:
+    if paper_count <= 8:
+        return 2
+    if paper_count <= 18:
+        return 3
+    if paper_count <= 36:
+        return 4
+    return 5
+
+
+def compress_topic_groups(
+    groups: list[dict[str, Any]],
+    *,
+    paper_count: int,
+) -> list[dict[str, Any]]:
+    if not groups:
+        return []
+    if paper_count <= 4:
+        merged_rows = [row for group in groups for row in group.get("rows") or []]
+        return [merge_topic_rows(merged_rows)] if merged_rows else []
+
+    max_groups = max_review_group_count(paper_count)
+    min_group_size = 2
+
+    ordered = sorted(groups, key=lambda group: len(group.get("rows") or []), reverse=True)
+    major_groups = [group for group in ordered if len(group.get("rows") or []) >= min_group_size]
+    minor_groups = [group for group in ordered if len(group.get("rows") or []) < min_group_size]
+
+    if not major_groups:
+        merged_rows = [row for group in ordered for row in group.get("rows") or []]
+        return [merge_topic_rows(merged_rows)] if merged_rows else []
+
+    keep_groups = [
+        {
+            "rows": list(group.get("rows") or []),
+            "tokens": set(group.get("tokens") or set()),
+        }
+        for group in major_groups[:max_groups]
+    ]
+    overflow_groups = major_groups[max_groups:] + minor_groups
+
+    for group in overflow_groups:
+        if not keep_groups:
+            keep_groups.append(merge_topic_rows(list(group.get("rows") or [])))
+            continue
+        best_target = max(
+            keep_groups,
+            key=lambda candidate: overlap_score(set(group.get("tokens") or set()), set(candidate.get("tokens") or set())),
+        )
+        best_target["rows"].extend(list(group.get("rows") or []))
+        best_target["tokens"].update(set(group.get("tokens") or set()))
+
+    return sorted(keep_groups, key=lambda group: len(group.get("rows") or []), reverse=True)
+
+
+def normalize_topic_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    method_priority = {
+        "cnn": 0,
+        "multimodal": 1,
+        "transformer": 2,
+        "rnn": 3,
+        "lstm": 4,
+        "gcn": 5,
+        "gnn": 6,
+        "gan": 7,
+        "unet": 8,
+    }
+    normalized_groups: list[dict[str, Any]] = []
+    for index, group in enumerate(groups, start=1):
+        token_counts: dict[str, int] = {}
+        for row in group.get("rows") or []:
+            for token in set(row.get("tokens") or []):
+                normalized = str(token or "").strip()
+                if not normalized:
+                    continue
+                token_counts[normalized] = token_counts.get(normalized, 0) + 1
+        ranked_tokens = [
+            token
+            for token, _count in sorted(
+                token_counts.items(),
+                key=lambda item: (-item[1], method_priority.get(item[0], 99), item[0]),
+            )
+        ]
+        repeated_tokens = [token for token in ranked_tokens if token_counts.get(token, 0) >= 2]
+        token_examples = (repeated_tokens or ranked_tokens)[:3]
+        label = " / ".join(token_examples) if token_examples else f"主题 {index}"
+        normalized_groups.append(
+            {
+                "label": label,
+                "paper_titles": [row["paper_title"] for row in group.get("rows") or [] if row.get("paper_title")],
+                "topic_tokens": token_examples,
+            }
+        )
+    return normalized_groups
 
 
 def analyze_bundle_cohesion(bundles: list[dict[str, Any]], *, grouping_mode: str = "topic_first") -> dict[str, Any]:
@@ -943,21 +1302,17 @@ def analyze_bundle_cohesion(bundles: list[dict[str, Any]], *, grouping_mode: str
                 }
             )
 
-    normalized_groups: list[dict[str, Any]] = []
-    for index, group in enumerate(groups, start=1):
-        token_examples = [token for token in group["tokens"] if token][:3]
-        label = " / ".join(token_examples) if token_examples else f"主题 {index}"
-        normalized_groups.append(
-            {
-                "label": label,
-                "paper_titles": [row["paper_title"] for row in group["rows"] if row["paper_title"]],
-                "topic_tokens": token_examples,
-            }
-        )
+    compressed_groups = compress_topic_groups(groups, paper_count=len(topic_rows))
+    normalized_groups = normalize_topic_groups(compressed_groups)
 
     largest_group = max((len(group["paper_titles"]) for group in normalized_groups), default=0)
     group_count = len(normalized_groups)
-    cohesive = group_count == 1 or largest_group >= max(2, len(topic_rows) - 1)
+    dominant_ratio = largest_group / max(1, len(topic_rows))
+    cohesive = (
+        len(topic_rows) <= 4
+        or group_count == 1
+        or (group_count == 2 and dominant_ratio >= 0.7)
+    )
     if cohesive:
         return {
             "is_cohesive": True,
@@ -1086,6 +1441,8 @@ def build_outline_insights(drafts: dict[str, Any]) -> dict[str, list[str]]:
 def build_review_outline(
     drafts: dict[str, Any],
     cohesion: dict[str, Any],
+    *,
+    grouping_mode: str = "topic_first",
 ) -> dict[str, Any]:
     groups = cohesion.get("groups") or []
     sections: list[dict[str, Any]] = []
@@ -1135,6 +1492,7 @@ def build_review_outline(
     return {
         "key": "review_outline",
         "title": DRAFT_SECTION_TITLES["review_outline"],
+        "grouping_mode": grouping_mode,
         "paragraphs": [paragraph_item(intro, [], "weak")],
         "items": [],
         "content": intro,
@@ -1211,11 +1569,47 @@ def first_page_from_evidence(evidence: list[dict[str, Any]] | None) -> int | Non
     return None
 
 
+def first_evidence_anchor(evidence: list[dict[str, Any]] | None) -> dict[str, Any]:
+    if not evidence:
+        return {}
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        page = item.get("page") or item.get("page_number")
+        if page in {None, ""}:
+            continue
+        try:
+            page_number = int(page)
+        except (TypeError, ValueError):
+            continue
+        if page_number <= 0:
+            continue
+        return {
+            "page": page_number,
+            "quote": compact_text(
+                item.get("quote") or item.get("quote_text") or item.get("source_quote") or "",
+                260,
+            ),
+            "start_char": item.get("start_char"),
+            "end_char": item.get("end_char"),
+            "source_section": compact_text(
+                item.get("source_section") or item.get("section") or "",
+                160,
+            ),
+        }
+    return {}
+
+
 def dedupe_citations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in items:
-        key = f"{item.get('paper_title')}::{item.get('source_card_type')}::{item.get('page') or ''}"
+        key = (
+            f"{item.get('paper_id') or ''}::{item.get('paper_title')}::"
+            f"{item.get('source_card_type')}::{item.get('page') or ''}::"
+            f"{item.get('start_char') or ''}:{item.get('end_char') or ''}::"
+            f"{compact_text(item.get('quote') or '', 80)}"
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -1228,14 +1622,32 @@ def citations_from_sections(
     source_card_type: str,
     sections: list[dict[str, Any]],
     *,
+    paper_id: int | None = None,
     fallback: bool = True,
 ) -> list[dict[str, Any]]:
     citations: list[dict[str, Any]] = []
     for section in sections:
-        page = first_page_from_evidence(list(section.get("evidence") or []))
-        citations.append(citation_item(paper_title=paper_title, source_card_type=source_card_type, page=page))
+        anchor = first_evidence_anchor(list(section.get("evidence") or []))
+        citations.append(
+            citation_item(
+                paper_id=paper_id,
+                paper_title=paper_title,
+                source_card_type=source_card_type,
+                page=anchor.get("page"),
+                quote=anchor.get("quote") or "",
+                start_char=anchor.get("start_char"),
+                end_char=anchor.get("end_char"),
+                source_section=anchor.get("source_section") or str(section.get("heading") or ""),
+            )
+        )
     if not citations and fallback:
-        citations.append(citation_item(paper_title=paper_title, source_card_type=source_card_type))
+        citations.append(
+            citation_item(
+                paper_id=paper_id,
+                paper_title=paper_title,
+                source_card_type=source_card_type,
+            )
+        )
     return dedupe_citations(citations)
 
 
@@ -1485,7 +1897,7 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                     review_sections_for_field(review_sections, "method_route"),
                 ),
             )
-            for item in normalize_text_list(bundle["review_fields"].get("core_metrics"), limit=5):
+            for item in normalize_text_list(bundle["review_fields"].get("baselines_metrics"), limit=5):
                 append_section_entry(
                     metric_entries,
                     text=item,
@@ -1493,7 +1905,7 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                     citations=citations_from_sections(
                         paper_title,
                         "review",
-                        review_sections_for_field(review_sections, "core_metrics"),
+                        review_sections_for_field(review_sections, "baselines_metrics"),
                     ),
                 )
         for paragraph in [
@@ -1522,12 +1934,12 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
             )
             append_section_entry(
                 evaluation_entries,
-                text=compact_text(bundle["review_fields"].get("data_sample"), 220),
+                text=compact_text(bundle["review_fields"].get("data_experiment"), 220),
                 paper_title=paper_title,
                 citations=citations_from_sections(
                     paper_title,
                     "review",
-                    review_sections_for_field(review_sections, "data_sample"),
+                    review_sections_for_field(review_sections, "data_experiment"),
                 ),
             )
             result_sections = find_sections_by_hints(reproduction_sections, REPRO_RESULT_HINTS, limit=2)
@@ -1635,25 +2047,25 @@ def build_section_paragraph(bundle: dict[str, Any], section_key: str) -> dict[st
 
     elif section_key == "method_compare":
         method_route = compact_text(review_fields.get("method_route"), 240)
-        core_metrics = normalize_text_list(review_fields.get("core_metrics"), limit=5)
+        baselines_metrics = normalize_text_list(review_fields.get("baselines_metrics"), limit=5)
         if method_route:
             parts.append(f"《{paper_title}》采用的方法路线是：{method_route}")
             citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "method_route")))
-        if core_metrics:
-            parts.append(f"用于比较的方法抓手主要包括：{'；'.join(core_metrics[:4])}。")
-            citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "core_metrics")))
+        if baselines_metrics:
+            parts.append(f"用于比较的基线、评价指标或消融设置主要包括：{'；'.join(baselines_metrics[:4])}。")
+            citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "baselines_metrics")))
 
     elif section_key == "result_analysis":
         findings = compact_text(review_fields.get("main_findings"), 220)
-        data_sample = compact_text(review_fields.get("data_sample"), 220)
+        data_experiment = compact_text(review_fields.get("data_experiment"), 220)
         result_sections = find_sections_by_hints(reproduction_sections, REPRO_RESULT_HINTS, limit=2)
         reproduction_text = join_sentences([section.get("body") or "" for section in result_sections], limit=340)
         if findings:
             parts.append(f"从结果上看，《{paper_title}》的核心发现是：{findings}")
             citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "main_findings")))
-        if data_sample:
-            parts.append(f"它使用的数据与样本信息为：{data_sample}")
-            citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "data_sample")))
+        if data_experiment:
+            parts.append(f"它使用的数据、样本与实验设置信息为：{data_experiment}")
+            citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "data_experiment")))
         if reproduction_text:
             parts.append(f"复现总结补充的实验、指标或参数硬信息包括：{reproduction_text}")
             citations.extend(citations_from_sections(paper_title, "reproduction", result_sections))
@@ -1709,10 +2121,14 @@ def collect_quotable_items(source_map: dict[int, dict[str, Any]], paper_title_by
                         continue
                     seen.add(key)
                     items.append({
+                        "paper_id": paper_id,
                         "paper_title": paper_title,
                         "page": page,
                         "quote": quote,
                         "source_card_type": summary_type,
+                        "start_char": (evidence or {}).get("start_char"),
+                        "end_char": (evidence or {}).get("end_char"),
+                        "source_section": compact_text(heading, 160),
                         "usage_note": quote_usage_note(summary_type, heading),
                     })
                     if len(items) >= 16:
@@ -1927,7 +2343,7 @@ def build_structured_drafts_for_bundles(
 
     if not cohesion["is_cohesive"]:
         drafts["topic_diagnostic"], guidance = build_topic_diagnostic_section(cohesion, bundles)
-        drafts["review_outline"] = build_review_outline(drafts, cohesion)
+        drafts["review_outline"] = build_review_outline(drafts, cohesion, grouping_mode=grouping_mode)
         drafts["final_integrated_review"] = {
             "key": "final_integrated_review",
             "title": DRAFT_SECTION_TITLES["final_integrated_review"],
@@ -1957,7 +2373,7 @@ def build_structured_drafts_for_bundles(
     )
     drafts["quotable_sentences"]["source_titles"] = [item["paper_title"] for item in quotable_items[:8] if item.get("paper_title")]
     drafts["quotable_sentences"]["ai_generated"] = False
-    drafts["review_outline"] = build_review_outline(drafts, cohesion)
+    drafts["review_outline"] = build_review_outline(drafts, cohesion, grouping_mode=grouping_mode)
     drafts["final_integrated_review"] = build_ai_integrated_review(db, run, drafts) if allow_ai_integrated_review else fallback_integrated_review(drafts)
     return drafts, cohesion
 
@@ -1968,9 +2384,10 @@ def build_structured_drafts_from_sources(
     source_map: dict[int, dict[str, Any]],
     *,
     allow_ai_integrated_review: bool = True,
+    grouping_mode: str | None = None,
 ) -> dict[str, Any]:
     paper_title_by_id = {item.paper_id: item.title_snapshot for item in run.papers if item.paper_id}
-    grouping_mode = str((run.config_json or {}).get("grouping_mode") or "topic_first")
+    selected_grouping_mode = str(grouping_mode or (run.config_json or {}).get("grouping_mode") or "topic_first")
     bundles = [
         build_paper_draft_bundle(run_paper, source_map.get(run_paper.paper_id, {}))
         for run_paper in run.papers
@@ -1983,7 +2400,7 @@ def build_structured_drafts_from_sources(
         source_map,
         paper_title_by_id,
         allow_ai_integrated_review=allow_ai_integrated_review,
-        grouping_mode=grouping_mode,
+        grouping_mode=selected_grouping_mode,
     )
     if not cohesion["is_cohesive"]:
         grouped_outlines: list[dict[str, Any]] = []
@@ -2002,7 +2419,7 @@ def build_structured_drafts_from_sources(
                 group_source_map,
                 paper_title_by_id,
                 allow_ai_integrated_review=False,
-                grouping_mode=grouping_mode,
+                grouping_mode=selected_grouping_mode,
             )
             group_outline = dict(group_drafts.get("review_outline") or {})
             grouped_outlines.append(
@@ -2079,6 +2496,43 @@ def apply_pending_messages_to_drafts(
     return drafts
 
 
+def build_mode_variant_snapshot(
+    variants: dict[str, dict[str, Any]],
+    *,
+    preferred_mode: str,
+) -> dict[str, Any]:
+    available_modes = [mode for mode in GROUPING_MODES if isinstance(variants.get(mode), dict)]
+    active_mode = preferred_mode if preferred_mode in available_modes else (available_modes[0] if available_modes else "topic_first")
+    return {
+        "active_mode": active_mode,
+        "available_modes": available_modes,
+        "modes": variants,
+    }
+
+
+def unpack_mode_variant_snapshot(
+    snapshot: dict[str, Any] | None,
+    *,
+    preferred_mode: str,
+) -> tuple[dict[str, dict[str, Any]], list[str], str]:
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("modes"), dict):
+        raw_variants = snapshot.get("modes") or {}
+        variants = {
+            mode: payload
+            for mode, payload in raw_variants.items()
+            if isinstance(payload, dict)
+        }
+        available_modes = [mode for mode in GROUPING_MODES if mode in variants]
+        active_mode = str(snapshot.get("active_mode") or preferred_mode or "topic_first")
+        if active_mode not in available_modes and available_modes:
+            active_mode = available_modes[0]
+        return variants, available_modes, active_mode
+
+    legacy_payload = snapshot if isinstance(snapshot, dict) else {}
+    mode = str(preferred_mode or "topic_first")
+    return ({mode: legacy_payload} if legacy_payload else {}), ([mode] if legacy_payload else []), mode
+
+
 def build_run_drafts_payload(
     db: Session,
     run: ResearchMatrixRun,
@@ -2093,19 +2547,25 @@ def build_run_drafts_payload(
     failed_count = progress_meta["failed_count"]
     running_count = progress_meta["running_count"]
     progress = progress_meta["progress"]
+    preferred_mode = str((run.config_json or {}).get("grouping_mode") or "topic_first")
 
     if missing:
         message = build_draft_pending_message(run, source_map)
-        payload = apply_pending_messages_to_drafts(
-            run,
-            build_structured_drafts_from_sources(
-                db,
+        variants = {
+            mode: apply_pending_messages_to_drafts(
                 run,
+                build_structured_drafts_from_sources(
+                    db,
+                    run,
+                    source_map,
+                    allow_ai_integrated_review=allow_ai_integrated_review,
+                    grouping_mode=mode,
+                ),
                 source_map,
-                allow_ai_integrated_review=allow_ai_integrated_review,
-            ),
-            source_map,
-        )
+            )
+            for mode in GROUPING_MODES
+        }
+        payload = build_mode_variant_snapshot(variants, preferred_mode=preferred_mode)
         status = "failed" if failed_count else ("running" if running_count or ready_count or run.status in {"queued", "running"} else "idle")
         stage = "generating_sources" if running_count or ready_count or run.status in {"queued", "running"} else "preparing_sources"
         state = draft_status_payload(
@@ -2119,12 +2579,17 @@ def build_run_drafts_payload(
         )
         return payload, state, missing
 
-    drafts = build_structured_drafts_from_sources(
-        db,
-        run,
-        source_map,
-        allow_ai_integrated_review=allow_ai_integrated_review,
-    )
+    variants = {
+        mode: build_structured_drafts_from_sources(
+            db,
+            run,
+            source_map,
+            allow_ai_integrated_review=allow_ai_integrated_review,
+            grouping_mode=mode,
+        )
+        for mode in GROUPING_MODES
+    }
+    drafts = build_mode_variant_snapshot(variants, preferred_mode=preferred_mode)
     state = draft_status_payload(
         status="completed",
         stage="completed",
@@ -2306,7 +2771,19 @@ def update_run_progress(run: ResearchMatrixRun) -> None:
     run.paper_count = total
     run.ready_count = ready
     run.failed_count = failed
-    run.progress_percent = round((ready / total) * 100) if total else 0
+    if not total:
+        run.progress_percent = 0
+        return
+    if run.status == "completed" and ready >= total:
+        run.progress_percent = 100
+        return
+    review_progress = round((ready / total) * 80)
+    if ready >= total and (run.stage or "") == "building_matrix":
+        run.progress_percent = 90
+        return
+    # Keep some headroom for final matrix assembly so the user can see that
+    # "review cards are ready" and "matrix is ready" are two different stages.
+    run.progress_percent = min(89, review_progress)
 
 
 def draft_sources_ready(
@@ -2319,6 +2796,80 @@ def draft_sources_ready(
         if not item or item.status != "generated" or is_summary_stale(db, paper, item):
             return False
     return True
+
+
+def prepare_missing_run_draft_sources(
+    db: Session,
+    run: ResearchMatrixRun,
+    *,
+    provider_id: int | None = None,
+    summary_types: tuple[str, ...] = ("overview", "reproduction"),
+) -> list[int]:
+    summary_type_set = set(summary_types)
+    if not summary_type_set:
+        return []
+
+    paper_ids = [item.paper_id for item in run.papers if item.paper_id]
+    if not paper_ids:
+        return []
+    papers = {
+        paper.id: paper
+        for paper in get_owned_papers(db, run.user_id, paper_ids)
+    }
+    summaries = get_summaries_by_paper(db, run.user_id, paper_ids)
+    queued_summary_ids: list[int] = []
+
+    for run_paper in run.papers:
+        if not run_paper.paper_id:
+            continue
+        paper = papers.get(run_paper.paper_id)
+        if not paper:
+            continue
+        for summary_type in DRAFT_REQUIRED_SUMMARY_TYPES:
+            if summary_type not in summary_type_set:
+                continue
+            summary = normalize_summary_terminal_state(
+                db,
+                summaries.get((run_paper.paper_id, summary_type)),
+            )
+            if summary and summary.status == "running":
+                continue
+            if summary and summary.status == "generated" and not is_summary_stale(db, paper, summary):
+                continue
+            if not summary:
+                summary = PaperSummary(
+                    paper_id=paper.id,
+                    user_id=run.user_id,
+                    summary_type=summary_type,
+                    content_json={},
+                )
+            summary.status = "running"
+            summary.stage = "extracting_context"
+            summary.progress = 3
+            summary.provider_id = provider_id
+            summary.error_message = None
+            db.add(summary)
+            db.flush()
+            queued_summary_ids.append(int(summary.id))
+    if queued_summary_ids:
+        db.commit()
+        db.refresh(run)
+        source_map, counters = build_draft_source_map(db, run)
+        progress_meta = draft_progress_from_counters(counters)
+        set_run_draft_state(
+            run,
+            status="running",
+            stage="generating_sources",
+            progress=progress_meta["progress"],
+            ready_count=progress_meta["ready_count"],
+            total_count=progress_meta["total_count"],
+            failed_count=progress_meta["failed_count"],
+            error_message=None,
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+    return queued_summary_ids
 
 
 def create_initial_run(
@@ -2334,7 +2885,6 @@ def create_initial_run(
     paper_ids = [paper.id for paper in papers]
     summaries = get_summaries_by_paper(db, user_id, paper_ids)
     all_review_ready = all(summary_ready(db, paper, summaries.get((paper.id, "review"))) for paper in papers)
-    all_draft_sources_ready = all(draft_sources_ready(db, paper, summaries) for paper in papers)
     version = 1
     if refreshed_from_id:
         previous = db.get(ResearchMatrixRun, refreshed_from_id)
@@ -2391,17 +2941,12 @@ def create_initial_run(
         )
     db.flush()
     update_run_progress(run)
-    if all_review_ready and all_draft_sources_ready:
-        set_run_draft_state(
-            run,
-            status="queued",
-            stage="preparing_sources",
-            progress=100,
-            ready_count=len(papers) * len(DRAFT_REQUIRED_SUMMARY_TYPES),
-            total_count=len(papers) * len(DRAFT_REQUIRED_SUMMARY_TYPES),
-            failed_count=0,
-            error_message=None,
-        )
+    sync_run_matrix_snapshot(db, run, user_id)
+    if all_review_ready:
+        run.status = "queued"
+        run.stage = "building_matrix"
+        run.error_message = None
+        update_run_progress(run)
     db.commit()
     db.refresh(run)
     return run
@@ -2528,6 +3073,7 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
         update_run_progress(run)
         db.commit()
 
+        required_summary_types = ("review", "overview", "reproduction")
         for run_paper in run.papers:
             heartbeat_run_worker(db, run)
             run = load_run_with_papers(db, run_id)
@@ -2548,21 +3094,25 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
                 run_paper.row_snapshot = run_paper.row_snapshot or {}
                 continue
 
-            review = ensure_summary_ready_for_run(
-                db,
-                run=run,
-                run_paper=run_paper,
-                paper=paper,
-                summary_type="review",
-                provider_id=provider_id,
-            )
-            if not review:
-                return
+            summaries_by_type: dict[str, PaperSummary | None] = {}
+            for summary_type in required_summary_types:
+                summary = ensure_summary_ready_for_run(
+                    db,
+                    run=run,
+                    run_paper=run_paper,
+                    paper=paper,
+                    summary_type=summary_type,
+                    provider_id=provider_id,
+                )
+                if not summary:
+                    return
+                summaries_by_type[summary_type] = summary
             db.expire_all()
             run = load_run_with_papers(db, run_id)
             if not run:
                 return
             run_paper = next(item for item in run.papers if item.paper_id == paper.id)
+            review = summaries_by_type.get("review")
 
             ready = summary_ready(db, paper, review)
             row = build_row_from_review_summary(
@@ -2586,62 +3136,28 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
         run = load_run_with_papers(db, run_id)
         if not run:
             return
-        if all(item.summary_status == "generated" and not item.is_missing for item in run.papers):
+        source_map, _counters = build_draft_source_map(db, run)
+        draft_missing = collect_missing_draft_sources(source_map)
+        if all(item.summary_status == "generated" and not item.is_missing for item in run.papers) and not draft_missing:
             run.stage = "building_matrix"
-            draft_counters = draft_progress_from_counters(build_draft_source_map(db, run)[1])
-            set_run_draft_state(
-                run,
-                status="running",
-                stage="preparing_sources",
-                progress=draft_counters["progress"],
-                ready_count=draft_counters["ready_count"],
-                total_count=draft_counters["total_count"],
-                failed_count=draft_counters["failed_count"],
-                error_message=None,
-            )
+            run.error_message = None
             db.commit()
-            rebuild_run_snapshots(db, run, run.user_id)
+            sync_run_matrix_snapshot(db, run, run.user_id)
             run = load_run_with_papers(db, run_id)
             if not run:
                 return
-
-            for run_paper in run.papers:
-                heartbeat_run_worker(db, run)
-                run = load_run_with_papers(db, run_id)
-                if not run:
-                    return
-                if not run_paper.paper_id:
-                    continue
-                paper = db.scalar(
-                    select(Paper).options(selectinload(Paper.folder)).where(
-                        Paper.id == run_paper.paper_id,
-                        Paper.user_id == run.user_id,
-                        Paper.deleted_at.is_(None),
-                    )
-                )
-                if not paper:
-                    continue
-                for summary_type in ("overview", "reproduction"):
-                    ensure_summary_ready_for_run(
-                        db,
-                        run=run,
-                        run_paper=run_paper,
-                        paper=paper,
-                        summary_type=summary_type,
-                        provider_id=provider_id,
-                    )
-                    db.expire_all()
-                    run = load_run_with_papers(db, run_id)
-                    if not run:
-                        return
-                    run_paper = next(item for item in run.papers if item.paper_id == paper.id)
-                    sync_run_draft_progress(db, run)
-                    run = load_run_with_papers(db, run_id)
-                    if not run:
-                        return
-
-            rebuild_run_snapshots(db, run, run.user_id)
+            run.drafts_snapshot = {}
+            run.status = "completed"
+            run.stage = "completed"
+            run.error_message = None
+            update_run_progress(run)
+            run.progress_percent = 100 if run.total_count else 0
+            db.add(run)
+            db.commit()
             run = load_run_with_papers(db, run_id)
+            if run:
+                sync_run_insights_snapshot(db, run)
+                run = load_run_with_papers(db, run_id)
             if run:
                 mark_run_worker_finished(db, run)
             return
@@ -2790,6 +3306,37 @@ def rename_matrix_run(db: Session, run: ResearchMatrixRun, *, title: str) -> Res
     return run
 
 
+def update_matrix_run_grouping_mode(
+    db: Session,
+    run: ResearchMatrixRun,
+    *,
+    user_id: int,
+    grouping_mode: str,
+) -> ResearchMatrixRun:
+    if run.status != "completed":
+        raise ValueError("run_not_completed")
+    next_mode = str(grouping_mode or "topic_first")
+    config = dict(run.config_json or {})
+    current_mode = str(config.get("grouping_mode") or "topic_first")
+    if current_mode == next_mode:
+        refreshed = load_run_with_papers(db, run.id)
+        if not refreshed:
+            raise ValueError("run_missing")
+        return refreshed
+    config["grouping_mode"] = next_mode
+    run.config_json = config
+    db.add(run)
+    db.commit()
+    refreshed = load_run_with_papers(db, run.id)
+    if not refreshed:
+        raise ValueError("run_missing")
+    rebuild_run_snapshots(db, refreshed, user_id)
+    rebuilt = load_run_with_papers(db, run.id)
+    if not rebuilt:
+        raise ValueError("run_missing")
+    return rebuilt
+
+
 def update_matrix_run_paper(
     db: Session,
     run: ResearchMatrixRun,
@@ -2858,6 +3405,93 @@ def update_matrix_run_paper(
         raise ValueError("run_missing")
     rebuild_run_snapshots(db, run, user_id)
     refreshed = load_run_with_papers(db, run.id)
+    if refreshed:
+        mark_run_insights_stale(db, refreshed)
+        refreshed = load_run_with_papers(db, run.id)
+    if not refreshed:
+        raise ValueError("run_missing")
+    return refreshed
+
+
+def update_matrix_run_outline(
+    db: Session,
+    run: ResearchMatrixRun,
+    *,
+    outline_sections: list[dict[str, Any]] | None = None,
+) -> ResearchMatrixRun:
+    if run.status != "completed":
+        raise ValueError("run_not_completed")
+    if outline_sections is None:
+        raise ValueError("outline_missing")
+
+    drafts_snapshot = dict(run.drafts_snapshot or {})
+    variants, available_modes, active_mode = unpack_mode_variant_snapshot(
+        drafts_snapshot,
+        preferred_mode=str((run.config_json or {}).get("grouping_mode") or "topic_first"),
+    )
+    target_mode = str((run.config_json or {}).get("grouping_mode") or active_mode or "topic_first")
+    selected = dict(variants.get(target_mode) or drafts_snapshot or {})
+    outline = dict(selected.get("review_outline") or {})
+    outline["outline_sections"] = list(outline_sections or [])
+    selected["review_outline"] = outline
+    variants[target_mode] = selected
+    run.drafts_snapshot = {
+        "active_mode": target_mode,
+        "modes": variants,
+    }
+    db.add(run)
+    db.commit()
+    refreshed = load_run_with_papers(db, run.id)
+    if not refreshed:
+        raise ValueError("run_missing")
+    return refreshed
+
+
+def rewrite_matrix_run_draft_section(
+    db: Session,
+    run: ResearchMatrixRun,
+    *,
+    section_key: str,
+) -> ResearchMatrixRun:
+    if run.status != "completed":
+        raise ValueError("run_not_completed")
+    target_section = str(section_key or "").strip()
+    if target_section not in DRAFT_SECTION_ORDER:
+        raise ValueError("draft_section_invalid")
+
+    source_map, _counters = build_draft_source_map(db, run)
+    missing = collect_missing_draft_sources(source_map)
+    if missing:
+        raise ValueError("draft_sources_missing")
+
+    preferred_mode = str((run.config_json or {}).get("grouping_mode") or "topic_first")
+    variants, _available_modes, active_mode = unpack_mode_variant_snapshot(
+        run.drafts_snapshot or {},
+        preferred_mode=preferred_mode,
+    )
+    target_mode = preferred_mode or active_mode or "topic_first"
+    regenerated = build_structured_drafts_from_sources(
+        db,
+        run,
+        source_map,
+        allow_ai_integrated_review=True,
+        grouping_mode=target_mode,
+    )
+    if target_section not in regenerated:
+        raise ValueError("draft_section_missing")
+
+    selected = dict(variants.get(target_mode) or {})
+    selected[target_section] = regenerated[target_section]
+    if regenerated.get("quotable_sentences"):
+        selected["quotable_sentences"] = regenerated["quotable_sentences"]
+    if target_section in DRAFT_SECTION_ORDER[:6] or target_section in {"quotable_sentences", "final_integrated_review"}:
+        if regenerated.get("final_integrated_review"):
+            selected["final_integrated_review"] = regenerated["final_integrated_review"]
+    variants[target_mode] = selected
+    run.drafts_snapshot = build_mode_variant_snapshot(variants, preferred_mode=target_mode)
+    db.add(run)
+    db.commit()
+    refreshed = load_run_with_papers(db, run.id)
     if not refreshed:
         raise ValueError("run_missing")
     return refreshed
@@ -2922,10 +3556,13 @@ def inspect_run_source_state(db: Session, run: ResearchMatrixRun, user_id: int) 
 
 
 def serialize_run_list_item(db: Session, run: ResearchMatrixRun, user_id: int) -> dict[str, Any]:
+    run = normalize_run_runtime_state(db, run)
     missing_count = sum(1 for item in run.papers if item.is_missing)
     stale_count = sum(1 for item in run.papers if item.is_stale)
     source_state = inspect_run_source_state(db, run, user_id)
     draft_state = serialize_draft_state(run)
+    preferred_mode = str((run.config_json or {}).get("grouping_mode") or "topic_first")
+    _variants, available_modes, _active_mode = unpack_mode_variant_snapshot(run.drafts_snapshot or {}, preferred_mode=preferred_mode)
     return {
         "id": run.id,
         "title": run.title,
@@ -2948,20 +3585,28 @@ def serialize_run_list_item(db: Session, run: ResearchMatrixRun, user_id: int) -
         "error_message": run.error_message,
         "created_at": iso(run.created_at),
         "updated_at": iso(run.updated_at),
-        "grouping_mode": str((run.config_json or {}).get("grouping_mode") or "topic_first"),
+        "grouping_mode": preferred_mode,
+        "grouping_modes": available_modes or [preferred_mode],
         "worker_status": run.worker_status or "idle",
         "worker_started_at": iso(run.worker_started_at),
         "worker_heartbeat_at": iso(run.worker_heartbeat_at),
         "worker_retry_count": int(run.worker_retry_count or 0),
         "last_worker_error": run.last_worker_error,
         **draft_state,
+        **serialize_insight_state(run),
     }
 
 
 def serialize_run_detail(db: Session, run: ResearchMatrixRun, user_id: int) -> dict[str, Any]:
+    run = normalize_run_runtime_state(db, run)
     base = serialize_run_list_item(db, run, user_id)
     draft_state = serialize_draft_state(run)
     drafts_snapshot = run.drafts_snapshot or {}
+    variants, available_modes, active_mode = unpack_mode_variant_snapshot(
+        drafts_snapshot,
+        preferred_mode=base["grouping_mode"],
+    )
+    selected_drafts = variants.get(base["grouping_mode"]) or variants.get(active_mode) or drafts_snapshot
     dashboard_snapshot = run.dashboard_snapshot or {}
     if not dashboard_snapshot:
         dashboard_snapshot = build_dashboard_snapshot(
@@ -2975,7 +3620,9 @@ def serialize_run_detail(db: Session, run: ResearchMatrixRun, user_id: int) -> d
         **base,
         **draft_state,
         "matrix": run.matrix_snapshot or {},
-        "drafts": drafts_snapshot,
+        "drafts": selected_drafts if isinstance(selected_drafts, dict) else {},
+        "draft_variants": variants,
+        "grouping_modes": available_modes or base.get("grouping_modes") or [base["grouping_mode"]],
         "dashboard": dashboard_snapshot,
         "papers": [
             {
@@ -2994,4 +3641,5 @@ def serialize_run_detail(db: Session, run: ResearchMatrixRun, user_id: int) -> d
             for item in run.papers
         ],
         "refresh_available": base["has_updates"] and not base["has_deleted_papers"],
+        **serialize_insight_state(run),
     }

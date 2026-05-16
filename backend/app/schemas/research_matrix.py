@@ -27,10 +27,37 @@ class ResearchMatrixRefreshRequest(BaseModel):
 class ResearchMatrixRunUpdateRequest(BaseModel):
     title: str = Field(default="", max_length=160)
 
+class ResearchMatrixGroupingModeUpdateRequest(BaseModel):
+    grouping_mode: Literal["topic_first", "method_first"]
+
 
 class ResearchMatrixRunPaperUpdateRequest(BaseModel):
     paper_field_updates: dict[str, Any] = Field(default_factory=dict)
     run_field_updates: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchMatrixOutlineUpdateRequest(BaseModel):
+    outline_sections: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ResearchMatrixDraftSectionRewriteRequest(BaseModel):
+    section_key: str = Field(min_length=1, max_length=80)
+
+
+class ResearchMatrixPrepareDraftSourcesRequest(BaseModel):
+    summary_types: list[Literal["overview", "reproduction"]] = Field(default_factory=lambda: ["overview", "reproduction"])
+    provider_id: int | None = Field(default=None, ge=1)
+
+
+class ResearchMatrixInsightResponse(BaseModel):
+    status: str = "idle"
+    stage_label: str = ""
+    updated_at: str | None = None
+    stale: bool = False
+    consensus: list[str] = Field(default_factory=list)
+    differences: list[str] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    error_message: str | None = None
 
 
 class ResearchMatrixRunPaperResponse(BaseModel):
@@ -78,6 +105,7 @@ class ResearchMatrixRunListItem(BaseModel):
     draft_failed_count: int = 0
     draft_error_message: str | None = None
     grouping_mode: str = "topic_first"
+    grouping_modes: list[str] = Field(default_factory=list)
     worker_status: str = "idle"
     worker_started_at: str | None = None
     worker_heartbeat_at: str | None = None
@@ -87,7 +115,9 @@ class ResearchMatrixRunListItem(BaseModel):
 
 class ResearchMatrixRunResponse(ResearchMatrixRunListItem):
     matrix: dict[str, Any] = Field(default_factory=dict)
+    insights: ResearchMatrixInsightResponse = Field(default_factory=ResearchMatrixInsightResponse)
     drafts: dict[str, Any] = Field(default_factory=dict)
+    draft_variants: dict[str, dict[str, Any]] = Field(default_factory=dict)
     dashboard: dict[str, Any] = Field(default_factory=dict)
     papers: list[ResearchMatrixRunPaperResponse] = Field(default_factory=list)
     refresh_available: bool = False

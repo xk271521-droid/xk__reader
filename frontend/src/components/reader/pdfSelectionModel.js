@@ -5,7 +5,7 @@ const BLOCK_LEFT_SHIFT = 0.08
 const LINE_SAFETY_GAP = 0.0006
 const VISUAL_BAND_MIN_HEIGHT = 0.0022
 const COLUMN_SPLIT_CENTER = 0.5
-export const PDF_TEXT_GEOMETRY_VERSION = 'visual-edge-v3'
+export const PDF_TEXT_GEOMETRY_VERSION = 'text-geometry-engine-v10'
 const SUPERSCRIPT_CHAR_MAP = new Map(Object.entries({
   0: '⁰',
   1: '¹',
@@ -113,11 +113,11 @@ function isMostlyHorizontalText(style) {
   return Math.abs(skewY) < 0.02 && Math.abs(skewX) < 0.02
 }
 
-function getMeasuredTextOffsets(textDiv, text) {
+function getMeasuredTextLayout(textDiv, text) {
   if (!textDiv || !text || text.length <= 1) return null
 
   const cached = measuredOffsetCache.get(textDiv)
-  if (cached?.text === text) return cached.offsets
+  if (cached?.text === text) return cached.layout
 
   const context = getTextMeasureContext()
   if (!context) return null
@@ -141,12 +141,38 @@ function getMeasuredTextOffsets(textDiv, text) {
   const total = offsets[offsets.length - 1]
   if (!Number.isFinite(total) || total <= 0) return null
 
-  const normalized = offsets.map((value) => clamp(value / total, 0, 1))
-  measuredOffsetCache.set(textDiv, { text, offsets: normalized })
-  return normalized
+  const normalizedOffsets = offsets.map((value) => clamp(value / total, 0, 1))
+  const inkBounds = []
+
+  for (let offset = 0; offset < text.length; offset += 1) {
+    const advanceStart = offsets[offset]
+    const advanceEnd = offsets[offset + 1]
+    const advanceWidth = Math.max(0, advanceEnd - advanceStart)
+    const metrics = context.measureText(text[offset])
+    const actualLeft = Number.isFinite(metrics.actualBoundingBoxLeft)
+      ? metrics.actualBoundingBoxLeft
+      : 0
+    const actualRight = Number.isFinite(metrics.actualBoundingBoxRight)
+      ? metrics.actualBoundingBoxRight
+      : advanceWidth
+    const inkLeft = clamp(advanceStart - actualLeft, advanceStart, advanceEnd)
+    const inkRight = clamp(
+      advanceStart + Math.max(advanceWidth * 0.35, actualRight),
+      inkLeft,
+      advanceEnd,
+    )
+    inkBounds[offset] = {
+      left: clamp(inkLeft / total, 0, 1),
+      right: clamp(inkRight / total, 0, 1),
+    }
+  }
+
+  const layout = { offsets: normalizedOffsets, inkBounds }
+  measuredOffsetCache.set(textDiv, { text, layout })
+  return layout
 }
 
-function getMeasuredCharRect({
+function getMeasuredCharGeometry({
   textDiv,
   text,
   offset,
@@ -159,13 +185,13 @@ function getMeasuredCharRect({
   if (!spanRect || spanRect.width <= 0 || spanRect.height <= 0) return null
   if (spanRect.height > spanRect.width * 1.8 && text.length > 1) return null
 
-  const offsets = getMeasuredTextOffsets(textDiv, text)
-  if (!offsets || offsets.length <= offset + 1) return null
+  const layout = getMeasuredTextLayout(textDiv, text)
+  if (!layout?.offsets || layout.offsets.length <= offset + 1) return null
 
   const style = window.getComputedStyle(textDiv)
   const isRtl = style.direction === 'rtl'
-  const startRatio = offsets[offset]
-  const endRatio = offsets[offset + 1]
+  const startRatio = layout.offsets[offset]
+  const endRatio = layout.offsets[offset + 1]
   const spanLeft = spanRect.left - layerRect.left
   const spanTop = spanRect.top - layerRect.top
   const measuredLeft = isRtl
@@ -177,7 +203,7 @@ function getMeasuredCharRect({
 
   const fallbackTop = fallbackRect ? fallbackRect.top - layerRect.top : spanTop
   const fallbackHeight = fallbackRect?.height > 0 ? fallbackRect.height : spanRect.height
-  return normalizeRect(
+  const advanceRect = normalizeRect(
     {
       left: measuredLeft,
       top: fallbackTop,
@@ -187,6 +213,82 @@ function getMeasuredCharRect({
     viewportWidth,
     viewportHeight,
   )
+
+  const inkBounds = !isRtl ? layout.inkBounds?.[offset] : null
+  const inkLeft = inkBounds
+    ? spanLeft + spanRect.width * inkBounds.left
+    : measuredLeft
+  const inkRight = inkBounds
+    ? spanLeft + spanRect.width * inkBounds.right
+    : measuredRight
+  const inkRect = inkRight > inkLeft
+    ? normalizeRect(
+      {
+        left: inkLeft,
+        top: fallbackTop,
+        width: Math.max(0, inkRight - inkLeft),
+        height: fallbackHeight,
+      },
+      viewportWidth,
+      viewportHeight,
+    )
+    : null
+
+  return { advanceRect, inkRect }
+}
+
+function clampRectToNeighbors(rect, previousRect, nextRect) {
+  if (!rect) return null
+  const leftLimit = previousRect ? getRectRight(previousRect) : 0
+  const rightLimit = nextRect ? nextRect.left : 1
+  const left = clamp(rect.left, leftLimit, rightLimit)
+  const right = clamp(getRectRight(rect), left, rightLimit)
+  return {
+    ...rect,
+    left,
+    width: Math.max(0, right - left),
+  }
+}
+
+function getRectAgreementScore(primary, fallback) {
+  if (!primary || !fallback || primary.width <= 0 || fallback.width <= 0) return 0
+  const leftDelta = Math.abs(primary.left - fallback.left)
+  const rightDelta = Math.abs(getRectRight(primary) - getRectRight(fallback))
+  const widthBase = Math.max(primary.width, fallback.width, 0.0001)
+  const edgeAgreement = 1 - clamp((leftDelta + rightDelta) / (widthBase * 1.8), 0, 1)
+  const widthRatio = Math.min(primary.width, fallback.width) / Math.max(primary.width, fallback.width)
+  return clamp(edgeAgreement * 0.72 + widthRatio * 0.28, 0, 1)
+}
+
+function buildCharGeometry({ rangeRect, measuredRect, inkRect, previousMeasuredRect, nextMeasuredRect }) {
+  const advanceRect = measuredRect || rangeRect
+  const constrainedAdvanceRect = measuredRect
+    ? clampRectToNeighbors(measuredRect, previousMeasuredRect, nextMeasuredRect)
+    : rangeRect
+  const visualRect = inkRect && measuredRect
+    ? clampRectToNeighbors(inkRect, previousMeasuredRect, nextMeasuredRect)
+    : constrainedAdvanceRect
+  const source = measuredRect ? 'measured' : 'range'
+  const agreement = getRectAgreementScore(visualRect, rangeRect)
+  const hasUsableVisualRect =
+    visualRect?.width > 0 &&
+    visualRect?.height > 0 &&
+    (!rangeRect || visualRect.width <= Math.max(rangeRect.width * 1.8, rangeRect.width + 0.012))
+  const hasStableAdvanceRect = advanceRect?.width > 0 && advanceRect?.height > 0
+  const geometryConfidence = hasUsableVisualRect
+    ? source === 'measured'
+      ? Math.max(inkRect ? 0.72 : 0.62, agreement)
+      : 0.48
+    : 0
+
+  return {
+    rect: hasStableAdvanceRect ? advanceRect : rangeRect,
+    rangeRect,
+    advanceRect,
+    visualRect: hasUsableVisualRect ? visualRect : rangeRect,
+    geometrySource: source,
+    geometryConfidence,
+  }
 }
 
 function unionRects(rects) {
@@ -257,6 +359,13 @@ export function buildPageTextIndex(strings) {
         blockIndex: -1,
         wordIndex: -1,
         rect: null,
+        rangeRect: null,
+        advanceRect: null,
+        visualRect: null,
+        textNode: null,
+        textOffset: 0,
+        geometrySource: 'none',
+        geometryConfidence: 0,
       })
       fullText += char
       cursor += 1
@@ -298,6 +407,9 @@ export function buildRenderedPageIndex({
     textDiv.dataset.charStart = String(span.start)
     textDiv.dataset.charEnd = String(span.end)
 
+    const rangeRects = []
+    const measuredRects = []
+    const inkRects = []
     for (let offset = 0; offset < span.text.length; offset += 1) {
       const range = document.createRange()
       range.setStart(textNode, offset)
@@ -305,11 +417,7 @@ export function buildRenderedPageIndex({
       const rect = range.getBoundingClientRect()
       range.detach?.()
 
-      const charIndex = span.start + offset
-      const current = base.chars[charIndex]
-      if (!current) continue
-
-      current.rect = normalizeRect(
+      const rangeRect = normalizeRect(
         {
           left: rect.left - layerRect.left,
           top: rect.top - layerRect.top,
@@ -319,8 +427,7 @@ export function buildRenderedPageIndex({
         viewportWidth,
         viewportHeight,
       )
-
-      const measuredRect = getMeasuredCharRect({
+      const measuredGeometry = getMeasuredCharGeometry({
         textDiv,
         text: span.text,
         offset,
@@ -329,9 +436,33 @@ export function buildRenderedPageIndex({
         viewportHeight,
         fallbackRect: rect,
       })
-      if (measuredRect?.width > 0 && measuredRect?.height > 0) {
-        current.rect = measuredRect
-      }
+      rangeRects[offset] = rangeRect
+      measuredRects[offset] = measuredGeometry?.advanceRect?.width > 0 && measuredGeometry?.advanceRect?.height > 0
+        ? measuredGeometry.advanceRect
+        : null
+      inkRects[offset] = measuredGeometry?.inkRect?.width > 0 && measuredGeometry?.inkRect?.height > 0
+        ? measuredGeometry.inkRect
+        : null
+    }
+
+    for (let offset = 0; offset < span.text.length; offset += 1) {
+      const rangeRect = rangeRects[offset]
+      const measuredRect = measuredRects[offset]
+      const inkRect = inkRects[offset]
+
+      const charIndex = span.start + offset
+      const current = base.chars[charIndex]
+      if (!current) continue
+
+      current.textNode = textNode
+      current.textOffset = offset
+      Object.assign(current, buildCharGeometry({
+        rangeRect,
+        measuredRect,
+        inkRect,
+        previousMeasuredRect: measuredRects[offset - 1],
+        nextMeasuredRect: measuredRects[offset + 1],
+      }))
     }
   })
 
@@ -344,6 +475,7 @@ export function buildRenderedPageIndex({
     fullText: base.fullText,
     chars: base.chars,
     spans: base.spans,
+    textLayerElement,
     length: base.length,
     lines: geometry.lines,
     lineMap: geometry.lineMap,
@@ -720,11 +852,195 @@ function isCjkDominant(chars) {
   return cjkCount / visible.length >= 0.45
 }
 
+function getCharRectForMode(char, mode = 'default') {
+  if (!char) return null
+  if (mode === 'selection-overlay') {
+    if (char.geometryConfidence >= 0.55 && char.visualRect) return char.visualRect
+    if (char.geometryConfidence >= 0.38 && char.advanceRect) return char.advanceRect
+    return char.rangeRect || char.rect || char.visualRect || char.advanceRect || null
+  }
+  return char.rect || char.rangeRect || char.visualRect || char.advanceRect || null
+}
+
+function hasUsableTextRect(rect) {
+  return rect && rect.width > 0 && rect.height > 0
+}
+
+function getCharEdgeUnionRect(char) {
+  if (!char) return null
+  return unionRects([
+    char.rangeRect,
+    char.advanceRect,
+    char.visualRect,
+    char.rect,
+  ].filter(hasUsableTextRect))
+}
+
+function getOrderedCharsForLine(line, pageIndex) {
+  return (line?.charIndices || [])
+    .map((index) => pageIndex?.chars?.[index])
+    .filter((char) => hasUsableTextRect(getCharRectForMode(char, 'selection-overlay')) && isWordChar(char.char))
+    .sort((left, right) => {
+      const leftRect = getCharRectForMode(left, 'selection-overlay')
+      const rightRect = getCharRectForMode(right, 'selection-overlay')
+      if (!leftRect || !rightRect) return left.index - right.index
+      if (Math.abs(leftRect.left - rightRect.left) > 0.0001) {
+        return leftRect.left - rightRect.left
+      }
+      return left.index - right.index
+    })
+}
+
+function isShortTokenCalibrationCandidate(chars = []) {
+  if (chars.length < 2 || chars.length > 9) return false
+  const text = chars.map((char) => char.char).join('')
+  if (!text || /\s/.test(text)) return false
+  if (/[\u3400-\u9FFF\uF900-\uFAFF]/.test(text)) return false
+  if (!/^[A-Za-z0-9-]+$/.test(text)) return false
+  return /[A-Za-z]/.test(text)
+}
+
+function getShortTokenCalibratedWidthRect(line, pageIndex, chars, widthRect) {
+  if (!widthRect || !isShortTokenCalibrationCandidate(chars)) return widthRect
+
+  const orderedLineChars = getOrderedCharsForLine(line, pageIndex)
+  const firstChar = chars[0]
+  const lastChar = chars[chars.length - 1]
+  const firstIndex = orderedLineChars.findIndex((char) => char.index === firstChar.index)
+  const lastIndex = orderedLineChars.findIndex((char) => char.index === lastChar.index)
+  const previousChar = firstIndex > 0 ? orderedLineChars[firstIndex - 1] : null
+  const nextChar = lastIndex >= 0 && lastIndex < orderedLineChars.length - 1
+    ? orderedLineChars[lastIndex + 1]
+    : null
+  const firstRect = getCharEdgeUnionRect(firstChar) || getCharRectForMode(firstChar, 'selection-overlay')
+  const lastRect = getCharEdgeUnionRect(lastChar) || getCharRectForMode(lastChar, 'selection-overlay')
+  if (!hasUsableTextRect(firstRect) || !hasUsableTextRect(lastRect)) return widthRect
+
+  const medianWidth = getMedian(
+    chars
+      .map((char) => getCharRectForMode(char, 'selection-overlay')?.width)
+      .filter((width) => typeof width === 'number' && width > 0),
+  )
+  const edgePad = Math.max(0.0005, Math.min(0.0024, (medianWidth || firstRect.width || 0.004) * 0.18))
+  const baseLeft = Math.min(widthRect.left, firstRect.left)
+  const baseRight = Math.max(widthRect.left + widthRect.width, getRectRight(lastRect))
+  const previousRect = previousChar
+    ? getCharEdgeUnionRect(previousChar) || getCharRectForMode(previousChar, 'selection-overlay')
+    : null
+  const nextRect = nextChar
+    ? getCharEdgeUnionRect(nextChar) || getCharRectForMode(nextChar, 'selection-overlay')
+    : null
+  const previousRight = previousRect ? getRectRight(previousRect) : 0
+  const nextLeft = nextRect ? nextRect.left : 1
+  const leftGap = Math.max(0, baseLeft - previousRight)
+  const rightGap = Math.max(0, nextLeft - baseRight)
+  const leftPad = previousRect ? Math.min(edgePad, leftGap * 0.36) : edgePad
+  const rightPad = nextRect ? Math.min(edgePad, rightGap * 0.3) : edgePad
+  const leftLimit = previousRect
+    ? previousRight + Math.max(0.00012, Math.min(0.0007, leftGap * 0.18))
+    : 0
+  const rightLimit = nextRect
+    ? nextLeft - Math.max(0.00012, Math.min(0.0007, rightGap * 0.18))
+    : 1
+  const left = clamp(baseLeft - leftPad, leftLimit, baseRight)
+  const right = clamp(baseRight + rightPad, left, Math.max(left, rightLimit))
+
+  if (right <= left) return widthRect
+  return {
+    ...widthRect,
+    left,
+    width: right - left,
+    shortTokenCalibrated: true,
+  }
+}
+
+function getCharsGeometryConfidence(chars = []) {
+  const usable = chars.filter((char) => getCharRectForMode(char, 'selection-overlay'))
+  if (usable.length === 0) return 0
+  return getMedian(usable.map((char) => char.geometryConfidence || 0))
+}
+
+function shouldUsePreciseSelectionGeometry(chars = []) {
+  if (chars.length === 0) return false
+  const confidentCount = chars.filter((char) => (char.geometryConfidence || 0) >= 0.55).length
+  return confidentCount / chars.length >= 0.55
+}
+
+function getSelectionRefinementBounds(line, pageIndex, segmentChars, widthRect = null) {
+  if (!line || !pageIndex || !segmentChars.length) return null
+
+  const orderedChars = getLineOrderedWordChars(line, pageIndex)
+  const firstChar = segmentChars[0]
+  const lastChar = segmentChars[segmentChars.length - 1]
+  const firstIndex = orderedChars.findIndex((char) => char.index === firstChar.index)
+  const lastIndex = orderedChars.findIndex((char) => char.index === lastChar.index)
+  const previousChar = firstIndex > 0 ? orderedChars[firstIndex - 1] : null
+  const nextChar = lastIndex >= 0 && lastIndex < orderedChars.length - 1 ? orderedChars[lastIndex + 1] : null
+  const firstRects = [firstChar.rangeRect, firstChar.advanceRect, firstChar.visualRect, firstChar.rect]
+    .filter(hasUsableTextRect)
+  const lastRects = [lastChar.rangeRect, lastChar.advanceRect, lastChar.visualRect, lastChar.rect]
+    .filter(hasUsableTextRect)
+  const firstUnion = unionRects(firstRects)
+  const lastUnion = unionRects(lastRects)
+  if (!firstUnion || !lastUnion) return null
+
+  const selectedLeft = widthRect?.left ?? Math.min(firstUnion.left, firstChar.rect?.left ?? firstUnion.left)
+  const selectedRight = widthRect
+    ? widthRect.left + widthRect.width
+    : Math.max(getRectRight(lastUnion), getRectRight(lastChar.rect ?? lastUnion))
+  const previousRect = previousChar
+    ? unionRects([previousChar.rangeRect, previousChar.advanceRect, previousChar.visualRect, previousChar.rect])
+    : null
+  const nextRect = nextChar
+    ? unionRects([nextChar.rangeRect, nextChar.advanceRect, nextChar.visualRect, nextChar.rect])
+    : null
+  const medianWidth = getMedian(
+    segmentChars
+      .map((char) => getCharRectForMode(char, 'selection-overlay')?.width)
+      .filter((width) => typeof width === 'number' && width > 0),
+  )
+  const edgePad = Math.max(0.0012, Math.min(0.0045, (medianWidth || firstUnion.width || 0.005) * 0.32))
+  const previousRight = previousRect ? getRectRight(previousRect) : 0
+  const nextLeft = nextRect ? nextRect.left : 1
+  const leftGap = previousRect ? Math.max(0, selectedLeft - previousRight) : Infinity
+  const rightGap = nextRect ? Math.max(0, nextLeft - selectedRight) : Infinity
+  const hasPreviousChar = Boolean(previousRect)
+  const hasNextChar = Boolean(nextRect)
+  const leftPad = hasPreviousChar
+    ? Math.min(edgePad * 0.35, leftGap * 0.28, 0.0012)
+    : edgePad
+  const rightPad = hasNextChar
+    ? Math.min(edgePad * 0.25, rightGap * 0.22, 0.001)
+    : edgePad * 0.7
+  const hardLeft = previousRect
+    ? Math.max(previousRight + Math.max(0.00012, Math.min(0.0008, leftGap * 0.2)), selectedLeft - leftPad)
+    : Math.max(0, selectedLeft - leftPad)
+  const hardRight = nextRect
+    ? Math.min(nextLeft - Math.max(0.00012, Math.min(0.0008, rightGap * 0.2)), selectedRight + rightPad)
+    : Math.min(1, selectedRight + rightPad)
+
+  return {
+    hardLeft: clamp(hardLeft, 0, selectedLeft),
+    hardRight: clamp(hardRight, selectedRight, 1),
+    softLeft: clamp(selectedLeft - leftPad, 0, 1),
+    softRight: clamp(selectedRight + rightPad, 0, 1),
+    hasPreviousChar,
+    hasNextChar,
+    leftGap,
+    rightGap,
+  }
+}
+
 function getLineOrderedWordChars(line, pageIndex) {
   return line.charIndices
     .map((index) => pageIndex.chars[index])
-    .filter((char) => char?.rect && isWordChar(char.char))
-    .sort((left, right) => left.rect.left - right.rect.left)
+    .filter((char) => hasUsableTextRect(getCharRectForMode(char)) && isWordChar(char.char))
+    .sort((left, right) => {
+      const leftRect = getCharRectForMode(left)
+      const rightRect = getCharRectForMode(right)
+      if (!leftRect || !rightRect) return left.index - right.index
+      return leftRect.left - rightRect.left
+    })
 }
 
 function getSegmentHorizontalPadding(line, pageIndex, segmentChars, kind = 'selection') {
@@ -742,15 +1058,30 @@ function getSegmentHorizontalPadding(line, pageIndex, segmentChars, kind = 'sele
 
   const outerPad = kind === 'decoration' ? 0.001 : kind === 'search' ? 0.0018 : 0.0012
   const innerPadMax = kind === 'decoration' ? 0 : kind === 'search' ? 0.001 : 0.00025
-  const leftGap = previousChar ? Math.max(0, firstChar.rect.left - getRectRight(previousChar.rect)) : 0
-  const rightGap = nextChar ? Math.max(0, nextChar.rect.left - getRectRight(lastChar.rect)) : 0
+  const firstRect = getCharRectForMode(firstChar, kind)
+  const lastRect = getCharRectForMode(lastChar, kind)
+  if (!hasUsableTextRect(firstRect) || !hasUsableTextRect(lastRect)) {
+    return { leftPad: outerPad, rightPad: outerPad }
+  }
+  const previousRect = getCharRectForMode(previousChar, kind)
+  const nextRect = getCharRectForMode(nextChar, kind)
+  const leftGap = previousRect ? Math.max(0, firstRect.left - getRectRight(previousRect)) : 0
+  const rightGap = nextRect ? Math.max(0, nextRect.left - getRectRight(lastRect)) : 0
   if (kind === 'selection-overlay') {
+    if (!shouldUsePreciseSelectionGeometry(segmentChars)) {
+      return {
+        leftPad: previousChar ? Math.min(0.00025, leftGap * 0.25) : outerPad,
+        rightPad: nextChar ? Math.min(0.00025, rightGap * 0.25) : outerPad,
+      }
+    }
     const medianWidth = getMedian(
       segmentChars
-        .map((char) => char.rect?.width)
+        .map((char) => getCharRectForMode(char, 'selection-overlay')?.width)
         .filter((width) => typeof width === 'number' && width > 0),
     )
-    const edgePad = Math.max(0.0024, Math.min(0.009, (medianWidth || firstChar.rect.width || 0.004) * 0.36))
+    const confidence = getCharsGeometryConfidence(segmentChars)
+    const padFactor = confidence >= 0.55 ? 0.18 : 0.3
+    const edgePad = Math.max(0.0008, Math.min(0.0048, (medianWidth || firstRect.width || 0.004) * padFactor))
     return {
       leftPad: previousChar ? Math.min(edgePad, leftGap * 0.45) : edgePad,
       rightPad: nextChar ? Math.min(edgePad, rightGap * 0.28) : edgePad,
@@ -765,17 +1096,32 @@ function getSegmentHorizontalPadding(line, pageIndex, segmentChars, kind = 'sele
 
 function getSegmentWidthRect(line, pageIndex, segmentChars, kind = 'selection') {
   if (!segmentChars.length) return null
-  const orderedChars = [...segmentChars].sort((left, right) => {
-    if (Math.abs(left.rect.left - right.rect.left) > 0.0001) {
-      return left.rect.left - right.rect.left
-    }
-    return left.index - right.index
-  })
+  const orderedChars = segmentChars
+    .filter((char) => hasUsableTextRect(getCharRectForMode(char, kind)))
+    .sort((left, right) => {
+      const leftRect = getCharRectForMode(left, kind)
+      const rightRect = getCharRectForMode(right, kind)
+      if (!leftRect || !rightRect) return left.index - right.index
+      if (Math.abs(leftRect.left - rightRect.left) > 0.0001) {
+        return leftRect.left - rightRect.left
+      }
+      return left.index - right.index
+    })
+  if (!orderedChars.length) return null
   const firstChar = orderedChars[0]
   const lastChar = orderedChars[orderedChars.length - 1]
+  const firstRect = getCharRectForMode(firstChar, kind)
+  const lastRect = getCharRectForMode(lastChar, kind)
+  if (!firstRect || !lastRect) return null
+  if (kind === 'selection-overlay') {
+    return {
+      left: clamp(firstRect.left, 0, 1),
+      width: Math.max(0, clamp(getRectRight(lastRect), firstRect.left, 1) - clamp(firstRect.left, 0, 1)),
+    }
+  }
   const { leftPad, rightPad } = getSegmentHorizontalPadding(line, pageIndex, orderedChars, kind)
-  const left = clamp(firstChar.rect.left - leftPad, 0, 1)
-  const right = clamp(getRectRight(lastChar.rect) + rightPad, left, 1)
+  const left = clamp(firstRect.left - leftPad, 0, 1)
+  const right = clamp(getRectRight(lastRect) + rightPad, left, 1)
   return {
     left,
     width: Math.max(0, right - left),
@@ -795,6 +1141,34 @@ function getLineVisualBand(line) {
   const top = line?.rect?.top ?? 0
   const bottom = getRectBottom(line?.rect ?? { top: 0, height: 0 })
   return { top, bottom, height: bottom - top }
+}
+
+function getSelectionTightBand(line, chars) {
+  const rects = chars
+    .map((char) => getCharRectForMode(char, 'selection-overlay'))
+    .filter((rect) => rect && rect.height > 0)
+  const selectedRect = unionRects(rects)
+  if (!selectedRect) return getLineVisualBand(line)
+
+  const text = chars.map((char) => char.char).join('')
+  const hasDescender = /[gjpqyQ]/.test(text)
+  const medianHeight = getMedian(rects.map((rect) => rect.height).filter((height) => height > 0))
+  const height = medianHeight || selectedRect.height
+  const topPad = Math.max(0.00015, height * 0.035)
+  const bottomPad = hasDescender
+    ? Math.max(0.00025, height * 0.035)
+    : -Math.max(0.0002, height * 0.075)
+  const top = clamp(selectedRect.top + topPad, 0, 1)
+  const bottom = clamp(
+    getRectBottom(selectedRect) + bottomPad,
+    top + VISUAL_BAND_MIN_HEIGHT,
+    1,
+  )
+  return {
+    top,
+    bottom,
+    height: Math.max(VISUAL_BAND_MIN_HEIGHT, bottom - top),
+  }
 }
 
 function getLineVisualTop(line) {
@@ -999,18 +1373,74 @@ function collectRangeLineChars(pageIndex, startChar, endChar) {
             char &&
             char.index >= ordered.startChar &&
             char.index < ordered.endChar &&
-            char.rect &&
+            getCharRectForMode(char, 'selection-overlay') &&
             isWordChar(char.char),
         )
         .sort((left, right) => {
-          if (Math.abs(left.rect.left - right.rect.left) > 0.0001) {
-            return left.rect.left - right.rect.left
+          const leftRect = getCharRectForMode(left, 'selection-overlay')
+          const rightRect = getCharRectForMode(right, 'selection-overlay')
+          if (!leftRect || !rightRect) return left.index - right.index
+          if (Math.abs(leftRect.left - rightRect.left) > 0.0001) {
+            return leftRect.left - rightRect.left
           }
           return left.index - right.index
         })
       return { line, chars }
     })
     .filter((entry) => entry.chars.length > 0)
+}
+
+function getDomRangeWidthRectsForChars(pageIndex, startChar, endChar) {
+  if (!pageIndex || typeof document === 'undefined') return []
+  const rows = collectRangeLineChars(pageIndex, startChar, endChar)
+  const layerRect = pageIndex.textLayerElement?.getBoundingClientRect?.()
+  if (!layerRect || layerRect.width <= 0 || layerRect.height <= 0) return []
+
+  return rows
+    .map(({ line, chars }) => {
+      const firstChar = chars[0]
+      const lastChar = chars[chars.length - 1]
+      if (!firstChar?.textNode || !lastChar?.textNode) return null
+
+      const range = document.createRange()
+      try {
+        range.setStart(firstChar.textNode, firstChar.textOffset)
+        range.setEnd(lastChar.textNode, lastChar.textOffset + 1)
+      } catch {
+        range.detach?.()
+        return null
+      }
+
+      const domRects = Array.from(range.getClientRects?.() || [])
+      range.detach?.()
+      const normalizedRects = domRects
+        .map((rect) => normalizeRect(
+          {
+            left: rect.left - layerRect.left,
+            top: rect.top - layerRect.top,
+            width: rect.width,
+            height: rect.height,
+          },
+          layerRect.width,
+          layerRect.height,
+        ))
+        .filter((rect) => rect.width > 0 && rect.height > 0)
+      const rangeRect = unionRects(normalizedRects)
+      if (!rangeRect) return null
+
+      const widthRect = getSegmentWidthRect(line, pageIndex, chars, 'selection-overlay')
+      if (!widthRect) return {
+        lineIndex: line.index,
+        left: rangeRect.left,
+        width: rangeRect.width,
+      }
+      return {
+        lineIndex: line.index,
+        left: widthRect.left,
+        width: widthRect.width,
+      }
+    })
+    .filter(Boolean)
 }
 
 export function getVisualBandsForRange(pageIndex, startChar, endChar, mode = 'selection') {
@@ -1025,7 +1455,7 @@ export function getVisualBandsForRange(pageIndex, startChar, endChar, mode = 'se
       const widthMode = mode === 'decoration'
         ? 'decoration'
         : mode === 'search'
-          ? 'search'
+          ? 'selection-overlay'
           : 'selection'
       const widthRect = getSegmentWidthRect(line, pageIndex, chars, widthMode)
       if (!widthRect) return null
@@ -1095,19 +1525,38 @@ export function getTextRangeGeometry(pageIndex, startChar, endChar, options = {}
   const copyText = formatRangeTextForCopy(pageIndex, orderedRange.startChar, orderedRange.endChar)
   const visualMode = options.visualMode || 'selection-overlay'
   const rects = visualMode === 'selection-overlay'
-    ? getSelectionOverlayRects(pageIndex, orderedRange.startChar, orderedRange.endChar)
+    ? getCalibratedSelectionOverlayRects(pageIndex, orderedRange.startChar, orderedRange.endChar)
+    : visualMode === 'search'
+      ? getSearchRectsForRange(pageIndex, orderedRange.startChar, orderedRange.endChar)
     : visualMode === 'highlight'
       ? getHighlightRectsForRange(pageIndex, orderedRange.startChar, orderedRange.endChar)
       : visualMode === 'underline' || visualMode === 'wavy-underline'
         ? getDecorationRectsForRange(pageIndex, orderedRange.startChar, orderedRange.endChar)
         : getLineRectsForRange(pageIndex, orderedRange.startChar, orderedRange.endChar)
+  const geometryConfidence = getCharsGeometryConfidence(charsByLine.flatMap((entry) => entry.chars))
 
   return {
     orderedRange,
     text,
     copyText,
     charsByLine,
+    geometryConfidence,
     rects,
+  }
+}
+
+export function getTextRangeDebugGeometry(pageIndex, startChar, endChar) {
+  if (!pageIndex) return { finalRects: [], visualRects: [], advanceRects: [], rangeRects: [] }
+  const orderedRange = getOrderedRange(startChar, endChar)
+  const chars = pageIndex.chars
+    .slice(orderedRange.startChar, orderedRange.endChar)
+    .filter((char) => char && !/\s/.test(char.char))
+
+  return {
+    finalRects: getCalibratedSelectionOverlayRects(pageIndex, orderedRange.startChar, orderedRange.endChar),
+    visualRects: chars.map((char) => char.visualRect).filter(Boolean),
+    advanceRects: chars.map((char) => char.advanceRect || char.rect).filter(Boolean),
+    rangeRects: chars.map((char) => char.rangeRect).filter(Boolean),
   }
 }
 
@@ -1115,13 +1564,14 @@ export function getSelectionOverlayRects(pageIndex, startChar, endChar) {
   const rows = collectRangeLineChars(pageIndex, startChar, endChar)
     .map(({ line, chars }) => {
       const metrics = line.metrics || buildLineMetrics(chars, line.rect)
-      const band = getLineVisualBand({ ...line, metrics })
+      const band = getSelectionTightBand({ ...line, metrics }, chars)
       return { line, chars, metrics, band }
     })
 
   return rows
     .map(({ line, chars }) => {
-      const widthRect = getSegmentWidthRect(line, pageIndex, chars, 'selection-overlay')
+      const rawWidthRect = getSegmentWidthRect(line, pageIndex, chars, 'selection-overlay')
+      const widthRect = getShortTokenCalibratedWidthRect(line, pageIndex, chars, rawWidthRect)
       if (!widthRect) return null
       const current = rows.find((row) => row.line.index === line.index)
       const band = current?.band || getLineVisualBand(line)
@@ -1156,6 +1606,8 @@ export function getSelectionOverlayRects(pageIndex, startChar, endChar) {
         Math.max(top + VISUAL_BAND_MIN_HEIGHT, bottomLimit),
       )
       return {
+        lineIndex: line.index,
+        refinementBounds: getSelectionRefinementBounds(line, pageIndex, chars, widthRect),
         left: widthRect.left,
         top,
         width: widthRect.width,
@@ -1163,6 +1615,32 @@ export function getSelectionOverlayRects(pageIndex, startChar, endChar) {
       }
     })
     .filter(Boolean)
+}
+
+export function getCalibratedSelectionOverlayRects(pageIndex, startChar, endChar) {
+  const stableRects = getSelectionOverlayRects(pageIndex, startChar, endChar)
+  const widthRects = getDomRangeWidthRectsForChars(pageIndex, startChar, endChar)
+  if (stableRects.length === 0 || widthRects.length === 0) return stableRects
+
+  const widthByLine = new Map(widthRects.map((rect) => [rect.lineIndex, rect]))
+  return stableRects.map((rect, index) => {
+    if (rect.shortTokenCalibrated) return rect
+    const widthRect = widthByLine.get(rect.lineIndex ?? index)
+    return widthRect
+      ? {
+        ...rect,
+        left: widthRect.left,
+        width: widthRect.width,
+        refinementBounds: rect.refinementBounds
+          ? {
+            ...rect.refinementBounds,
+            softLeft: Math.min(rect.refinementBounds.softLeft, widthRect.left),
+            softRight: Math.max(rect.refinementBounds.softRight, widthRect.left + widthRect.width),
+          }
+          : null,
+      }
+      : rect
+  })
 }
 
 export function getLineRectsForRange(pageIndex, startChar, endChar) {
@@ -1174,7 +1652,7 @@ export function getHighlightRectsForRange(pageIndex, startChar, endChar) {
 }
 
 export function getSearchRectsForRange(pageIndex, startChar, endChar) {
-  return getVisualBandsForRange(pageIndex, startChar, endChar, 'search')
+  return getCalibratedSelectionOverlayRects(pageIndex, startChar, endChar)
 }
 
 export function getDecorationRectsForRange(pageIndex, startChar, endChar) {
@@ -1290,33 +1768,66 @@ export function buildSelectionFromWordRange(pageIndex, startWordIndex, endWordIn
 export function findWordAtPoint(pageIndex, normalizedX, normalizedY) {
   if (!pageIndex) return null
 
-  for (const word of pageIndex.words || []) {
-    const hitRect = expandRect(word.rect, 0.003, 0.005)
-    if (isPointInsideRect(normalizedX, normalizedY, hitRect, 0)) {
-      return word
-    }
+  const preciseChar = findTextCharCore(pageIndex, normalizedX, normalizedY, null, {
+    mode: 'selection',
+    allowClosestFallback: false,
+  })
+  if (preciseChar?.wordIndex >= 0) {
+    return pageIndex.words?.[preciseChar.wordIndex] || null
   }
 
-  const sameLine = (pageIndex.lines || []).find((line) =>
-    normalizedY >= line.rect.top - 0.006 &&
-    normalizedY <= line.rect.top + line.rect.height + 0.006 &&
-    normalizedX >= line.rect.left - 0.015 &&
-    normalizedX <= line.rect.left + line.rect.width + 0.015,
-  )
+  const sameLine = findLineAtPoint(pageIndex, normalizedX, normalizedY)
 
   if (!sameLine) return null
 
   const lineWords = sameLine.wordIndices.map((index) => pageIndex.words[index]).filter(Boolean)
+  const hitCandidates = []
+
+  for (const word of lineWords) {
+    const hitRect = expandRect(word.rect, 0.0018, 0.005)
+    if (!isPointInsideRect(normalizedX, normalizedY, hitRect, 0)) continue
+
+    const dx = normalizedX < word.rect.left
+      ? word.rect.left - normalizedX
+      : normalizedX > getRectRight(word.rect)
+        ? normalizedX - getRectRight(word.rect)
+        : 0
+    const dy = normalizedY < word.rect.top
+      ? word.rect.top - normalizedY
+      : normalizedY > getRectBottom(word.rect)
+        ? normalizedY - getRectBottom(word.rect)
+        : 0
+    const centerX = word.rect.left + word.rect.width / 2
+    hitCandidates.push({
+      word,
+      score: dx * dx + dy * dy * 1.8 + Math.abs(centerX - normalizedX) * 0.0002,
+    })
+  }
+
+  if (hitCandidates.length > 0) {
+    hitCandidates.sort((left, right) => left.score - right.score)
+    return hitCandidates[0].word
+  }
+
   let best = null
   for (const word of lineWords) {
-    const centerX = word.rect.left + word.rect.width / 2
-    const distance = Math.abs(centerX - normalizedX)
+    const dx = normalizedX < word.rect.left
+      ? word.rect.left - normalizedX
+      : normalizedX > getRectRight(word.rect)
+        ? normalizedX - getRectRight(word.rect)
+        : 0
+    const dy = normalizedY < word.rect.top
+      ? word.rect.top - normalizedY
+      : normalizedY > getRectBottom(word.rect)
+        ? normalizedY - getRectBottom(word.rect)
+        : 0
+    const distance = Math.hypot(dx, dy * 1.6)
     if (!best || distance < best.distance) {
       best = { word, distance }
     }
   }
 
-  return best && best.distance < 0.035 ? best.word : null
+  return best && best.distance < 0.018 ? best.word : null
 }
 
 function getTextHitTolerances(line, chars, mode = 'annotation') {
@@ -1383,6 +1894,8 @@ function getTextHitTolerances(line, chars, mode = 'annotation') {
 function findTextBoundaryCore(pageIndex, normalizedX, normalizedY, scope = null, options = {}) {
   if (!pageIndex) return null
 
+  const mode = options.mode || 'annotation'
+  const rectMode = mode === 'selection' ? 'selection-overlay' : 'default'
   const line = findLineAtPoint(pageIndex, normalizedX, normalizedY, scope)
   if (!line) return null
 
@@ -1392,8 +1905,11 @@ function findTextBoundaryCore(pageIndex, normalizedX, normalizedY, scope = null,
 
   const firstChar = chars[0]
   const lastChar = chars[chars.length - 1]
-  const lineLeft = firstChar.rect.left
-  const lineRight = lastChar.rect.left + lastChar.rect.width
+  const firstRect = getCharRectForMode(firstChar, rectMode)
+  const lastRect = getCharRectForMode(lastChar, rectMode)
+  if (!hasUsableTextRect(firstRect) || !hasUsableTextRect(lastRect)) return null
+  const lineLeft = firstRect.left
+  const lineRight = getRectRight(lastRect)
   const {
     xTolerance,
     yTolerance,
@@ -1406,18 +1922,20 @@ function findTextBoundaryCore(pageIndex, normalizedX, normalizedY, scope = null,
   }
 
   for (const char of chars) {
+    const rect = getCharRectForMode(char, rectMode)
+    if (!rect) continue
     if (
-      normalizedY < char.rect.top - yTolerance ||
-      normalizedY > char.rect.top + char.rect.height + yTolerance
+      normalizedY < rect.top - yTolerance ||
+      normalizedY > rect.top + rect.height + yTolerance
     ) {
       continue
     }
 
-    const left = char.rect.left
-    const right = char.rect.left + char.rect.width
-    const charTolerance = Math.min(xTolerance, Math.max(boundaryCharMin, char.rect.width * boundaryCharFactor))
+    const left = rect.left
+    const right = getRectRight(rect)
+    const charTolerance = Math.min(xTolerance, Math.max(boundaryCharMin, rect.width * boundaryCharFactor))
     if (normalizedX >= left - charTolerance && normalizedX <= right + charTolerance) {
-      const midpoint = left + char.rect.width / 2
+      const midpoint = left + rect.width / 2
       return {
         pageNumber: pageIndex.pageNumber,
         charIndex: normalizedX <= midpoint ? char.index : char.index + 1,
@@ -1430,8 +1948,10 @@ function findTextBoundaryCore(pageIndex, normalizedX, normalizedY, scope = null,
 
   let closest = null
   for (const char of chars) {
-    const leftDistance = Math.abs(normalizedX - char.rect.left)
-    const rightDistance = Math.abs(normalizedX - (char.rect.left + char.rect.width))
+    const rect = getCharRectForMode(char, rectMode)
+    if (!rect) continue
+    const leftDistance = Math.abs(normalizedX - rect.left)
+    const rightDistance = Math.abs(normalizedX - getRectRight(rect))
     const candidate = leftDistance <= rightDistance
       ? { distance: leftDistance, charIndex: char.index }
       : { distance: rightDistance, charIndex: char.index + 1 }
@@ -1477,9 +1997,16 @@ export function findTextBoundaryAtPoint(pageIndex, normalizedX, normalizedY, sco
 
   if (lineChars.length === 0) return scope
 
-  const lineLeft = lineChars[0].rect.left
-  const lineRight = getRectRight(lineChars[lineChars.length - 1].rect)
-  const medianWidth = getMedian(lineChars.map((char) => char.rect.width).filter(Boolean))
+  const firstLineRect = getCharRectForMode(lineChars[0], 'selection-overlay')
+  const lastLineRect = getCharRectForMode(lineChars[lineChars.length - 1], 'selection-overlay')
+  if (!hasUsableTextRect(firstLineRect) || !hasUsableTextRect(lastLineRect)) return scope
+  const lineLeft = firstLineRect.left
+  const lineRight = getRectRight(lastLineRect)
+  const medianWidth = getMedian(
+    lineChars
+      .map((char) => getCharRectForMode(char, 'selection-overlay')?.width)
+      .filter(Boolean),
+  )
   const xSlack = Math.max(0.002, Math.min(0.006, medianWidth * 0.45))
 
   if (normalizedX <= lineLeft + xSlack) {
@@ -1546,7 +2073,7 @@ function findNearestLineInColumn(pageIndex, normalizedX, normalizedY, columnId) 
   if (!pageIndex) return null
 
   const candidateLines = (pageIndex.lines || []).filter((line) =>
-    columnId < 0 ? line.columnId === columnId : line.columnId === columnId,
+    columnId < 0 ? true : line.columnId === columnId,
   )
   if (candidateLines.length === 0) return null
 
@@ -1596,6 +2123,7 @@ function findTextCharCore(pageIndex, normalizedX, normalizedY, scope = null, opt
   if (!pageIndex) return null
 
   const mode = options.mode || 'annotation'
+  const rectMode = mode === 'selection' ? 'selection-overlay' : 'default'
   const line = findLineAtPoint(pageIndex, normalizedX, normalizedY, scope)
   if (!line) return null
 
@@ -1612,16 +2140,18 @@ function findTextCharCore(pageIndex, normalizedX, normalizedY, scope = null, opt
   } = getTextHitTolerances(line, chars, mode)
 
   for (const char of chars) {
+    const rect = getCharRectForMode(char, rectMode)
+    if (!rect) continue
     if (
-      normalizedY < char.rect.top - yTolerance ||
-      normalizedY > char.rect.top + char.rect.height + yTolerance
+      normalizedY < rect.top - yTolerance ||
+      normalizedY > rect.top + rect.height + yTolerance
     ) {
       continue
     }
 
     if (
-      normalizedX >= char.rect.left - xTolerance &&
-      normalizedX <= char.rect.left + char.rect.width + xTolerance
+      normalizedX >= rect.left - xTolerance &&
+      normalizedX <= getRectRight(rect) + xTolerance
     ) {
       return char
     }
@@ -1629,15 +2159,21 @@ function findTextCharCore(pageIndex, normalizedX, normalizedY, scope = null, opt
 
   let closest = null
   for (const char of chars) {
-    const centerX = char.rect.left + char.rect.width / 2
-    const centerY = char.rect.top + char.rect.height / 2
+    const rect = getCharRectForMode(char, rectMode)
+    if (!rect) continue
+    const centerX = rect.left + rect.width / 2
+    const centerY = rect.top + rect.height / 2
     const distance = Math.hypot(normalizedX - centerX, (normalizedY - centerY) * yWeight)
     if (!closest || distance < closest.distance) {
       closest = { char, distance }
     }
   }
 
-  if (!closest || closest.distance > (closestLimit || Math.max(0.014, medianWidth * 1.3))) {
+  if (
+    options.allowClosestFallback === false ||
+    !closest ||
+    closest.distance > (closestLimit || Math.max(0.014, medianWidth * 1.3))
+  ) {
     return null
   }
 
@@ -1675,7 +2211,7 @@ export function findCharInRangeAtPoint(pageIndex, startChar, endChar, normalized
       .filter((char) => char.index >= ordered.startChar && char.index < ordered.endChar)
     if (chars.length === 0) continue
 
-    const lineRect = unionRects(chars.map((char) => char.rect))
+    const lineRect = unionRects(chars.map((char) => getCharRectForMode(char)))
     if (!lineRect) continue
 
     const {
@@ -1683,8 +2219,11 @@ export function findCharInRangeAtPoint(pageIndex, startChar, endChar, normalized
       yTolerance,
       yWeight,
     } = getTextHitTolerances(line, chars, 'eraser')
-    const lineLeft = chars[0].rect.left
-    const lineRight = getRectRight(chars[chars.length - 1].rect)
+    const firstRect = getCharRectForMode(chars[0])
+    const lastRect = getCharRectForMode(chars[chars.length - 1])
+    if (!hasUsableTextRect(firstRect) || !hasUsableTextRect(lastRect)) continue
+    const lineLeft = firstRect.left
+    const lineRight = getRectRight(lastRect)
 
     if (
       normalizedY < lineRect.top - yTolerance ||
@@ -1720,14 +2259,16 @@ export function findCharInRangeAtPoint(pageIndex, startChar, endChar, normalized
 
     let nearestChar = null
     for (const char of chars) {
-      const charLeft = char.rect.left
-      const charRight = getRectRight(char.rect)
-      const centerX = charLeft + char.rect.width / 2
-      const centerY = char.rect.top + char.rect.height / 2
+      const rect = getCharRectForMode(char)
+      if (!rect) continue
+      const charLeft = rect.left
+      const charRight = getRectRight(rect)
+      const centerX = charLeft + rect.width / 2
+      const centerY = rect.top + rect.height / 2
       const xPenalty = normalizedX >= charLeft && normalizedX <= charRight
         ? 0
         : Math.abs(normalizedX - centerX)
-      const yPenalty = normalizedY >= char.rect.top && normalizedY <= getRectBottom(char.rect)
+      const yPenalty = normalizedY >= rect.top && normalizedY <= getRectBottom(rect)
         ? 0
         : Math.abs(normalizedY - centerY)
       const distance = xPenalty * xPenalty + yPenalty * yPenalty * yWeight

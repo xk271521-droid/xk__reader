@@ -25,14 +25,35 @@ class PaperSummarySection(BaseModel):
 
 
 class ReviewStructuredFields(BaseModel):
+    background_motivation: str = ""
     research_question: str = ""
-    core_metrics: list[str] = Field(default_factory=list)
     method_route: str = ""
-    data_sample: str = ""
+    data_experiment: str = ""
+    baselines_metrics: str = ""
     main_findings: str = ""
     innovations: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
-    comparison_tags: list[str] = Field(default_factory=list)
+
+
+class ReviewFieldItem(BaseModel):
+    id: str = ""
+    text: str = ""
+    source_pages: list[int] = Field(default_factory=list)
+    source_section: str = ""
+    source_quote: str = ""
+    start_char: int | None = None
+    end_char: int | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "low"
+    edited_by_user: bool = False
+
+
+class ReviewFieldBlock(BaseModel):
+    key: str = ""
+    title: str = ""
+    role: Literal["review_core", "review_support", "personal_note"] = "review_core"
+    summary: str = ""
+    items: list[ReviewFieldItem] = Field(default_factory=list)
 
 
 class PaperSummaryAssistantPanel(BaseModel):
@@ -64,6 +85,7 @@ class PaperSummaryContent(BaseModel):
     preview: str = ""
     highlights: list[str] = Field(default_factory=list)
     structured_fields: ReviewStructuredFields | None = None
+    review_field_blocks: list[ReviewFieldBlock] = Field(default_factory=list)
     narrative_sections: list[PaperSummarySection] = Field(default_factory=list)
     sections: list[PaperSummarySection] = Field(default_factory=list)
     annotation_groups: list[PaperSummaryAnnotationGroup] = Field(default_factory=list)
@@ -115,18 +137,20 @@ def normalize_summary_content(value: dict[str, Any] | None, summary_type: str, t
     content.setdefault("highlights", [])
     if summary_type == "review":
         content.setdefault("structured_fields", {
+            "background_motivation": "",
             "research_question": "",
-            "core_metrics": [],
             "method_route": "",
-            "data_sample": "",
+            "data_experiment": "",
+            "baselines_metrics": "",
             "main_findings": "",
             "innovations": [],
             "limitations": [],
-            "comparison_tags": [],
         })
+        content.setdefault("review_field_blocks", [])
         content.setdefault("narrative_sections", content.get("sections") or [])
     else:
         content.setdefault("structured_fields", None)
+        content.setdefault("review_field_blocks", [])
         content.setdefault("narrative_sections", [])
     content.setdefault("sections", [])
     content.setdefault("annotation_groups", [])

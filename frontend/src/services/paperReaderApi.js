@@ -305,6 +305,7 @@ export async function fetchResearchDashboard() {
 export async function fetchResearchMatrixRuns() {
   const response = await fetch('/api/research-matrix/runs', {
     headers: authHeaders(),
+    cache: 'no-store',
   })
   return parseJsonResponse(response)
 }
@@ -321,6 +322,7 @@ export async function createResearchMatrixRun(payload) {
 export async function fetchResearchMatrixRun(runId) {
   const response = await fetch(`/api/research-matrix/runs/${runId}`, {
     headers: authHeaders(),
+    cache: 'no-store',
   })
   return parseJsonResponse(response)
 }
@@ -330,6 +332,15 @@ export async function updateResearchMatrixRun(runId, payload = {}) {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function updateResearchMatrixRunGroupingMode(runId, groupingMode) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}/grouping-mode`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ grouping_mode: groupingMode }),
   })
   return parseJsonResponse(response)
 }
@@ -348,6 +359,41 @@ export async function updateResearchMatrixRunPaper(runId, paperId, payload = {})
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function updateResearchMatrixRunOutline(runId, payload = {}) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}/outline`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function rewriteResearchMatrixDraftSection(runId, payload = {}) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}/drafts:rewrite-section`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function prepareResearchMatrixDraftSources(runId, payload = {}) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}/drafts:prepare-sources`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function refreshResearchMatrixInsights(runId) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}/insights:refresh`, {
+    method: 'POST',
+    headers: authHeaders(),
   })
   return parseJsonResponse(response)
 }
