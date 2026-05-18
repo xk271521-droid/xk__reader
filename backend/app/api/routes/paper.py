@@ -33,6 +33,7 @@ from app.schemas.paper import (
     PaperUpdate,
 )
 from app.services.crypto import decrypt_api_key
+from app.services.notification import compact_notification_text, create_notification
 from app.services.translate import translate_title
 
 router = APIRouter(prefix="/papers", tags=["papers"])
@@ -739,6 +740,19 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
             item.error_message = "没有可用的 AI 厂商，请先在 AI 配置中启用一个。"
             db.add(item)
             db.commit()
+            paper = db.get(Paper, item.paper_id)
+            if paper:
+                create_notification(
+                    db,
+                    user_id=paper.user_id,
+                    source_kind="full_translation",
+                    source_id=paper.id,
+                    event_kind="failed",
+                    title="全文翻译 失败",
+                    message=f"{compact_notification_text(paper.title or paper.file_name or '当前论文', 80)} · {compact_notification_text(item.error_message, 120)}",
+                    action_kind="open-full-translation",
+                    action_payload={"paper_id": paper.id},
+                )
             return
 
         terms, termbase_version = load_termbase()
@@ -854,6 +868,20 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
                 item.error_message = None
             db.add(item)
             db.commit()
+            if item.status == "completed":
+                paper = db.get(Paper, item.paper_id)
+                if paper:
+                    create_notification(
+                        db,
+                        user_id=paper.user_id,
+                        source_kind="full_translation",
+                        source_id=paper.id,
+                        event_kind="completed",
+                        title="全文翻译 已完成",
+                        message=compact_notification_text(paper.title or paper.file_name or "当前论文", 120),
+                        action_kind="open-full-translation",
+                        action_payload={"paper_id": paper.id},
+                    )
     except Exception as exc:
         item = db.get(PaperFullTranslation, translation_id)
         if item:
@@ -861,6 +889,19 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
             item.error_message = str(exc)[:500]
             db.add(item)
             db.commit()
+            paper = db.get(Paper, item.paper_id)
+            if paper:
+                create_notification(
+                    db,
+                    user_id=paper.user_id,
+                    source_kind="full_translation",
+                    source_id=paper.id,
+                    event_kind="failed",
+                    title="全文翻译 失败",
+                    message=f"{compact_notification_text(paper.title or paper.file_name or '当前论文', 80)} · {compact_notification_text(item.error_message, 120)}",
+                    action_kind="open-full-translation",
+                    action_payload={"paper_id": paper.id},
+                )
     finally:
         db.close()
 

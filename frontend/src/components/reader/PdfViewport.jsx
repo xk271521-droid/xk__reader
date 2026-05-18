@@ -5,6 +5,14 @@ import { PdfPage } from './PdfPage'
 import { ScreenshotFloatingMenu } from './ScreenshotFloatingMenu'
 import { SelectionFloatingMenu } from './SelectionFloatingMenu'
 import {
+  buildArrowGeometry,
+  DEFAULT_SHAPE_OPTIONS,
+  getPinDiameter,
+  getShapeDisplayBox,
+  isTextAnnotationCollapsed,
+  SHAPE_TOOL_IDS,
+} from './shapeAnnotationModel'
+import {
   buildSelectionFromWordRange,
   findCharBoundaryAtPoint,
   findCharInRangeAtPoint,
@@ -379,12 +387,17 @@ export function PdfViewport({
   annotations = [],
   inkAnnotations = [],
   inkOptions = DEFAULT_INK_OPTIONS,
+  shapeAnnotations = [],
+  shapeOptions = DEFAULT_SHAPE_OPTIONS,
   currentPaperId,
   onCreateAnnotation,
   onDeleteAnnotation,
   onEraseAnnotationRange,
   onCreateInkAnnotation,
   onDeleteInkAnnotation,
+  onCreateShapeAnnotation,
+  onUpdateShapeAnnotation,
+  onDeleteShapeAnnotation,
   onInsertSelectionNote,
   onAskAI,
   onScreenshotTranslate,
@@ -400,6 +413,15 @@ export function PdfViewport({
   const pointerSelectionRef = useRef(null)
   const eraserStrokeRef = useRef(null)
   const inkStrokeRef = useRef(null)
+  const shapeCreationRef = useRef(null)
+  const shapeTransformRef = useRef(null)
+  const shapePreviewRef = useRef(null)
+  const shapeDraftsRef = useRef({})
+  const textEditorRef = useRef(null)
+  const textEditorCommitRef = useRef(false)
+  const shapePointerDownRef = useRef(null)
+  const shapeAnnotationMapRef = useRef(new Map())
+  const onUpdateShapeAnnotationRef = useRef(onUpdateShapeAnnotation)
   const screenshotDragRef = useRef(null)
   const pinnedDragRef = useRef(null)
   const currentSelectionRef = useRef(createEmptySelection())
@@ -410,6 +432,10 @@ export function PdfViewport({
   const [pinnedScreenshots, setPinnedScreenshots] = useState([])
   const [eraserPreview, setEraserPreview] = useState(createEmptyEraserPreview())
   const [drawingInkStroke, setDrawingInkStroke] = useState(null)
+  const [shapePreview, setShapePreview] = useState(null)
+  const [selectedShapeId, setSelectedShapeId] = useState(null)
+  const [shapeDrafts, setShapeDrafts] = useState({})
+  const [textEditor, setTextEditor] = useState(null)
   const [selectionState, setSelectionState] = useState(createEmptySelection())
   const [selectionDebugEnabled] = useState(isSelectionDebugEnabled)
   const [searchFlashNonce, setSearchFlashNonce] = useState(0)
@@ -438,6 +464,51 @@ export function PdfViewport({
     }
     return map
   }, [inkAnnotations])
+
+  const mergedShapeAnnotations = useMemo(() => (
+    (shapeAnnotations || []).map((annotation) => ({
+      ...annotation,
+      ...(shapeDrafts[annotation.id] || {}),
+    }))
+  ), [shapeAnnotations, shapeDrafts])
+
+  const shapeAnnotationsByPage = useMemo(() => {
+    const map = new Map()
+    for (const annotation of mergedShapeAnnotations) {
+      const pageNum = annotation.page_number ?? annotation.pageNumber
+      if (!map.has(pageNum)) map.set(pageNum, [])
+      map.get(pageNum).push(annotation)
+    }
+    return map
+  }, [mergedShapeAnnotations])
+
+  const shapeAnnotationMap = useMemo(() => {
+    const map = new Map()
+    for (const annotation of mergedShapeAnnotations) {
+      map.set(annotation.id, annotation)
+    }
+    return map
+  }, [mergedShapeAnnotations])
+
+  useEffect(() => {
+    shapePreviewRef.current = shapePreview
+  }, [shapePreview])
+
+  useEffect(() => {
+    shapeDraftsRef.current = shapeDrafts
+  }, [shapeDrafts])
+
+  useEffect(() => {
+    textEditorRef.current = textEditor
+  }, [textEditor])
+
+  useEffect(() => {
+    shapeAnnotationMapRef.current = shapeAnnotationMap
+  }, [shapeAnnotationMap])
+
+  useEffect(() => {
+    onUpdateShapeAnnotationRef.current = onUpdateShapeAnnotation
+  }, [onUpdateShapeAnnotation])
 
   const searchMatchesByPage = useMemo(() => {
     const map = new Map()
@@ -561,6 +632,107 @@ export function PdfViewport({
     return renderAnnotations
   }
 
+  function buildShapeStyle(type) {
+    if (type === 'text' || type === 'pin') {
+      return {
+        color: shapeOptions.color || DEFAULT_SHAPE_OPTIONS.color,
+        fontSize: Number(shapeOptions.fontSize) || DEFAULT_SHAPE_OPTIONS.fontSize,
+      }
+    }
+
+    return {
+      color: shapeOptions.color || DEFAULT_SHAPE_OPTIONS.color,
+      strokeWidth: Number(shapeOptions.strokeWidth) || DEFAULT_SHAPE_OPTIONS.strokeWidth,
+    }
+  }
+
+  function buildShapePreviewFromDrag(type, pageNum, startPoint, endPoint) {
+    const style = buildShapeStyle(type)
+    if (type === 'arrow') {
+      const geometry = buildArrowGeometry(startPoint, endPoint, style)
+      return {
+        id: 'shape-preview',
+        isPreview: true,
+        page_number: pageNum,
+        type,
+        ...geometry,
+        content: '',
+        style,
+      }
+    }
+
+    const left = Math.min(clampUnit(startPoint.x), clampUnit(endPoint.x))
+    const top = Math.min(clampUnit(startPoint.y), clampUnit(endPoint.y))
+    const width = Math.abs(clampUnit(endPoint.x) - clampUnit(startPoint.x))
+    const height = Math.abs(clampUnit(endPoint.y) - clampUnit(startPoint.y))
+    return {
+      id: 'shape-preview',
+      isPreview: true,
+      page_number: pageNum,
+      type,
+      x: left,
+      y: top,
+      width,
+      height,
+      content: '',
+      style,
+      extra: {},
+    }
+  }
+
+  function buildTextEditorDraft(pageNum, box, content = '', annotationId = null, style = null) {
+    const width = Math.max(0.06, Math.min(1, Number(box?.width) || 0))
+    const height = Math.max(0.04, Math.min(1, Number(box?.height) || 0))
+    const x = Math.max(0, Math.min(1 - width, clampUnit(box?.x)))
+    const y = Math.max(0, Math.min(1 - height, clampUnit(box?.y)))
+    return {
+      annotationId,
+      pageNumber: pageNum,
+      x,
+      y,
+      width,
+      height,
+      content,
+      style: style || buildShapeStyle('text'),
+    }
+  }
+
+  function buildTextEditorFromAnnotation(annotation) {
+    const displayBox = getShapeDisplayBox(annotation)
+    return {
+      annotationId: annotation.id,
+      pageNumber: annotation.page_number,
+      x: displayBox.x,
+      y: displayBox.y,
+      width: Math.max(0.08, annotation.width || displayBox.width || 0.08),
+      height: Math.max(0.05, annotation.height || displayBox.height || 0.05),
+      content: annotation.content || '',
+      style: {
+        color: annotation.style?.color || DEFAULT_SHAPE_OPTIONS.color,
+        fontSize: annotation.style?.fontSize || DEFAULT_SHAPE_OPTIONS.fontSize,
+      },
+    }
+  }
+
+  function getNextPinNumber(pageNum) {
+    const pageShapes = shapeAnnotationsByPage.get(pageNum) || []
+    const values = pageShapes
+      .filter((annotation) => annotation.type === 'pin')
+      .map((annotation) => Number(annotation.content || annotation.extra?.number || 0))
+      .filter((value) => Number.isFinite(value) && value > 0)
+    return (values.length ? Math.max(...values) : 0) + 1
+  }
+
+  function clearShapeDraft(annotationId) {
+    setShapeDrafts((current) => {
+      if (!(annotationId in current)) return current
+      const next = { ...current }
+      delete next[annotationId]
+      shapeDraftsRef.current = next
+      return next
+    })
+  }
+
   const visiblePages = useMemo(() => {
     const start = Math.max(1, pageNumber - PAGE_OVERSCAN)
     const end = Math.min(pageNumbers.length, pageNumber + PAGE_OVERSCAN)
@@ -597,6 +769,89 @@ export function PdfViewport({
     screenshotDragRef.current = null
     setScreenshotSelection(null)
     setScreenshotMenu({ visible: false, x: 0, y: 0 })
+  }
+
+  function clearShapePreview() {
+    shapeCreationRef.current = null
+    shapePreviewRef.current = null
+    setShapePreview(null)
+  }
+
+  function clearShapeInteractionState() {
+    shapeTransformRef.current = null
+    shapePointerDownRef.current = null
+    clearShapePreview()
+    setShapeDrafts({})
+    shapeDraftsRef.current = {}
+  }
+
+  function clearTextEditor() {
+    textEditorRef.current = null
+    setTextEditor(null)
+  }
+
+  function handleTextEditorChange(value) {
+    setTextEditor((current) => {
+      if (!current) {
+        textEditorRef.current = current
+        return current
+      }
+      const next = { ...current, content: value }
+      textEditorRef.current = next
+      return next
+    })
+  }
+
+  async function commitTextEditor(contentOverride = null) {
+    const current = textEditorRef.current
+    if (!current || textEditorCommitRef.current) return
+    textEditorCommitRef.current = true
+    const payload = {
+      x: current.x,
+      y: current.y,
+      width: current.width,
+      height: current.height,
+      content: String(contentOverride ?? current.content ?? '').trim(),
+      style: current.style,
+      extra: { collapsed: false },
+    }
+
+    textEditorRef.current = null
+    setTextEditor(null)
+    try {
+      if (!payload.content) {
+        if (current.annotationId) setSelectedShapeId(current.annotationId)
+        return
+      }
+
+      if (current.annotationId) {
+        await onUpdateShapeAnnotation?.(current.annotationId, payload)
+        setSelectedShapeId(current.annotationId)
+        return
+      }
+
+      const created = await onCreateShapeAnnotation?.({
+        pageNumber: current.pageNumber,
+        type: 'text',
+        ...payload,
+        sortOrder: 0,
+      })
+      if (created?.id != null) {
+        setSelectedShapeId(created.id)
+      }
+    } finally {
+      textEditorCommitRef.current = false
+    }
+  }
+
+  function cancelTextEditor() {
+    const current = textEditorRef.current
+    textEditorCommitRef.current = false
+    textEditorRef.current = null
+    if (current?.annotationId) {
+      setSelectedShapeId(current.annotationId)
+    }
+    setTextEditor(null)
   }
 
   function getPageCanvas(pageNumberToFind) {
@@ -1234,9 +1489,326 @@ export function PdfViewport({
     onDeleteInkAnnotation?.(stroke.id)
   }
 
+  function handleShapePointerDown(event, annotationId) {
+    event.stopPropagation()
+    const annotation = shapeAnnotationMap.get(annotationId)
+    const pageFrame = getPageFrameFromElement(event.currentTarget || event.target)
+    if (!annotation || !pageFrame) return
+
+    const point = normalizePointer(event, pageFrame)
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedShapeId(annotationId)
+    clearSelection()
+    clearScreenshotSelection()
+    clearEraserPreview()
+    setFloatingMenu({ visible: false, x: 0, y: 0 })
+    event.currentTarget?.setPointerCapture?.(event.pointerId)
+    shapePointerDownRef.current = {
+      annotationId,
+      pageFrame,
+      pointerId: event.pointerId,
+      startPoint: point,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      initial: {
+        x: annotation.x,
+        y: annotation.y,
+        width: annotation.width,
+        height: annotation.height,
+        extra: { ...(annotation.extra || {}) },
+      },
+    }
+  }
+
+  function handleShapeHandlePointerDown(event, annotationId, handle) {
+    event.stopPropagation()
+    const annotation = shapeAnnotationMap.get(annotationId)
+    const pageFrame = getPageFrameFromElement(event.currentTarget || event.target)
+    if (!annotation || !pageFrame) return
+
+    const point = normalizePointer(event, pageFrame)
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedShapeId(annotationId)
+    event.currentTarget?.setPointerCapture?.(event.pointerId)
+    shapeTransformRef.current = {
+      annotationId,
+      mode: handle,
+      pageFrame,
+      pointerId: event.pointerId,
+      startPoint: point,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      initial: {
+        x: annotation.x,
+        y: annotation.y,
+        width: annotation.width,
+        height: annotation.height,
+        extra: { ...(annotation.extra || {}) },
+      },
+      hasMoved: false,
+    }
+  }
+
+  function handleShapeDoubleClick(event, annotationId) {
+    event.stopPropagation()
+    const annotation = shapeAnnotationMap.get(annotationId)
+    if (!annotation || annotation.type !== 'text') return
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedShapeId(annotationId)
+    if (isTextAnnotationCollapsed(annotation)) {
+      void handleShapeToggleCollapse(annotationId, false)
+      return
+    }
+    setTextEditor(buildTextEditorFromAnnotation(annotation))
+  }
+
+  async function handleShapeDelete(annotationId) {
+    if (!annotationId) return
+    const deleted = await onDeleteShapeAnnotation?.(annotationId)
+    if (!deleted) return
+
+    if (textEditorRef.current?.annotationId === annotationId) {
+      clearTextEditor()
+    }
+    if (selectedShapeId === annotationId) {
+      setSelectedShapeId(null)
+    }
+    if (shapeTransformRef.current?.annotationId === annotationId) {
+      shapeTransformRef.current = null
+    }
+    if (shapePointerDownRef.current?.annotationId === annotationId) {
+      shapePointerDownRef.current = null
+    }
+    clearShapeDraft(annotationId)
+  }
+
+  function handleShapeEdit(annotationId) {
+    const annotation = shapeAnnotationMap.get(annotationId)
+    if (!annotation || annotation.type !== 'text') return
+    setSelectedShapeId(annotationId)
+    void onUpdateShapeAnnotation?.(annotationId, {
+      extra: {
+        ...(annotation.extra || {}),
+        collapsed: false,
+      },
+    })
+    setTextEditor(buildTextEditorFromAnnotation(annotation))
+  }
+
+  async function handleShapeToggleCollapse(annotationId, collapsed) {
+    const annotation = shapeAnnotationMap.get(annotationId)
+    if (!annotation || annotation.type !== 'text') return
+    if (collapsed && textEditorRef.current?.annotationId === annotationId) {
+      clearTextEditor()
+    }
+    const result = await onUpdateShapeAnnotation?.(annotationId, {
+      extra: {
+        ...(annotation.extra || {}),
+        collapsed,
+      },
+    })
+    if (!result) return
+    setSelectedShapeId(annotationId)
+  }
+
+  function updateShapeTransformAtPointer(event) {
+    const transform = shapeTransformRef.current
+    if (!transform) return
+
+    const annotation = shapeAnnotationMapRef.current.get(transform.annotationId)
+    if (!annotation) return
+
+    const point = normalizePointer(event, transform.pageFrame)
+    const dx = point.x - transform.startPoint.x
+    const dy = point.y - transform.startPoint.y
+    const nextDraft = {}
+    const displayBox = getShapeDisplayBox(annotation)
+
+    if (transform.mode === 'move') {
+      if (annotation.type === 'arrow') {
+        const startX = transform.initial.extra.startX ?? transform.initial.x
+        const startY = transform.initial.extra.startY ?? transform.initial.y
+        const endX = transform.initial.extra.endX ?? (transform.initial.x + transform.initial.width)
+        const endY = transform.initial.extra.endY ?? (transform.initial.y + transform.initial.height)
+        const allowedDx = Math.max(-Math.min(startX, endX), Math.min(dx, 1 - Math.max(startX, endX)))
+        const allowedDy = Math.max(-Math.min(startY, endY), Math.min(dy, 1 - Math.max(startY, endY)))
+        const geometry = buildArrowGeometry(
+          { x: startX + allowedDx, y: startY + allowedDy },
+          { x: endX + allowedDx, y: endY + allowedDy },
+          annotation.style || buildShapeStyle('arrow'),
+        )
+        Object.assign(nextDraft, geometry)
+      } else {
+        const moveWidth = annotation.type === 'text' && isTextAnnotationCollapsed(annotation)
+          ? displayBox.width
+          : annotation.width
+        const moveHeight = annotation.type === 'text' && isTextAnnotationCollapsed(annotation)
+          ? displayBox.height
+          : annotation.height
+        nextDraft.x = Math.max(0, Math.min(1 - moveWidth, transform.initial.x + dx))
+        nextDraft.y = Math.max(0, Math.min(1 - moveHeight, transform.initial.y + dy))
+        nextDraft.width = annotation.width
+        nextDraft.height = annotation.height
+      }
+    } else if (transform.mode === 'resize-se') {
+      if (annotation.type === 'pin') {
+        const nextSize = Math.max(
+          0.016,
+          Math.min(
+            0.08,
+            Math.max(point.x - transform.initial.x, point.y - transform.initial.y),
+          ),
+        )
+        nextDraft.x = transform.initial.x
+        nextDraft.y = transform.initial.y
+        nextDraft.width = Math.min(1 - transform.initial.x, nextSize)
+        nextDraft.height = Math.min(1 - transform.initial.y, nextSize)
+      } else {
+        nextDraft.x = transform.initial.x
+        nextDraft.y = transform.initial.y
+        nextDraft.width = Math.max(0.02, Math.min(1 - transform.initial.x, point.x - transform.initial.x))
+        nextDraft.height = Math.max(0.02, Math.min(1 - transform.initial.y, point.y - transform.initial.y))
+      }
+    } else if (transform.mode === 'arrow-start' || transform.mode === 'arrow-end') {
+      const start = {
+        x: transform.initial.extra.startX ?? transform.initial.x,
+        y: transform.initial.extra.startY ?? transform.initial.y,
+      }
+      const end = {
+        x: transform.initial.extra.endX ?? (transform.initial.x + transform.initial.width),
+        y: transform.initial.extra.endY ?? (transform.initial.y + transform.initial.height),
+      }
+      const geometry = transform.mode === 'arrow-start'
+        ? buildArrowGeometry(point, end, annotation.style || buildShapeStyle('arrow'))
+        : buildArrowGeometry(start, point, annotation.style || buildShapeStyle('arrow'))
+      Object.assign(nextDraft, geometry)
+    } else {
+      return
+    }
+
+    transform.hasMoved = true
+    shapeTransformRef.current = transform
+    setShapeDrafts((current) => {
+      const next = {
+        ...current,
+        [transform.annotationId]: {
+          ...(current[transform.annotationId] || {}),
+          ...nextDraft,
+        },
+      }
+      shapeDraftsRef.current = next
+      return next
+    })
+  }
+
+  async function commitShapeTransform() {
+    const transform = shapeTransformRef.current
+    shapeTransformRef.current = null
+    if (!transform?.hasMoved) {
+      clearShapeDraft(transform?.annotationId)
+      return
+    }
+
+    const draft = shapeDraftsRef.current[transform.annotationId]
+    clearShapeDraft(transform.annotationId)
+    if (!draft) return
+
+    const payload = {
+      x: draft.x,
+      y: draft.y,
+      width: draft.width,
+      height: draft.height,
+    }
+    if (draft.extra != null) {
+      payload.extra = draft.extra
+    }
+
+    await onUpdateShapeAnnotationRef.current?.(transform.annotationId, payload)
+  }
+
   function handleMouseDown(event) {
     if (event.detail === 3) {
       handleTripleClick(event)
+      return
+    }
+
+    if (event.target.closest('.pdf-shape-text-editor')) {
+      return
+    }
+
+    if (
+      event.target.closest('.pdf-shape-annotation') ||
+      event.target.closest('.pdf-shape-annotation__actions') ||
+      event.target.closest('.pdf-shape-annotation__handle')
+    ) {
+      return
+    }
+
+    if (textEditor && !event.target.closest('.pdf-shape-text-editor')) {
+      void commitTextEditor()
+    }
+
+    if (SHAPE_TOOL_IDS.includes(activeTool)) {
+      const resolved = resolvePointerPage(event)
+      if (!resolved) {
+        clearShapePreview()
+        return
+      }
+
+      event.preventDefault()
+      window.getSelection()?.removeAllRanges()
+      clearSelection()
+      clearScreenshotSelection()
+      clearEraserPreview()
+      setSelectedShapeId(null)
+
+      if (activeTool === 'text') {
+        const preview = buildShapePreviewFromDrag(activeTool, resolved.pageNum, resolved.point, resolved.point)
+        shapeCreationRef.current = {
+          type: activeTool,
+          pageNum: resolved.pageNum,
+          pageFrame: resolved.pageFrame,
+          startPoint: resolved.point,
+        }
+        shapePreviewRef.current = preview
+        setShapePreview(preview)
+        return
+      } else if (activeTool === 'pin') {
+        const style = buildShapeStyle('pin')
+        const diameter = getPinDiameter({ style })
+        const nextPin = getNextPinNumber(resolved.pageNum)
+        const x = Math.max(0, Math.min(1 - diameter, resolved.point.x - diameter / 2))
+        const y = Math.max(0, Math.min(1 - diameter, resolved.point.y - diameter / 2))
+        const creation = onCreateShapeAnnotation?.({
+          pageNumber: resolved.pageNum,
+          type: 'pin',
+          x,
+          y,
+          width: diameter,
+          height: diameter,
+          content: String(nextPin),
+          style,
+          extra: { number: nextPin },
+          sortOrder: nextPin,
+        })
+        Promise.resolve(creation).then((created) => {
+          if (created?.id != null) setSelectedShapeId(created.id)
+        })
+        return
+      }
+
+      const preview = buildShapePreviewFromDrag(activeTool, resolved.pageNum, resolved.point, resolved.point)
+      shapeCreationRef.current = {
+        type: activeTool,
+        pageNum: resolved.pageNum,
+        pageFrame: resolved.pageFrame,
+        startPoint: resolved.point,
+      }
+      shapePreviewRef.current = preview
+      setShapePreview(preview)
       return
     }
 
@@ -1334,6 +1906,16 @@ export function PdfViewport({
         strokeWidth: stroke.strokeWidth,
         points: stroke.points,
       })
+      return
+    }
+
+    if (shapeCreationRef.current?.pageFrame && SHAPE_TOOL_IDS.includes(activeTool)) {
+      event.preventDefault()
+      const current = shapeCreationRef.current
+      const point = normalizePointer(event, current.pageFrame)
+      const preview = buildShapePreviewFromDrag(current.type, current.pageNum, current.startPoint, point)
+      shapePreviewRef.current = preview
+      setShapePreview(preview)
       return
     }
 
@@ -1440,6 +2022,66 @@ export function PdfViewport({
       return
     }
 
+    if (shapeTransformRef.current) {
+      await commitShapeTransform()
+      shapePointerDownRef.current = null
+      return
+    }
+
+    if (shapeCreationRef.current && SHAPE_TOOL_IDS.includes(activeTool)) {
+      const preview = shapePreviewRef.current
+      clearShapePreview()
+      if (!preview) return
+
+      if (preview.type === 'arrow') {
+        const startX = preview.extra?.startX ?? 0
+        const startY = preview.extra?.startY ?? 0
+        const endX = preview.extra?.endX ?? 0
+        const endY = preview.extra?.endY ?? 0
+        if (Math.hypot(endX - startX, endY - startY) < 0.012) return
+      } else if (preview.width < 0.012 || preview.height < 0.012) {
+        return
+      }
+
+      if (preview.type === 'text') {
+        setTextEditor(buildTextEditorDraft(
+          preview.page_number,
+          {
+            x: preview.x,
+            y: preview.y,
+            width: preview.width,
+            height: preview.height,
+          },
+          '',
+          null,
+          preview.style || buildShapeStyle('text'),
+        ))
+        return
+      }
+
+      const created = await onCreateShapeAnnotation?.({
+        pageNumber: preview.page_number,
+        type: preview.type,
+        x: preview.x,
+        y: preview.y,
+        width: preview.width,
+        height: preview.height,
+        content: preview.content || '',
+        style: preview.style || {},
+        extra: preview.extra || {},
+        sortOrder: 0,
+      })
+      if (created?.id != null) {
+        setSelectedShapeId(created.id)
+      }
+      return
+    }
+
+    if (shapePointerDownRef.current) {
+      shapePointerDownRef.current = null
+      return
+    }
+
     if (activeTool === 'eraser') {
       await commitEraserStroke()
       return
@@ -1505,6 +2147,13 @@ export function PdfViewport({
   function handleClick(event) {
     if (event.detail >= 2 || activeTool !== 'select') return
     if (currentSelectionRef.current.visible) return
+    if (textEditorRef.current && !event.target.closest('.pdf-shape-text-editor')) {
+      void commitTextEditor()
+      return
+    }
+    if (!event.target.closest('.pdf-shape-annotation') && !event.target.closest('.pdf-shape-text-editor')) {
+      setSelectedShapeId(null)
+    }
     const resolved = resolvePointerPage(event)
     if (!resolved) {
       clearSelection()
@@ -1597,6 +2246,11 @@ export function PdfViewport({
     clearSelection()
     clearScreenshotSelection()
     clearEraserPreview()
+    clearShapePreview()
+    clearTextEditor()
+    setSelectedShapeId(null)
+    shapeDraftsRef.current = {}
+    setShapeDrafts({})
     setPinnedScreenshots([])
   }, [pdfDocument])
 
@@ -1619,6 +2273,23 @@ export function PdfViewport({
       setDrawingInkStroke(null)
     }
   }, [activeTool])
+
+  useEffect(() => {
+    if (SHAPE_TOOL_IDS.includes(activeTool)) return
+    clearShapePreview()
+  }, [activeTool])
+
+  useEffect(() => {
+    if (textEditor && textEditor.annotationId && !shapeAnnotationMap.has(textEditor.annotationId)) {
+      setTextEditor(null)
+    }
+  }, [shapeAnnotationMap, textEditor])
+
+  useEffect(() => {
+    if (selectedShapeId != null && !shapeAnnotationMap.has(selectedShapeId)) {
+      setSelectedShapeId(null)
+    }
+  }, [selectedShapeId, shapeAnnotationMap])
 
   useEffect(() => {
     if (!noteFocus?.nonce || lastScrolledNoteFocusRef.current === noteFocus.nonce) return undefined
@@ -1762,6 +2433,20 @@ export function PdfViewport({
   }, [])
 
   useEffect(() => {
+    function handleKeyDown(event) {
+      if (selectedShapeId == null || textEditor) return
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return
+      const targetTag = event.target?.tagName?.toLowerCase?.()
+      if (targetTag === 'input' || targetTag === 'textarea') return
+      event.preventDefault()
+      void handleShapeDelete(selectedShapeId)
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selectedShapeId, textEditor])
+
+  useEffect(() => {
     function handlePointerMove(event) {
       const dragging = pinnedDragRef.current
       if (!dragging) return
@@ -1845,24 +2530,105 @@ export function PdfViewport({
   }, [])
 
   useEffect(() => {
-    function handleWindowMouseUp() {
+    function handleWindowShapePointerMove(event) {
+      if ((shapePointerDownRef.current || shapeTransformRef.current) && event.buttons === 0) {
+        const transform = shapeTransformRef.current
+        shapePointerDownRef.current = null
+        if (transform) {
+          void commitShapeTransform()
+        }
+        return
+      }
+
+      if (shapePointerDownRef.current && !shapeTransformRef.current) {
+        const pending = shapePointerDownRef.current
+        if (pending.pointerId != null && event.pointerId != null && pending.pointerId !== event.pointerId) {
+          return
+        }
+        const point = normalizePointer(event, pending.pageFrame)
+        const dragDistance = Math.hypot(
+          event.clientX - pending.startClientX,
+          event.clientY - pending.startClientY,
+        )
+        const normalizedDistance = Math.hypot(
+          point.x - pending.startPoint.x,
+          point.y - pending.startPoint.y,
+        )
+        if (dragDistance >= DRAG_START_DISTANCE || normalizedDistance >= 0.004) {
+          shapeTransformRef.current = {
+            annotationId: pending.annotationId,
+            mode: 'move',
+            pageFrame: pending.pageFrame,
+            pointerId: pending.pointerId,
+            startPoint: pending.startPoint,
+            startClientX: pending.startClientX,
+            startClientY: pending.startClientY,
+            initial: pending.initial,
+            hasMoved: false,
+          }
+        }
+      }
+
+      if (!shapeTransformRef.current) return
+      if (shapeTransformRef.current.pointerId != null && event.pointerId != null && shapeTransformRef.current.pointerId !== event.pointerId) {
+        return
+      }
+      event.preventDefault()
+      updateShapeTransformAtPointer(event)
+    }
+
+    function handleWindowShapePointerUp(event) {
+      if (!shapePointerDownRef.current && !shapeTransformRef.current) return
+      const pointerId = shapeTransformRef.current?.pointerId ?? shapePointerDownRef.current?.pointerId
+      if (pointerId != null && event.pointerId != null && pointerId !== event.pointerId) {
+        return
+      }
+      const transform = shapeTransformRef.current
+      shapePointerDownRef.current = null
+      if (transform) {
+        void commitShapeTransform()
+      }
+    }
+
+    window.addEventListener('pointermove', handleWindowShapePointerMove, { passive: false })
+    window.addEventListener('pointerup', handleWindowShapePointerUp)
+    window.addEventListener('pointercancel', handleWindowShapePointerUp)
+    return () => {
+      window.removeEventListener('pointermove', handleWindowShapePointerMove)
+      window.removeEventListener('pointerup', handleWindowShapePointerUp)
+      window.removeEventListener('pointercancel', handleWindowShapePointerUp)
+    }
+  }, [])
+
+  useEffect(() => {
+    function handleWindowPointerRelease() {
       if (activeTool === 'ink') {
-        handleMouseUp()
+        void handleMouseUp()
+        return
+      }
+
+      if (shapeTransformRef.current) {
+        void handleMouseUp()
+        return
+      }
+
+      if (shapeCreationRef.current) {
+        void handleMouseUp()
         return
       }
 
       if (activeTool === 'eraser') {
-        handleMouseUp()
+        void handleMouseUp()
         return
       }
 
-        if ((activeTool === 'screenshot' || activeTool === 'erase_box') && screenshotDragRef.current) {
-          handleMouseUp()
-          return
-        }
+      if ((activeTool === 'screenshot' || activeTool === 'erase_box') && screenshotDragRef.current) {
+        void handleMouseUp()
+        return
+      }
 
       if (pointerSelectionRef.current) {
-        handleMouseUp()
+        void handleMouseUp()
       }
     }
 
@@ -1870,15 +2636,26 @@ export function PdfViewport({
       pointerSelectionRef.current = null
       eraserStrokeRef.current = null
       inkStrokeRef.current = null
+      shapeCreationRef.current = null
+      shapePointerDownRef.current = null
+      shapeTransformRef.current = null
+      shapePreviewRef.current = null
+      shapeDraftsRef.current = {}
       screenshotDragRef.current = null
       setDrawingInkStroke(null)
+      setShapePreview(null)
+      setShapeDrafts({})
       clearEraserPreview()
     }
 
-    window.addEventListener('mouseup', handleWindowMouseUp)
+    window.addEventListener('pointerup', handleWindowPointerRelease)
+    window.addEventListener('pointercancel', handleWindowPointerRelease)
+    window.addEventListener('mouseup', handleWindowPointerRelease)
     window.addEventListener('blur', handleWindowBlur)
     return () => {
-      window.removeEventListener('mouseup', handleWindowMouseUp)
+      window.removeEventListener('pointerup', handleWindowPointerRelease)
+      window.removeEventListener('pointercancel', handleWindowPointerRelease)
+      window.removeEventListener('mouseup', handleWindowPointerRelease)
       window.removeEventListener('blur', handleWindowBlur)
     }
   }, [activeTool])
@@ -1945,6 +2722,10 @@ export function PdfViewport({
             key={item}
             annotations={getRenderableAnnotations(item)}
             inkAnnotations={inkAnnotationsByPage.get(item) || []}
+            shapeAnnotations={shapeAnnotationsByPage.get(item) || []}
+            selectedShapeId={selectedShapeId}
+            shapePreview={shapePreview?.page_number === item ? shapePreview : null}
+            textEditor={textEditor?.pageNumber === item ? textEditor : null}
             drawingStroke={drawingInkStroke?.pageNumber === item ? drawingInkStroke : null}
             currentSelection={selectionState.visible && selectionState.pageNumber === item ? selectionState : null}
             selectionDebugGeometry={
@@ -1963,6 +2744,15 @@ export function PdfViewport({
             onInkPointerMove={handleMouseMove}
             onInkPointerUp={handleMouseUp}
             onInkErase={handleInkErase}
+            onShapePointerDown={handleShapePointerDown}
+            onShapeDoubleClick={handleShapeDoubleClick}
+            onShapeHandlePointerDown={handleShapeHandlePointerDown}
+            onShapeDelete={handleShapeDelete}
+            onShapeEdit={handleShapeEdit}
+            onShapeToggleCollapse={handleShapeToggleCollapse}
+            onTextEditorChange={handleTextEditorChange}
+            onTextEditorCommit={commitTextEditor}
+            onTextEditorCancel={cancelTextEditor}
             onPageIndexReady={handlePageIndexReady}
             pageMetric={pageMetrics[index] ?? pageMetrics[0]}
             pageNumber={item}

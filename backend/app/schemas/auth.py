@@ -171,6 +171,7 @@ class UserResponse(BaseModel):
     organization: str
     discipline: str
     education_verified: bool
+    is_admin: bool = False
 
 
 class UpdateProfileRequest(BaseModel):

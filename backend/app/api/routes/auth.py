@@ -111,6 +111,7 @@ def build_user_response(user: User) -> UserResponse:
         organization=profile.organization,
         discipline=profile.discipline,
         education_verified=profile.education_verified,
+        is_admin=user.is_admin,
     )
 
 
@@ -328,7 +329,7 @@ def register(
 
     auth_guard.record_success("register", account_keys=account_keys)
     return AuthResponse(
-        access_token=create_access_token(created_user.uid),
+        access_token=create_access_token(created_user.uid, created_user.token_version),
         user=build_user_response(created_user),
     )
 
@@ -366,7 +367,7 @@ def login(
 
     auth_guard.record_success("login", account_keys=[normalized_account])
     return AuthResponse(
-        access_token=create_access_token(user.uid),
+        access_token=create_access_token(user.uid, user.token_version),
         user=build_user_response(user),
     )
 

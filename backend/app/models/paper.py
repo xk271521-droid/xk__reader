@@ -77,6 +77,10 @@ class Paper(Base):
         back_populates="paper",
         cascade="all, delete-orphan",
     )
+    shape_annotations: Mapped[list["ShapeAnnotation"]] = relationship(
+        back_populates="paper",
+        cascade="all, delete-orphan",
+    )
     notebooks: Mapped[list["PaperNotebook"]] = relationship(
         back_populates="paper",
         cascade="all, delete-orphan",

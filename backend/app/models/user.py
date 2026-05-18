@@ -20,6 +20,8 @@ class User(Base):
     email: Mapped[str | None] = mapped_column(String(255), unique=True, index=True, nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(20), default="active")
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    token_version: Mapped[int] = mapped_column(Integer, default=0)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -57,6 +59,10 @@ class User(Base):
         cascade="all, delete-orphan",
     )
     ink_annotations: Mapped[list["InkAnnotation"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    shape_annotations: Mapped[list["ShapeAnnotation"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )

@@ -19,6 +19,7 @@ from app.models import (
     PaperNoteNode,
     PaperResourceLayout,
     PaperSummary,
+    ShapeAnnotation,
     User,
 )
 from app.schemas.resource import ResourceLayoutPayload, ResourceLayoutResponse
@@ -206,6 +207,50 @@ def get_resource_overview(
                 count=effective_count,
                 updated_at=updated_at,
                 preview=f"当前保留 {effective_count} 条原文标注。",
+            )
+        )
+
+    shape_annotation_rows = db.execute(
+        select(
+            ShapeAnnotation.paper_id,
+            func.count(ShapeAnnotation.id),
+            func.max(ShapeAnnotation.updated_at),
+        )
+        .where(
+            ShapeAnnotation.user_id == current_user.id,
+            ShapeAnnotation.paper_id.in_(paper_ids),
+        )
+        .group_by(ShapeAnnotation.paper_id)
+    ).all()
+    for paper_id, shape_count, updated_at in shape_annotation_rows:
+        shape_count = int(shape_count or 0)
+        if shape_count <= 0:
+            continue
+        total_annotations += shape_count
+        existing_annotation_resource = next(
+            (item for item in resources_by_paper[int(paper_id)] if item["type"] == "annotations"),
+            None,
+        )
+        if existing_annotation_resource:
+            existing_annotation_resource["count"] = int(existing_annotation_resource.get("count", 0)) + shape_count
+            parsed_current_updated_at = None
+            current_updated_at = existing_annotation_resource.get("updated_at")
+            if current_updated_at:
+                try:
+                    parsed_current_updated_at = datetime.fromisoformat(current_updated_at)
+                except ValueError:
+                    parsed_current_updated_at = None
+            existing_annotation_resource["updated_at"] = _iso(
+                _max_datetime(updated_at, parsed_current_updated_at)
+            )
+            existing_annotation_resource["preview"] = f"褰撳墠淇濈暀 {existing_annotation_resource['count']} 鏉℃爣娉ㄣ€?"
+            continue
+        resources_by_paper[int(paper_id)].append(
+            _resource(
+                "annotations",
+                count=shape_count,
+                updated_at=updated_at,
+                preview=f"褰撳墠淇濈暀 {shape_count} 鏉℃爣娉ㄣ€?",
             )
         )
 

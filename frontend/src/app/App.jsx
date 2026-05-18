@@ -1,23 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
-import { Brain, Copy, LogIn, LogOut, Settings2, UserRound } from 'lucide-react'
+import { Bell, Brain, Copy, LogIn, LogOut, Settings2, UserRound, X } from 'lucide-react'
+import { AdminPage } from '../components/account/AdminPage'
 import { AiConfigPage } from '../components/account/AiConfigPage'
 import { UserCenterPage } from '../components/account/UserCenterPage'
 import { HomePage } from '../components/home/HomePage'
 import { ResourcePreviewModal } from '../components/home/ResourcePreviewModal'
-import { StatusPanel } from '../components/layout/StatusPanel'
 import { UtilityRail } from '../components/layout/UtilityRail'
 import { FullTranslationReader } from '../components/reader/FullTranslationReader'
 import { PaperReader } from '../components/reader/PaperReader'
 import { SelectionInsightPanel } from '../components/reader/SelectionInsightPanel'
 import { SideWorkspacePanel } from '../components/reader/SideWorkspacePanel'
+import { DEFAULT_SHAPE_OPTIONS } from '../components/reader/shapeAnnotationModel'
 import Login from '../log/Login.jsx'
-import { useBackendStatus } from '../hooks/useBackendStatus'
 import { usePdfReader } from '../hooks/usePdfReader'
 import { useAnnotations } from '../hooks/useAnnotations'
 import { useInkAnnotations } from '../hooks/useInkAnnotations'
 import { usePaperNotes } from '../hooks/usePaperNotes'
 import { usePdfSearch } from '../hooks/usePdfSearch'
 import { useResizableWidth } from '../hooks/useResizableWidth'
+import { useShapeAnnotations } from '../hooks/useShapeAnnotations'
 import { useSelectionInsight } from '../hooks/useSelectionInsight'
 import {
   createImageBlockDraft,
@@ -34,6 +35,12 @@ import {
   uploadAvatar,
   updateCurrentUser,
 } from '../services/authApi'
+import {
+  fetchNotifications,
+  fetchNotificationSummary,
+  markAllNotificationsRead,
+  markNotificationRead,
+} from '../services/notificationApi'
 import {
   getStoredUiPreferences,
   getUiFontScale,
@@ -57,6 +64,13 @@ import {
   buildFullTranslationPages,
   hashTranslationPages,
 } from '../components/reader/fullTranslationLayout'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '../components/ui/sheet'
 import 'pdfjs-dist/web/pdf_viewer.css'
 import '../styles/app.css'
 
@@ -186,6 +200,44 @@ const INSIGHT_MAX_WIDTH = 460
 const WORKSPACE_MIN_WIDTH = 300
 const WORKSPACE_DEFAULT_WIDTH = 380
 const WORKSPACE_MAX_WIDTH = 620
+const NOTIFICATION_SUMMARY_POLL_MS = 30000
+const NOTIFICATION_LIST_LIMIT = 20
+
+function formatNotificationTime(value) {
+  if (!value) return ''
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return ''
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(parsed)
+}
+
+function normalizeNotificationSummary(summary) {
+  return {
+    unread_count: Number(summary?.unread_count || 0),
+    latest_notification_id: summary?.latest_notification_id ?? null,
+    latest_created_at: summary?.latest_created_at || null,
+  }
+}
+
+function normalizeNotificationItem(item) {
+  return {
+    id: Number(item?.id || 0),
+    source_kind: String(item?.source_kind || ''),
+    source_id: Number(item?.source_id || 0),
+    event_kind: String(item?.event_kind || ''),
+    title: String(item?.title || '').trim(),
+    message: String(item?.message || '').trim(),
+    action_kind: String(item?.action_kind || ''),
+    action_payload: item?.action_payload && typeof item.action_payload === 'object' ? item.action_payload : {},
+    read_at: item?.read_at || null,
+    created_at: item?.created_at || null,
+  }
+}
 
 function App() {
   const readerRef = useRef(null)
@@ -195,6 +247,7 @@ function App() {
   const [activeTool, setActiveTool] = useState('select')
   const [activeEraserMode, setActiveEraserMode] = useState('brush')
   const [inkOptions, setInkOptions] = useState({ color: '#15803D', opacity: 0.85, strokeWidth: 6 })
+  const [shapeOptions, setShapeOptions] = useState(DEFAULT_SHAPE_OPTIONS)
   const [isThumbnailsOpen, setIsThumbnailsOpen] = useState(false)
   const [isUtilityRailCollapsed, setIsUtilityRailCollapsed] = useState(false)
   const [authMode, setAuthMode] = useState('login')
@@ -210,7 +263,6 @@ function App() {
   const [chatInitialSuggestions, setChatInitialSuggestions] = useState({})
   const [chatInitialSuggestionsLoading, setChatInitialSuggestionsLoading] = useState({})
   const [chatFollowupLoadingMessageId, setChatFollowupLoadingMessageId] = useState({})
-  const [providerLabel, setProviderLabel] = useState('')
   const [activeProviderId, setActiveProviderId] = useState(null)
   const [fullTranslation, setFullTranslation] = useState(null)
   const [fullTranslationStatus, setFullTranslationStatus] = useState('idle')
@@ -222,25 +274,35 @@ function App() {
   const [readingDashboard, setReadingDashboard] = useState(null)
   const [insightTimeframe, setInsightTimeframe] = useState('month')
   const [resourcePreview, setResourcePreview] = useState(null)
+  const [homeInitialSection, setHomeInitialSection] = useState('recent')
+  const [summaryInitialType, setSummaryInitialType] = useState('')
+  const [isNotificationOpen, setIsNotificationOpen] = useState(false)
+  const [notificationSummary, setNotificationSummary] = useState(() => normalizeNotificationSummary())
+  const [notificationItems, setNotificationItems] = useState([])
+  const [notificationLoading, setNotificationLoading] = useState(false)
+  const [notificationToast, setNotificationToast] = useState(null)
   const chatMessageCounterRef = useRef(0)
   const chatRequestCounterRef = useRef(0)
   const initialSuggestionRequestRef = useRef({})
   const initialSuggestionBatchRef = useRef({})
   const followupSuggestionRequestRef = useRef({})
   const fullTranslationPollRef = useRef(null)
-  const serverStatus = useBackendStatus()
+  const notificationSummaryPollRef = useRef(null)
+  const notificationDrawerPollRef = useRef(null)
+  const notificationToastTimerRef = useRef(null)
+  const lastSeenNotificationIdRef = useRef(null)
+  const didInitNotificationPollingRef = useRef(false)
+  const toastedNotificationIdsRef = useRef(new Set())
 
-  // Get active AI provider name
+  // Get active AI provider
   useEffect(function () {
     fetch('/api/providers', { headers: getStoredAuthToken() ? { Authorization: 'Bearer ' + getStoredAuthToken() } : {} })
       .then(function (r) { return r.json() })
       .then(function (d) {
         var a = (d && d.providers || []).find(function (p) { return p.is_active })
         if (a) {
-          setProviderLabel(a.label + ' / ' + a.model)
           setActiveProviderId(a.id)
         } else {
-          setProviderLabel('')
           setActiveProviderId(null)
         }
       })
@@ -299,6 +361,7 @@ function App() {
   const isHomeView = activeView === 'home'
   const isReaderView = activeView !== 'home'
   const isAccountView = Boolean(accountSection)
+  const isAdminUser = Boolean(currentUser?.is_admin)
   const {
     annotations,
     loading: annLoading,
@@ -313,6 +376,12 @@ function App() {
     createInkAnnotation,
     deleteInkAnnotation,
   } = useInkAnnotations(activePaperId)
+  const {
+    shapeAnnotations,
+    createShapeAnnotation,
+    updateShapeAnnotation,
+    deleteShapeAnnotation,
+  } = useShapeAnnotations(activePaperId)
   const {
     notebooks,
     loading: notesLoading,
@@ -383,7 +452,7 @@ function App() {
     workspacePanel.setWidth((current) => Math.min(current, workspaceSafeMaxWidth))
   }, [workspacePanel.setWidth, workspaceSafeMaxWidth])
 
-  const { selectionCard, handleSelection, dismissSelectionCard, setDomain, aiEnabled, toggleAI } = useSelectionInsight({
+  const { selectionCard, handleSelection, dismissSelectionCard, aiEnabled, toggleAI } = useSelectionInsight({
     readerRef,
     paperTitle: metadata.title || fileName,
     paperSummary: activePaperSummary,
@@ -522,6 +591,8 @@ function App() {
     if (!paperId) return
     switchToPaper(paperId)
     setAccountSection('')
+    setHomeInitialSection('recent')
+    setSummaryInitialType('')
     setIsFullTranslationOpen(false)
 
     const resourceType = resource?.type || ''
@@ -614,6 +685,235 @@ function App() {
       window.removeEventListener('pointerdown', handlePointerDown)
     }
   }, [isUserMenuOpen])
+
+  function clearNotificationSummaryPolling() {
+    if (notificationSummaryPollRef.current) {
+      window.clearInterval(notificationSummaryPollRef.current)
+      notificationSummaryPollRef.current = null
+    }
+  }
+
+  function clearNotificationDrawerPolling() {
+    if (notificationDrawerPollRef.current) {
+      window.clearInterval(notificationDrawerPollRef.current)
+      notificationDrawerPollRef.current = null
+    }
+  }
+
+  function clearNotificationToastTimer() {
+    if (notificationToastTimerRef.current) {
+      window.clearTimeout(notificationToastTimerRef.current)
+      notificationToastTimerRef.current = null
+    }
+  }
+
+  function showNotificationToast(item) {
+    if (!item?.id) return
+    toastedNotificationIdsRef.current.add(item.id)
+    setNotificationToast(item)
+    clearNotificationToastTimer()
+    notificationToastTimerRef.current = window.setTimeout(() => {
+      setNotificationToast(null)
+      notificationToastTimerRef.current = null
+    }, 4000)
+  }
+
+  function applyNotificationSummary(summary, options = {}) {
+    const normalized = normalizeNotificationSummary(summary)
+    setNotificationSummary(normalized)
+    const latestId = normalized.latest_notification_id
+    if (!latestId) {
+      lastSeenNotificationIdRef.current = null
+      return
+    }
+
+    if (!didInitNotificationPollingRef.current || options.silentInit) {
+      didInitNotificationPollingRef.current = true
+      lastSeenNotificationIdRef.current = latestId
+      return
+    }
+
+    if (lastSeenNotificationIdRef.current !== latestId) {
+      lastSeenNotificationIdRef.current = latestId
+      loadNotificationList({ toastLatest: true })
+    }
+  }
+
+  async function loadNotificationSummary(options = {}) {
+    if (!currentUser) return
+    try {
+      const payload = await fetchNotificationSummary()
+      applyNotificationSummary(payload, options)
+    } catch {
+      if (options.resetOnError) {
+        setNotificationSummary(normalizeNotificationSummary())
+      }
+    }
+  }
+
+  async function loadNotificationList(options = {}) {
+    if (!currentUser) return
+    if (!options.background) {
+      setNotificationLoading(true)
+    }
+    try {
+      const payload = await fetchNotifications(NOTIFICATION_LIST_LIMIT)
+      const items = Array.isArray(payload?.items) ? payload.items.map(normalizeNotificationItem) : []
+      setNotificationItems(items)
+      setNotificationSummary((current) => ({
+        ...current,
+        unread_count: Number(payload?.unread_count || 0),
+        latest_notification_id: items[0]?.id ?? current.latest_notification_id,
+        latest_created_at: items[0]?.created_at ?? current.latest_created_at,
+      }))
+      if (options.toastLatest) {
+        const target = items.find((item) => !item.read_at && !toastedNotificationIdsRef.current.has(item.id))
+        if (target) {
+          showNotificationToast(target)
+        }
+      }
+      return items
+    } catch {
+      if (!options.background) {
+        setNotificationItems([])
+      }
+      return []
+    } finally {
+      if (!options.background) {
+        setNotificationLoading(false)
+      }
+    }
+  }
+
+  function beginNotificationSummaryPolling() {
+    clearNotificationSummaryPolling()
+    notificationSummaryPollRef.current = window.setInterval(() => {
+      loadNotificationSummary()
+    }, NOTIFICATION_SUMMARY_POLL_MS)
+  }
+
+  function beginNotificationDrawerPolling() {
+    clearNotificationDrawerPolling()
+    notificationDrawerPollRef.current = window.setInterval(() => {
+      loadNotificationList({ background: true })
+    }, NOTIFICATION_SUMMARY_POLL_MS)
+  }
+
+  async function navigateFromNotification(item) {
+    const actionKind = String(item?.action_kind || '')
+    const payload = item?.action_payload || {}
+
+    if (actionKind === 'open-summary') {
+      const paperId = Number(payload.paper_id || 0)
+      const summaryType = String(payload.summary_type || '').trim()
+      if (!paperId) {
+        showNotificationToast({ id: `missing-${Date.now()}`, title: '提示', message: '目标内容已不存在或无权限访问' })
+        return
+      }
+      setAccountSection('')
+      setHomeInitialSection('recent')
+      setSummaryInitialType(summaryType)
+      setIsFullTranslationOpen(false)
+      switchToPaper(paperId)
+      setActiveWorkspacePanel('summary')
+      return
+    }
+
+    if (actionKind === 'open-full-translation') {
+      const paperId = Number(payload.paper_id || 0)
+      if (!paperId) {
+        showNotificationToast({ id: `missing-${Date.now()}`, title: '提示', message: '目标内容已不存在或无权限访问' })
+        return
+      }
+      setAccountSection('')
+      setHomeInitialSection('recent')
+      setSummaryInitialType('')
+      setActiveWorkspacePanel('')
+      switchToPaper(paperId)
+      setIsFullTranslationOpen(true)
+      return
+    }
+
+    if (actionKind === 'open-matrix') {
+      setSummaryInitialType('')
+      setAccountSection('')
+      setIsFullTranslationOpen(false)
+      setHomeInitialSection('matrix')
+      goHome()
+      return
+    }
+  }
+
+  async function handleNotificationOpen(item) {
+    if (!item?.id) return
+    try {
+      await markNotificationRead(item.id)
+      setNotificationItems((previous) =>
+        previous.map((entry) =>
+          entry.id === item.id ? { ...entry, read_at: entry.read_at || new Date().toISOString() } : entry,
+        ),
+      )
+      setNotificationSummary((current) => ({
+        ...current,
+        unread_count: Math.max(0, Number(current.unread_count || 0) - (item.read_at ? 0 : 1)),
+      }))
+    } catch {
+      // Read failure should not block navigation.
+    }
+    setIsNotificationOpen(false)
+    setNotificationToast(null)
+    await navigateFromNotification(item)
+  }
+
+  async function handleReadAllNotifications() {
+    try {
+      const payload = await markAllNotificationsRead()
+      if (Number(payload?.updated_count || 0) >= 0) {
+        const readAt = new Date().toISOString()
+        setNotificationItems((previous) => previous.map((item) => ({ ...item, read_at: item.read_at || readAt })))
+        setNotificationSummary((current) => ({ ...current, unread_count: 0 }))
+      }
+    } catch {
+      // Ignore read-all failures in the UI.
+    }
+  }
+
+  useEffect(() => {
+    clearNotificationSummaryPolling()
+    clearNotificationDrawerPolling()
+    clearNotificationToastTimer()
+    setNotificationToast(null)
+
+    if (!currentUser) {
+      didInitNotificationPollingRef.current = false
+      lastSeenNotificationIdRef.current = null
+      toastedNotificationIdsRef.current = new Set()
+      setNotificationItems([])
+      setNotificationSummary(normalizeNotificationSummary())
+      return undefined
+    }
+
+    loadNotificationSummary({ silentInit: true, resetOnError: true })
+    beginNotificationSummaryPolling()
+
+    return () => {
+      clearNotificationSummaryPolling()
+      clearNotificationDrawerPolling()
+      clearNotificationToastTimer()
+    }
+  }, [currentUser?.uid])
+
+  useEffect(() => {
+    if (!currentUser || !isNotificationOpen) {
+      clearNotificationDrawerPolling()
+      return undefined
+    }
+    loadNotificationList()
+    beginNotificationDrawerPolling()
+    return () => {
+      clearNotificationDrawerPolling()
+    }
+  }, [currentUser?.uid, isNotificationOpen])
 
   const userInitials = (currentUser?.nickname || 'xk').slice(0, 2).toLowerCase()
   const activeChatMessages = chatMessages[activeView] || []
@@ -1563,12 +1863,45 @@ function App() {
     return result
   }
 
+  async function handleCreateShapeAnnotation(payload) {
+    if (!activePaperId) return null
+    const result = await createShapeAnnotation(payload)
+    if (result) {
+      refreshResourceOverview()
+      refreshReadingDashboard()
+    }
+    return result
+  }
+
+  async function handleUpdateShapeAnnotation(shapeId, payload) {
+    if (!activePaperId) return null
+    const result = await updateShapeAnnotation(shapeId, payload)
+    if (result) {
+      refreshResourceOverview()
+      refreshReadingDashboard()
+    }
+    return result
+  }
+
+  async function handleDeleteShapeAnnotation(shapeId) {
+    if (!activePaperId) return null
+    const result = await deleteShapeAnnotation(shapeId)
+    if (result) {
+      refreshResourceOverview()
+      refreshReadingDashboard()
+    }
+    return result
+  }
+
   function handleClosePaper(paperId) {
     clearAnnotationUndo(paperId)
     closePaper(paperId)
   }
 
   function handleLogout() {
+    clearNotificationSummaryPolling()
+    clearNotificationDrawerPolling()
+    clearNotificationToastTimer()
     clearStoredAuthToken()
     localStorage.removeItem('xk_read_recent')
     setAnnotationUndoStacks({})
@@ -1584,6 +1917,12 @@ function App() {
     eraseUndoSessionsRef.current.clear()
     setCurrentUser(null)
     setIsUserMenuOpen(false)
+    setIsNotificationOpen(false)
+    setNotificationItems([])
+    setNotificationSummary(normalizeNotificationSummary())
+    setNotificationToast(null)
+    setHomeInitialSection('recent')
+    setSummaryInitialType('')
     setAccountSection('')
     goHome()
   }
@@ -1624,6 +1963,18 @@ function App() {
   const appShellStyle = {
     '--ui-font-scale': uiFontScale,
     '--ui-topbar-scale': uiTopbarScale,
+  }
+
+  if (!isAuthViewOpen && currentUser?.is_admin) {
+    return (
+      <div className="app-shell app-shell--account" style={appShellStyle}>
+        <main className="workspace">
+          <div className="workspace-view workspace-view--account is-active">
+            <AdminPage currentUser={currentUser} onBack={handleLogout} />
+          </div>
+        </main>
+      </div>
+    )
   }
 
   return (
@@ -1695,9 +2046,17 @@ function App() {
           </div>
 
           <div className="topbar-meta">
-            <StatusPanel label={serverStatus} />
-            <button type="button" className="topbar-action">
-              通知
+            <button
+              type="button"
+              className="topbar-action topbar-action--notification"
+              onClick={() => setIsNotificationOpen(true)}
+            >
+              <span className="topbar-action__label">通知</span>
+              {notificationSummary.unread_count > 0 ? (
+                <span className="topbar-action__badge">
+                  {notificationSummary.unread_count > 99 ? '99+' : notificationSummary.unread_count}
+                </span>
+              ) : null}
             </button>
             <button type="button" className="topbar-action">
               客服
@@ -1759,6 +2118,12 @@ function App() {
                         <Brain />
                         <span>AI 配置</span>
                       </button>
+                      {isAdminUser ? (
+                        <button type="button" onClick={() => openAccountSection('admin')}>
+                          <Settings2 />
+                          <span>管理后台</span>
+                        </button>
+                      ) : null}
                       <button type="button" className="is-danger" onClick={handleLogout}>
                         <LogOut />
                         <span>退出登录</span>
@@ -1835,6 +2200,7 @@ function App() {
             trashPapers={trashPapers}
             uiFontScale={uiFontScale}
             uncategorizedFolderId={uncategorizedFolderId}
+            initialSection={homeInitialSection}
           />
         </div>
 
@@ -1874,6 +2240,8 @@ function App() {
                 onEraserModeChange={setActiveEraserMode}
                 inkOptions={inkOptions}
                 onInkOptionsChange={setInkOptions}
+                shapeOptions={shapeOptions}
+                onShapeOptionsChange={setShapeOptions}
                 onSelect={handleSelection}
                 onThumbnailPageClick={(pageNum) => {
                   setCurrentPage(pageNum)
@@ -1895,11 +2263,15 @@ function App() {
                 currentPaperId={activePaperId}
                 annotations={annotations}
                 inkAnnotations={inkAnnotations}
+                shapeAnnotations={shapeAnnotations}
                 onCreateAnnotation={handleCreateAnnotation}
                 onDeleteAnnotation={handleDeleteAnnotation}
                 onEraseAnnotationRange={handleEraseAnnotationRange}
                 onCreateInkAnnotation={handleCreateInkAnnotation}
                 onDeleteInkAnnotation={handleDeleteInkAnnotation}
+                onCreateShapeAnnotation={handleCreateShapeAnnotation}
+                onUpdateShapeAnnotation={handleUpdateShapeAnnotation}
+                onDeleteShapeAnnotation={handleDeleteShapeAnnotation}
                 onInsertSelectionNote={handleInsertSelectionNote}
                 onAskAI={function () { if (selectionCard.text) handleAskAIText(selectionCard.text) }}
                 onScreenshotTranslate={handleScreenshotTranslate}
@@ -1923,8 +2295,6 @@ function App() {
               />
 
               <SelectionInsightPanel
-                domain={selectionCard.domain}
-                onDomainChange={setDomain}
                 selectionCard={selectionCard}
                 width={insightPanel.width}
                 aiEnabled={aiEnabled}
@@ -1968,7 +2338,6 @@ function App() {
                 chatInitialSuggestions={activeInitialSuggestions}
                 chatInitialSuggestionsLoading={activeInitialSuggestionsLoading}
                 chatFollowupLoadingMessageId={activeFollowupLoadingMessageId}
-                providerLabel={providerLabel}
                 uiFontScale={uiFontScale}
                 onChatInputChange={function (value) {
                   setChatInput(function (previous) {
@@ -1981,6 +2350,7 @@ function App() {
                 onChatSubmit={handleChatSubmit}
                 onRefreshInitialSuggestions={function () { fetchInitialSuggestions(true) }}
                 onInsertSummaryNote={handleInsertSummaryNote}
+                initialSummaryId={summaryInitialType}
               />
 
               <UtilityRail
@@ -1998,7 +2368,9 @@ function App() {
             !isAuthViewOpen && isAccountView ? ' is-active' : ' is-hidden'
           }`}
         >
-          {accountSection === 'ai-config' ? (
+          {accountSection === 'admin' ? (
+            <AdminPage currentUser={currentUser} onBack={() => setAccountSection('')} />
+          ) : accountSection === 'ai-config' ? (
             <AiConfigPage onBack={() => setAccountSection('')} />
           ) : (
             <UserCenterPage
@@ -2032,6 +2404,78 @@ function App() {
           onClose={closeResourcePreview}
           onJumpToEvidence={handleJumpToPreviewEvidence}
         />
+      ) : null}
+
+      <Sheet open={isNotificationOpen} onOpenChange={setIsNotificationOpen}>
+        <SheetContent className="notification-sheet" side="right">
+          <SheetHeader className="notification-sheet__header">
+            <SheetTitle>通知</SheetTitle>
+            <SheetDescription>最近任务完成和失败提醒。</SheetDescription>
+            <div className="notification-sheet__meta">
+              <span>{notificationSummary.unread_count} 条未读</span>
+              <button type="button" className="notification-sheet__read-all" onClick={handleReadAllNotifications}>
+                全部已读
+              </button>
+            </div>
+          </SheetHeader>
+
+          <div className="notification-sheet__body">
+            {notificationLoading ? (
+              <div className="notification-sheet__empty">正在加载通知...</div>
+            ) : notificationItems.length ? (
+              <div className="notification-list">
+                {notificationItems.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`notification-item${item.read_at ? '' : ' is-unread'}`}
+                    onClick={() => handleNotificationOpen(item)}
+                  >
+                    <div className="notification-item__head">
+                      <strong>{item.title || '通知'}</strong>
+                      <span>{formatNotificationTime(item.created_at)}</span>
+                    </div>
+                    <p>{item.message || '点击查看详情'}</p>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="notification-sheet__empty">最近还没有通知。</div>
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      {notificationToast ? (
+        <button type="button" className="notification-toast" onClick={() => handleNotificationOpen(notificationToast)}>
+          <div className="notification-toast__icon">
+            <Bell size={16} />
+          </div>
+          <div className="notification-toast__content">
+            <strong>{notificationToast.title || '通知'}</strong>
+            <p>{notificationToast.message || '点击查看详情'}</p>
+          </div>
+          <span
+            className="notification-toast__close"
+            onClick={(event) => {
+              event.stopPropagation()
+              clearNotificationToastTimer()
+              setNotificationToast(null)
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                event.stopPropagation()
+                clearNotificationToastTimer()
+                setNotificationToast(null)
+              }
+            }}
+            role="button"
+            tabIndex={0}
+          >
+            <X size={14} />
+          </span>
+        </button>
       ) : null}
     </div>
   )

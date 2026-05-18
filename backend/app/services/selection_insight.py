@@ -9,6 +9,8 @@ from app.schemas.selection import (
     SelectionGlossaryItem,
     SelectionInsightResponse,
 )
+from app.services.machine_translation import translate_with_tencent_mt
+from app.services.termbase import load_termbase
 from app.services.translate import translate_text
 
 STOPWORDS = {
@@ -127,6 +129,27 @@ def build_local_translation(text: str, text_kind: str) -> str:
     return f"暂未拿到实时译文，先保留当前原文重点：{preview}"
 
 
+def build_translation_result(text: str, text_kind: str, domain: str = "") -> tuple[str, str]:
+    translated_text = translate_text(text, domain=domain)
+    if translated_text and translated_text != text:
+        source = "百度领域翻译 + AI 阅读助手" if domain else "百度通用翻译 + AI 阅读助手"
+        return translated_text, source
+
+    try:
+        terms, _ = load_termbase()
+        translated_items = translate_with_tencent_mt(
+            items=[{"id": "selection", "text": text}],
+            terms=terms,
+        )
+        tencent_text = str(translated_items.get("selection") or "").strip()
+        if tencent_text and tencent_text != text:
+            return tencent_text, "腾讯机器翻译 + AI 阅读助手"
+    except Exception:
+        pass
+
+    return build_local_translation(text, text_kind), "AI 阅读助手"
+
+
 def build_selection_insight(
     *,
     text: str,
@@ -141,14 +164,11 @@ def build_selection_insight(
     keywords = extract_keywords(normalized_text)
     glossary = build_glossary(keywords)
 
-    # 翻译：保持用百度
-    translated_text = translate_text(normalized_text, domain=domain)
-    if translated_text and translated_text != normalized_text:
-        translation = translated_text
-        source = "百度翻译 + AI阅读助手"
-    else:
-        translation = build_local_translation(normalized_text, text_kind)
-        source = "AI阅读助手"
+    translation, source = build_translation_result(
+        normalized_text,
+        text_kind,
+        domain=domain,
+    )
 
     # 解释由前端单独调 explain 端点获取，主接口不做 AI 调用
     return SelectionInsightResponse(

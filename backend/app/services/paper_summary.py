@@ -11,12 +11,14 @@ from typing import Any
 
 from openai import OpenAI
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models import AiProvider, Annotation, Paper, PaperFullTranslation, PaperSummary
 from app.schemas.paper_summary import normalize_summary_content
 from app.services.crypto import decrypt_api_key
+from app.services.notification import compact_notification_text, create_notification
 
 
 SUMMARY_TYPES: dict[str, dict[str, Any]] = {
@@ -123,6 +125,7 @@ SUMMARY_RUNNING_STALE_SECONDS = 180
 LLM_CALL_MAX_ATTEMPTS = 3
 LLM_JSON_MAX_ATTEMPTS = 2
 LLM_RETRY_BACKOFF_SECONDS = (1.0, 2.2, 4.0)
+DB_OPERATIONAL_RETRY_CODES = {2006, 2013}
 
 
 def _normalize_datetime(value: datetime | None) -> datetime | None:
@@ -139,7 +142,7 @@ def is_summary_running_stale(item: PaperSummary | None, *, now: datetime | None 
     updated_at = _normalize_datetime(item.updated_at)
     if updated_at is None:
         return False
-    current = _normalize_datetime(now or datetime.now(timezone.utc))
+    current = _normalize_datetime(now or datetime.now(updated_at.tzinfo))
     if current is None:
         return False
     return (current - updated_at) > timedelta(seconds=SUMMARY_RUNNING_STALE_SECONDS)
@@ -153,6 +156,22 @@ def mark_summary_interrupted(db: Session, item: PaperSummary, message: str = "�
     db.commit()
     db.refresh(item)
     return item
+
+
+def is_retryable_db_operational_error(exc: Exception) -> bool:
+    if not isinstance(exc, OperationalError):
+        return False
+    original = getattr(exc, "orig", None)
+    error_code = None
+    if original is not None and getattr(original, "args", None):
+        error_code = original.args[0]
+    message = str(original or exc).lower()
+    return (
+        error_code in DB_OPERATIONAL_RETRY_CODES
+        or "server has gone away" in message
+        or "lost connection to mysql server during query" in message
+        or "connection was killed" in message
+    )
 
 
 def normalize_summary_terminal_state(db: Session, item: PaperSummary | None) -> PaperSummary | None:
@@ -502,6 +521,8 @@ def update_summary_progress(summary_id: int, *, stage: str, progress: int, statu
         item.progress = max(0, min(100, int(progress)))
         if error is not None:
             item.error_message = error
+        elif status == "running":
+            item.error_message = None
         db.add(item)
         db.commit()
     finally:
@@ -511,9 +532,9 @@ def update_summary_progress(summary_id: int, *, stage: str, progress: int, statu
 def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> None:
     from app.db.session import SessionLocal
 
-    db = SessionLocal()
     try:
         for task_attempt in range(1, LLM_CALL_MAX_ATTEMPTS + 1):
+            db = SessionLocal()
             try:
                 item = db.get(PaperSummary, summary_id)
                 if not item:
@@ -613,22 +634,34 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
             except Exception as exc:
                 if task_attempt >= LLM_CALL_MAX_ATTEMPTS:
                     raise
-                fresh = db.get(PaperSummary, summary_id)
-                if fresh:
+                retry_stage = "generating_summary"
+                retry_progress = 0
+                if not is_retryable_db_operational_error(exc):
+                    fresh = db.get(PaperSummary, summary_id)
+                    if fresh:
+                        retry_stage = fresh.stage or retry_stage
+                        retry_progress = int(fresh.progress or 0)
+                try:
                     update_summary_progress(
                         summary_id,
-                        stage=fresh.stage or "generating_summary",
-                        progress=int(fresh.progress or 0),
+                        stage=retry_stage,
+                        progress=retry_progress,
                         status="running",
                         error=f"自动重试中：{task_attempt}/{LLM_CALL_MAX_ATTEMPTS}，{exc}",
                     )
+                except OperationalError:
+                    pass
                 sleep_before_retry(task_attempt)
+            finally:
+                db.close()
     except Exception as exc:
-        fresh = db.get(PaperSummary, summary_id)
-        if fresh:
-            _mark_failed(db, fresh, f"生成失败：{exc}")
-    finally:
-        db.close()
+        db = SessionLocal()
+        try:
+            fresh = db.get(PaperSummary, summary_id)
+            if fresh:
+                _mark_failed(db, fresh, f"生成失败：{exc}")
+        finally:
+            db.close()
 
 
 def _mark_generated(db: Session, item: PaperSummary, content: dict[str, Any], source_hash: str, provider: AiProvider) -> None:
@@ -642,15 +675,41 @@ def _mark_generated(db: Session, item: PaperSummary, content: dict[str, Any], so
     item.error_message = None
     db.add(item)
     db.commit()
+    paper = db.get(Paper, item.paper_id)
+    create_notification(
+        db,
+        user_id=item.user_id,
+        source_kind="paper_summary",
+        source_id=int(item.id),
+        event_kind="completed",
+        title=f"{summary_title(item.summary_type)} 已完成",
+        message=f"{compact_notification_text((paper.title if paper else '') or '当前论文', 80)} · {summary_title(item.summary_type)}",
+        action_kind="open-summary",
+        action_payload={"paper_id": item.paper_id, "summary_type": item.summary_type},
+    )
 
 
 def _mark_failed(db: Session, item: PaperSummary, message: str) -> None:
-    item.status = "failed" if not item.content_json else "generated"
+    next_status = "failed" if not item.content_json else "generated"
+    item.status = next_status
     item.stage = "failed"
     item.progress = max(0, min(100, int(item.progress or 0)))
     item.error_message = message
     db.add(item)
     db.commit()
+    if next_status == "failed":
+        paper = db.get(Paper, item.paper_id)
+        create_notification(
+            db,
+            user_id=item.user_id,
+            source_kind="paper_summary",
+            source_id=int(item.id),
+            event_kind="failed",
+            title=f"{summary_title(item.summary_type)} 失败",
+            message=f"{compact_notification_text((paper.title if paper else '') or '当前论文', 80)} · {compact_notification_text(message, 120)}",
+            action_kind="open-summary",
+            action_payload={"paper_id": item.paper_id, "summary_type": item.summary_type},
+        )
 
 
 def extract_paper_pages(db: Session, paper: Paper) -> list[PageText]:

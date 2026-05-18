@@ -24,16 +24,29 @@ def get_current_user(
         detail="登录状态已失效，请重新登录。",
     )
 
-    uid = decode_access_token(token)
-    if not uid:
+    token_payload = decode_access_token(token)
+    if not token_payload:
         raise unauthorized
+    uid = str(token_payload["sub"])
+    token_version = int(token_payload.get("tv", 0))
 
     user = db.scalar(
         select(User)
         .options(selectinload(User.profile))
         .where(User.uid == uid)
     )
-    if not user or user.status != "active":
+    if not user or user.status != "active" or int(user.token_version or 0) != token_version:
         raise unauthorized
 
     return user
+
+
+def get_current_admin(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="当前账号没有管理权限。",
+        )
+    return current_user

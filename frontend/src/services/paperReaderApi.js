@@ -449,13 +449,6 @@ export async function syncReadingRecords(records) {
   return parseJsonResponse(response)
 }
 
-// ── Legacy (unchanged) ───────────────────────────────────
-
-export async function fetchBackendHealth() {
-  const response = await fetch('/api/health')
-  return parseJsonResponse(response)
-}
-
 export async function fetchSelectionInsight(payload) {
   const response = await fetch('/api/selection-insight', {
     method: 'POST',

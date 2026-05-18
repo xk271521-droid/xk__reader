@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 class SelectionInsightRequest(BaseModel):
     text: str = Field(min_length=2, max_length=1500)
     paper_title: str | None = Field(default=None, max_length=200)
-    domain: str = Field(default="it", max_length=32)
+    domain: str = Field(default="", max_length=32)
     summary: str | None = Field(default=None, max_length=2000)
     context: str | None = Field(default=None, max_length=2000)
     provider_id: int | None = Field(default=None, ge=1)

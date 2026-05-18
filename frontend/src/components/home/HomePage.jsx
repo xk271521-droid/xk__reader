@@ -1164,8 +1164,9 @@ export function HomePage({
   trashPapers = [],
   uiFontScale = 1,
   uncategorizedFolderId,
+  initialSection = 'recent',
 }) {
-  const [activeSection, setActiveSection] = useState('recent')
+  const [activeSection, setActiveSection] = useState(initialSection || 'recent')
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedFolderId, setSelectedFolderId] = useState(uncategorizedFolderId)
   const [libraryStatusFilter, setLibraryStatusFilter] = useState('all')
@@ -1183,6 +1184,12 @@ export function HomePage({
       setSelectedFolderId(uncategorizedFolderId)
     }
   }, [uncategorizedFolderId, selectedFolderId])
+
+  useEffect(() => {
+    if (initialSection) {
+      setActiveSection(initialSection)
+    }
+  }, [initialSection])
 
   useEffect(() => {
     let cancelled = false

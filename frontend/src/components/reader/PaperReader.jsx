@@ -15,6 +15,8 @@ export function PaperReader({
   onEraserModeChange,
   inkOptions,
   onInkOptionsChange,
+  shapeOptions,
+  onShapeOptionsChange,
   onSelect,
   onThumbnailPageClick,
   onWheelZoom,
@@ -32,11 +34,15 @@ export function PaperReader({
   currentPaperId,
   annotations,
   inkAnnotations,
+  shapeAnnotations,
   onCreateAnnotation,
   onDeleteAnnotation,
   onEraseAnnotationRange,
   onCreateInkAnnotation,
   onDeleteInkAnnotation,
+  onCreateShapeAnnotation,
+  onUpdateShapeAnnotation,
+  onDeleteShapeAnnotation,
   onInsertSelectionNote,
   onAskAI,
   onScreenshotTranslate,
@@ -61,6 +67,8 @@ export function PaperReader({
         onEraserModeChange={onEraserModeChange}
         inkOptions={inkOptions}
         onInkOptionsChange={onInkOptionsChange}
+        shapeOptions={shapeOptions}
+        onShapeOptionsChange={onShapeOptionsChange}
         onToggleThumbnails={onToggleThumbnails}
         onZoomIn={pdfReader.zoomIn}
         onZoomOut={pdfReader.zoomOut}
@@ -125,12 +133,17 @@ export function PaperReader({
           currentPaperId={currentPaperId}
           annotations={annotations}
           inkAnnotations={inkAnnotations}
+          shapeAnnotations={shapeAnnotations}
           inkOptions={inkOptions}
+          shapeOptions={shapeOptions}
           onCreateAnnotation={onCreateAnnotation}
           onDeleteAnnotation={onDeleteAnnotation}
           onEraseAnnotationRange={onEraseAnnotationRange}
           onCreateInkAnnotation={onCreateInkAnnotation}
           onDeleteInkAnnotation={onDeleteInkAnnotation}
+          onCreateShapeAnnotation={onCreateShapeAnnotation}
+          onUpdateShapeAnnotation={onUpdateShapeAnnotation}
+          onDeleteShapeAnnotation={onDeleteShapeAnnotation}
           onInsertSelectionNote={onInsertSelectionNote}
           onAskAI={onAskAI}
           onScreenshotTranslate={onScreenshotTranslate}

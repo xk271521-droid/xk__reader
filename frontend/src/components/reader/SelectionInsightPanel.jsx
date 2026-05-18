@@ -15,42 +15,13 @@ function copyText(text) {
   navigator.clipboard.writeText(text).catch(() => {})
 }
 
-const DOMAIN_OPTIONS = [
-  { value: '', label: '通用翻译' },
-  { value: 'it', label: '信息技术' },
-  { value: 'finance', label: '金融财经' },
-  { value: 'machinery', label: '机械制造' },
-  { value: 'senimed', label: '生物医药' },
-  { value: 'academic', label: '学术论文' },
-  { value: 'aerospace', label: '航空航天' },
-  { value: 'news', label: '新闻资讯' },
-  { value: 'law', label: '法律法规' },
-  { value: 'contract', label: '合同' },
-]
-
-export function SelectionInsightPanel({ domain, onDomainChange, selectionCard, width, aiEnabled, onToggleAI }) {
-
+export function SelectionInsightPanel({ selectionCard, width, aiEnabled, onToggleAI }) {
   return (
     <aside className="insight-panel" style={{ width }}>
       <div className="insight-panel__header">
         <div>
           <p className="panel-label">划词结果</p>
           <h2>即时理解</h2>
-        </div>
-
-        <div className="insight-header-actions">
-          {selectionCard.visible ? (
-            <select
-              className="insight-domain-select"
-              value={domain}
-              onChange={(e) => onDomainChange(e.target.value)}
-            >
-              {DOMAIN_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-          ) : null}
-
         </div>
       </div>
 

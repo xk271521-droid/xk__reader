@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef } from 'react'
 import { loadPdfJs } from '../../services/pdfjsClient'
 import { InkOverlay } from './InkOverlay'
+import { ShapeAnnotationLayer } from './ShapeAnnotationLayer'
 import { PDF_TEXT_GEOMETRY_VERSION, buildRenderedPageIndex } from './pdfSelectionModel'
 
 function getRenderScale() {
@@ -264,6 +265,10 @@ function cacheKey(pdfDocument, pageNumber) {
 function PdfPageComponent({
   annotations = [],
   inkAnnotations = [],
+  shapeAnnotations = [],
+  selectedShapeId = null,
+  shapePreview = null,
+  textEditor = null,
   drawingStroke = null,
   currentSelection = null,
   selectionDebugGeometry = null,
@@ -274,6 +279,15 @@ function PdfPageComponent({
   onInkPointerMove,
   onInkPointerUp,
   onInkErase,
+  onShapePointerDown,
+  onShapeDoubleClick,
+  onShapeHandlePointerDown,
+  onShapeDelete,
+  onShapeEdit,
+  onShapeToggleCollapse,
+  onTextEditorChange,
+  onTextEditorCommit,
+  onTextEditorCancel,
   onPageIndexReady,
   pageMetric,
   pageNumber,
@@ -446,6 +460,21 @@ function PdfPageComponent({
             onInkPointerMove={onInkPointerMove}
             onInkPointerUp={onInkPointerUp}
             onInkErase={onInkErase}
+          />
+          <ShapeAnnotationLayer
+            annotations={shapeAnnotations}
+            selectedShapeId={selectedShapeId}
+            previewShape={shapePreview}
+            textEditor={textEditor}
+            onShapePointerDown={onShapePointerDown}
+            onShapeDoubleClick={onShapeDoubleClick}
+            onShapeHandlePointerDown={onShapeHandlePointerDown}
+            onShapeDelete={onShapeDelete}
+            onShapeEdit={onShapeEdit}
+            onShapeToggleCollapse={onShapeToggleCollapse}
+            onTextEditorChange={onTextEditorChange}
+            onTextEditorCommit={onTextEditorCommit}
+            onTextEditorCancel={onTextEditorCancel}
           />
           <div className="pdf-annotation-overlay">
             {annotations.filter((annotation) => annotation.type !== 'highlight').map((annotation) => {

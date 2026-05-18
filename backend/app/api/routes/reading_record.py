@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models import Annotation, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperNoteBlock, PaperNoteNode, PaperNotebook, PaperSummary, ReadingRecord, User
+from app.models import Annotation, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperNoteBlock, PaperNoteNode, PaperNotebook, PaperSummary, ReadingRecord, ShapeAnnotation, User
 from app.schemas.reading_record import (
     ReadingDashboardResponse,
     ReadingRecordCreate,
@@ -477,7 +477,11 @@ def get_reading_dashboard(
     if timeframe_start_utc is not None:
         ink_annotation_query = ink_annotation_query.where(InkAnnotation.created_at >= timeframe_start_utc)
     ink_annotation_count = db.scalar(ink_annotation_query) or 0
-    annotation_count = int(text_annotation_count or 0) + int(ink_annotation_count or 0)
+    shape_annotation_query = select(func.count(ShapeAnnotation.id)).where(ShapeAnnotation.user_id == current_user.id)
+    if timeframe_start_utc is not None:
+        shape_annotation_query = shape_annotation_query.where(ShapeAnnotation.created_at >= timeframe_start_utc)
+    shape_annotation_count = db.scalar(shape_annotation_query) or 0
+    annotation_count = int(text_annotation_count or 0) + int(ink_annotation_count or 0) + int(shape_annotation_count or 0)
 
     note_rows = db.execute(
         select(

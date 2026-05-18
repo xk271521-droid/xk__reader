@@ -1,15 +1,17 @@
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import OperationalError
 from sqlalchemy import inspect, select, text
 
 from app.api.router import api_router
 from app.api.routes.research_matrix import resume_stale_matrix_runs
 from app.core.config import settings
 from app.db.session import Base, SessionLocal, engine
-from app.models import Annotation, AiProvider, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, ResearchMatrixRun, ResearchMatrixRunPaper, User, UserAgreement, UserProfile, VerificationCode  # noqa: F401
+from app.models import Annotation, AiProvider, Folder, InkAnnotation, Notification, Paper, PaperFullTranslation, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, ResearchMatrixRun, ResearchMatrixRunPaper, User, UserAgreement, UserProfile, VerificationCode  # noqa: F401
 
 
 def _ensure_system_providers() -> None:
@@ -219,6 +221,84 @@ def _ensure_user_email_nullable() -> None:
         connection.execute(text("ALTER TABLE users MODIFY COLUMN email VARCHAR(255) NULL"))
 
 
+def _ensure_user_admin_column() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("users")}
+    except Exception:
+        return
+
+    if "is_admin" in columns:
+        return
+
+    with engine.begin() as connection:
+        if engine.dialect.name == "sqlite":
+            connection.execute(
+                text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0")
+            )
+        else:
+            connection.execute(
+                text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE")
+            )
+
+
+def _ensure_user_token_version_column() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("users")}
+    except Exception:
+        return
+
+    if "token_version" in columns:
+        return
+
+    with engine.begin() as connection:
+        if engine.dialect.name == "sqlite":
+            connection.execute(
+                text("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
+            )
+        else:
+            connection.execute(
+                text("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
+            )
+
+
+def _is_retryable_startup_ddl_error(exc: OperationalError) -> bool:
+    original = getattr(exc, "orig", None)
+    error_code = None
+    if original is not None and getattr(original, "args", None):
+        error_code = original.args[0]
+    message = str(original or exc).lower()
+    return (
+        error_code in {1412, 1684, 2006, 2013}
+        or "concurrent ddl" in message
+        or "being modified" in message
+        or "server has gone away" in message
+        or "lost connection to mysql server during query" in message
+    )
+
+
+def _run_startup_schema_sync() -> None:
+    attempts = 5
+    delay_seconds = 1.5
+    for attempt in range(1, attempts + 1):
+        try:
+            Base.metadata.create_all(bind=engine)
+            _ensure_annotation_geometry_version_column()
+            _ensure_full_translation_parse_columns()
+            _ensure_paper_trash_columns()
+            _ensure_research_matrix_columns()
+            _ensure_reading_record_duration_column()
+            _ensure_user_email_nullable()
+            _ensure_user_admin_column()
+            _ensure_user_token_version_column()
+            return
+        except OperationalError as exc:
+            if attempt == attempts or not _is_retryable_startup_ddl_error(exc):
+                raise
+            time.sleep(delay_seconds)
+
+
 def create_app() -> FastAPI:
     application = FastAPI(title=settings.app_name)
     application.add_middleware(
@@ -237,13 +317,7 @@ def create_app() -> FastAPI:
 
     @application.on_event("startup")
     def create_tables() -> None:
-        Base.metadata.create_all(bind=engine)
-        _ensure_annotation_geometry_version_column()
-        _ensure_full_translation_parse_columns()
-        _ensure_paper_trash_columns()
-        _ensure_research_matrix_columns()
-        _ensure_reading_record_duration_column()
-        _ensure_user_email_nullable()
+        _run_startup_schema_sync()
         _ensure_system_providers()
         resume_stale_matrix_runs()
 

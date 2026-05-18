@@ -1,36 +1,46 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowDown,
+  ArrowRight,
   ArrowUp,
   Camera,
   Check,
   ChevronDown,
+  Circle,
   Columns,
   Download,
   Eraser,
+  Hash,
   Languages,
   MousePointer2,
   Pencil,
   ScanLine,
   Search,
+  SlidersHorizontal,
+  Square,
+  Type,
   Undo2,
   X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
+import { DEFAULT_SHAPE_OPTIONS, SHAPE_COLOR_PALETTE, SHAPE_TOOL_IDS } from './shapeAnnotationModel'
 
 const toolItems = [
   { id: 'select', label: '选择', icon: MousePointer2 },
-  { id: 'ink', label: '手绘', icon: Pencil },
+  { id: 'text', label: '文本', icon: Type },
+  { id: 'arrow', label: '箭头', icon: ArrowRight },
+  { id: 'rect', label: '矩形', icon: Square },
+  { id: 'circle', label: '圆形', icon: Circle },
+  { id: 'pin', label: '编号', icon: Hash },
+  { id: 'ink', label: '手写', icon: Pencil },
   { id: 'screenshot', label: '截图', icon: Camera },
 ]
 
 const eraserModeItems = [
-  { id: 'brush', label: '涂抹擦除', tool: 'eraser', icon: Eraser },
+  { id: 'brush', label: '笔刷擦除', tool: 'eraser', icon: Eraser },
   { id: 'box', label: '框选擦除', tool: 'erase_box', icon: ScanLine },
 ]
-
-const inkColors = ['#15803D', '#2563EB', '#DC2626', '#F59E0B', '#111827', '#7C3AED', '#DB2777', '#0F766E']
 
 const downloadItems = [
   { id: 'pdf', label: 'PDF' },
@@ -38,9 +48,9 @@ const downloadItems = [
 ]
 
 const parseModeItems = [
-  { id: 'auto', label: '自动解析' },
-  { id: 'local', label: '仅本地' },
-  { id: 'aliyun', label: '阿里云增强' },
+  { id: 'auto', label: '自动' },
+  { id: 'local', label: '本地' },
+  { id: 'aliyun', label: '阿里云' },
 ]
 
 const SHOW_FULL_TRANSLATE_ENTRY = false
@@ -57,6 +67,25 @@ function ToolbarIconButton({ children, label, onClick, active = false, disabled 
     >
       {children}
     </button>
+  )
+}
+
+function ColorPalette({ colors, activeColor, onChange }) {
+  return (
+    <div className="toolbar-ink-colors">
+      {colors.map((color) => (
+        <button
+          key={color}
+          type="button"
+          className={`toolbar-ink-color${activeColor === color ? ' is-active' : ''}`}
+          style={{ backgroundColor: color }}
+          title={color}
+          onClick={() => onChange?.(color)}
+        >
+          {activeColor === color ? <Check /> : null}
+        </button>
+      ))}
+    </div>
   )
 }
 
@@ -87,44 +116,34 @@ export function PdfToolbar({
   onFullTranslate,
   inkOptions = { color: '#15803D', opacity: 0.85, strokeWidth: 6 },
   onInkOptionsChange,
+  shapeOptions = DEFAULT_SHAPE_OPTIONS,
+  onShapeOptionsChange,
   activeEraserMode = 'brush',
   onEraserModeChange,
 }) {
   const downloadWrapRef = useRef(null)
   const eraserWrapRef = useRef(null)
   const inkWrapRef = useRef(null)
+  const shapeWrapRef = useRef(null)
   const [isDownloadOpen, setIsDownloadOpen] = useState(false)
   const [isEraserOpen, setIsEraserOpen] = useState(false)
   const [isInkOpen, setIsInkOpen] = useState(false)
+  const [isShapeOpen, setIsShapeOpen] = useState(false)
+  const isShapeToolActive = SHAPE_TOOL_IDS.includes(activeTool)
 
   useEffect(() => {
-    if (!isDownloadOpen) return undefined
+    if (!isDownloadOpen && !isEraserOpen && !isInkOpen && !isShapeOpen) return undefined
 
     function handlePointerDown(event) {
-      if (!downloadWrapRef.current?.contains(event.target)) {
-        setIsDownloadOpen(false)
-      }
+      if (isDownloadOpen && !downloadWrapRef.current?.contains(event.target)) setIsDownloadOpen(false)
+      if (isEraserOpen && !eraserWrapRef.current?.contains(event.target)) setIsEraserOpen(false)
+      if (isInkOpen && !inkWrapRef.current?.contains(event.target)) setIsInkOpen(false)
+      if (isShapeOpen && !shapeWrapRef.current?.contains(event.target)) setIsShapeOpen(false)
     }
 
     document.addEventListener('pointerdown', handlePointerDown)
     return () => document.removeEventListener('pointerdown', handlePointerDown)
-  }, [isDownloadOpen])
-
-  useEffect(() => {
-    if (!isEraserOpen && !isInkOpen) return undefined
-
-    function handlePointerDown(event) {
-      if (isEraserOpen && !eraserWrapRef.current?.contains(event.target)) {
-        setIsEraserOpen(false)
-      }
-      if (isInkOpen && !inkWrapRef.current?.contains(event.target)) {
-        setIsInkOpen(false)
-      }
-    }
-
-    document.addEventListener('pointerdown', handlePointerDown)
-    return () => document.removeEventListener('pointerdown', handlePointerDown)
-  }, [isEraserOpen, isInkOpen])
+  }, [isDownloadOpen, isEraserOpen, isInkOpen, isShapeOpen])
 
   function handleSearchInput(event) {
     onSearchChange?.(event.target.value)
@@ -145,19 +164,26 @@ export function PdfToolbar({
     })
   }
 
+  function updateShapeOptions(partial) {
+    onShapeOptionsChange?.({
+      ...shapeOptions,
+      ...partial,
+    })
+  }
+
   function selectEraserMode(item) {
     onEraserModeChange?.(item.id)
     onToolChange(item.tool)
     setIsEraserOpen(false)
   }
 
-  const activeEraserLabel = activeEraserMode === 'box' ? '框选' : '涂抹'
+  const activeEraserLabel = activeEraserMode === 'box' ? '框选' : '笔刷'
 
   return (
     <div className="reader-toolbar">
       <div className="toolbar-group toolbar-group--file">
         <ToolbarIconButton
-          label={isThumbnailsOpen ? '关闭缩略图' : '打开缩略图'}
+          label={isThumbnailsOpen ? '隐藏缩略图' : '显示缩略图'}
           onClick={onToggleThumbnails}
           active={isThumbnailsOpen}
         >
@@ -180,6 +206,7 @@ export function PdfToolbar({
                   onClick={() => {
                     onToolChange(item.id)
                     setIsInkOpen((value) => !value)
+                    setIsShapeOpen(false)
                     setIsEraserOpen(false)
                   }}
                 >
@@ -190,21 +217,12 @@ export function PdfToolbar({
 
                 {isInkOpen ? (
                   <div className="toolbar-popover toolbar-ink-panel">
-                    <div className="toolbar-popover__title">画笔设置</div>
-                    <div className="toolbar-ink-colors">
-                      {inkColors.map((color) => (
-                        <button
-                          key={color}
-                          type="button"
-                          className={`toolbar-ink-color${inkOptions.color === color ? ' is-active' : ''}`}
-                          style={{ backgroundColor: color }}
-                          title={color}
-                          onClick={() => updateInkOptions({ color })}
-                        >
-                          {inkOptions.color === color ? <Check /> : null}
-                        </button>
-                      ))}
-                    </div>
+                    <div className="toolbar-popover__title">手写样式</div>
+                    <ColorPalette
+                      colors={SHAPE_COLOR_PALETTE}
+                      activeColor={inkOptions.color}
+                      onChange={(color) => updateInkOptions({ color })}
+                    />
                     <label className="toolbar-ink-slider">
                       <span>不透明度</span>
                       <input
@@ -249,7 +267,12 @@ export function PdfToolbar({
               key={item.id}
               title={item.label}
               aria-label={item.label}
-              onClick={() => onToolChange(item.id)}
+              onClick={() => {
+                onToolChange(item.id)
+                setIsShapeOpen(false)
+                setIsInkOpen(false)
+                setIsEraserOpen(false)
+              }}
             >
               <Icon />
               <span>{item.label}</span>
@@ -257,23 +280,90 @@ export function PdfToolbar({
           )
         })}
 
+        {isShapeToolActive ? (
+          <div className="toolbar-popover-wrap" ref={shapeWrapRef}>
+            <button
+              type="button"
+              className={`toolbar-tool toolbar-tool--shape-style${isShapeOpen ? ' is-active' : ''}`}
+              title="样式"
+              aria-label="样式"
+              aria-expanded={isShapeOpen}
+              onClick={() => {
+                setIsShapeOpen((value) => !value)
+                setIsInkOpen(false)
+                setIsEraserOpen(false)
+              }}
+            >
+              <SlidersHorizontal />
+              <span>样式</span>
+              <ChevronDown className="toolbar-tool__chevron" />
+            </button>
+
+            {isShapeOpen ? (
+              <div className="toolbar-popover toolbar-ink-panel">
+                <div className="toolbar-popover__title">标注样式</div>
+                <ColorPalette
+                  colors={SHAPE_COLOR_PALETTE}
+                  activeColor={shapeOptions.color}
+                  onChange={(color) => updateShapeOptions({ color })}
+                />
+                {activeTool === 'text' || activeTool === 'pin' ? (
+                  <label className="toolbar-ink-slider">
+                    <span>字号</span>
+                    <input
+                      type="range"
+                      min="12"
+                      max="28"
+                      value={shapeOptions.fontSize ?? DEFAULT_SHAPE_OPTIONS.fontSize}
+                      onChange={(event) => updateShapeOptions({ fontSize: Number(event.target.value) })}
+                    />
+                    <strong>{shapeOptions.fontSize ?? DEFAULT_SHAPE_OPTIONS.fontSize}px</strong>
+                  </label>
+                ) : (
+                  <label className="toolbar-ink-slider">
+                    <span>线宽</span>
+                    <input
+                      type="range"
+                      min="1"
+                      max="8"
+                      value={shapeOptions.strokeWidth ?? DEFAULT_SHAPE_OPTIONS.strokeWidth}
+                      onChange={(event) => updateShapeOptions({ strokeWidth: Number(event.target.value) })}
+                    />
+                    <strong>{shapeOptions.strokeWidth ?? DEFAULT_SHAPE_OPTIONS.strokeWidth}px</strong>
+                  </label>
+                )}
+                <div className="toolbar-ink-preview">
+                  <span
+                    style={{
+                      backgroundColor: shapeOptions.color || DEFAULT_SHAPE_OPTIONS.color,
+                      height: Math.max(2, Math.min(18, shapeOptions.strokeWidth ?? 2)),
+                      opacity: 0.9,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="toolbar-popover-wrap" ref={eraserWrapRef}>
           <button
             type="button"
             className={`toolbar-tool toolbar-tool--eraser${
               activeTool === 'eraser' || activeTool === 'erase_box' ? ' is-active' : ''
             }`}
-            title={`橡皮擦：${activeEraserLabel}`}
-            aria-label={`橡皮擦：${activeEraserLabel}`}
+            title={`擦除：${activeEraserLabel}`}
+            aria-label={`擦除：${activeEraserLabel}`}
             aria-expanded={isEraserOpen}
             onClick={() => {
               onToolChange(activeEraserMode === 'box' ? 'erase_box' : 'eraser')
               setIsEraserOpen((value) => !value)
               setIsInkOpen(false)
+              setIsShapeOpen(false)
             }}
           >
             <Eraser />
-            <span>橡皮擦</span>
+            <span>擦除</span>
             <small>{activeEraserLabel}</small>
             <ChevronDown className="toolbar-tool__chevron" />
           </button>
@@ -321,17 +411,17 @@ export function PdfToolbar({
               )}
               <span>
                 {fullTranslateStatus === 'running'
-                  ? `翻译中 ${Math.round(fullTranslateProgress || 0)}%`
+                  ? `进行中 ${Math.round(fullTranslateProgress || 0)}%`
                   : fullTranslateStatus === 'cancelled'
                     ? '已取消'
-                    : '全文·翻译'}
+                    : '翻译'}
               </span>
             </button>
 
             <select
               className="toolbar-parse-mode"
-              title="全文翻译解析方式"
-              aria-label="全文翻译解析方式"
+              title="解析模式"
+              aria-label="解析模式"
               value={fullTranslateParseMode || 'auto'}
               onChange={(event) => onFullTranslateParseModeChange?.(event.target.value)}
             >
@@ -379,7 +469,7 @@ export function PdfToolbar({
 
       <div className="toolbar-group toolbar-group--compact">
         <ToolbarIconButton
-          label="撤销本次标注操作"
+          label="撤销标注"
           onClick={onUndo}
           disabled={!canUndo}
         >
@@ -391,7 +481,7 @@ export function PdfToolbar({
           <input
             className="toolbar-search__input"
             type="text"
-            placeholder="查找（不区分大小写）"
+            placeholder="搜索"
             value={searchTerm || ''}
             onChange={handleSearchInput}
             onKeyDown={handleSearchKeyDown}
@@ -407,7 +497,7 @@ export function PdfToolbar({
               <button type="button" className="toolbar-search__btn" title="下一个（Enter）" onClick={onSearchNext}>
                 <ArrowDown />
               </button>
-              <button type="button" className="toolbar-search__btn" title="清除" onClick={() => onSearchChange?.('')}>
+              <button type="button" className="toolbar-search__btn" title="清空" onClick={() => onSearchChange?.('')}>
                 <X />
               </button>
             </>

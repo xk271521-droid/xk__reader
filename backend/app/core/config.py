@@ -46,6 +46,12 @@ class Settings:
         "DATABASE_URL",
         "mysql+pymysql://root:123456@127.0.0.1:3306/xk_reader?charset=utf8mb4",
     )
+    database_pool_recycle_seconds: int = int(
+        os.getenv("DATABASE_POOL_RECYCLE_SECONDS", "1800")
+    )
+    database_pool_timeout_seconds: int = int(
+        os.getenv("DATABASE_POOL_TIMEOUT_SECONDS", "30")
+    )
     jwt_secret_key: str = os.getenv("JWT_SECRET_KEY", "change-me-before-production")
     jwt_algorithm: str = os.getenv("JWT_ALGORITHM", "HS256")
     access_token_expire_minutes: int = int(

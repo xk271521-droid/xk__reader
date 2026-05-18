@@ -30,15 +30,15 @@ def hash_verification_code(channel: str, purpose: str, target: str, code: str) -
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def create_access_token(subject: str) -> str:
+def create_access_token(subject: str, token_version: int = 0) -> str:
     expires_at = datetime.now(timezone.utc) + timedelta(
         minutes=settings.access_token_expire_minutes
     )
-    payload = {"sub": subject, "exp": expires_at}
+    payload = {"sub": subject, "exp": expires_at, "tv": int(token_version or 0)}
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
-def decode_access_token(token: str) -> str | None:
+def decode_access_token(token: str) -> dict[str, str | int] | None:
     try:
         payload = jwt.decode(
             token,
@@ -49,4 +49,9 @@ def decode_access_token(token: str) -> str | None:
         return None
 
     subject = payload.get("sub")
-    return subject if isinstance(subject, str) else None
+    if not isinstance(subject, str):
+        return None
+    token_version = payload.get("tv", 0)
+    if not isinstance(token_version, int):
+        token_version = 0
+    return {"sub": subject, "tv": token_version}

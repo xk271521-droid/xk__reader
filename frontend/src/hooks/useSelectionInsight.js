@@ -18,7 +18,7 @@ function createInitialSelectionState() {
     charCount: 0,
     wordCount: 0,
     requestedAt: 0,
-    domain: 'it',
+    domain: '',
     pageNumber: 0,
     startChar: 0,
     endChar: 0,
@@ -88,22 +88,17 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
   function handleSelection(selectionPayload) {
     clearTimeout(selectionTimerRef.current)
     selectionTimerRef.current = setTimeout(() => {
-      loadSelectionInsight(undefined, selectionPayload)
+      loadSelectionInsight(selectionPayload)
     }, 60)
   }
 
-  async function loadSelectionInsight(domainOverride, explicitSelection) {
+  async function loadSelectionInsight(explicitSelection) {
     let selectedText = ''
     let domain = selectionCard.domain
     let context = ''
     let selectionMeta = null
 
-    if (domainOverride !== undefined) {
-      selectedText = selectionCard.text
-      domain = domainOverride
-      selectionMeta = selectionCard
-      context = [selectionCard.contextBefore, selectionCard.text, selectionCard.contextAfter].filter(Boolean).join(' ').trim()
-    } else if (explicitSelection && explicitSelection.text) {
+    if (explicitSelection && explicitSelection.text) {
       selectedText = normalizeSelectedText(explicitSelection.text)
       selectionMeta = explicitSelection
       context = [
@@ -242,11 +237,6 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
     }
   }
 
-  function setDomain(domain) {
-    setSelectionCard((current) => ({ ...current, domain }))
-    loadSelectionInsight(domain, selectionCard)
-  }
-
   function toggleAI() {
     setAiEnabled((previous) => {
       if (previous) {
@@ -261,7 +251,6 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
     selectionCard,
     handleSelection,
     dismissSelectionCard,
-    setDomain,
     aiEnabled,
     toggleAI,
   }

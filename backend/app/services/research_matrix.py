@@ -25,6 +25,7 @@ from app.models import (
     ResearchMatrixRunPaper,
 )
 from app.services.crypto import decrypt_api_key
+from app.services.notification import compact_notification_text, create_notification
 from app.services.paper_summary import (
     REVIEW_STRUCTURED_FIELD_ORDER,
     apply_review_field_updates,
@@ -978,7 +979,7 @@ def extract_summary_sections(state: dict[str, Any] | None) -> list[dict[str, Any
     for section in sections[:12]:
         if not isinstance(section, dict):
             continue
-        body = compact_text(section.get("body") or "", 520)
+        body = compact_text(section.get("body") or "", 780)
         if not body:
             continue
         result.append(
@@ -999,11 +1000,26 @@ def extract_summary_preview(state: dict[str, Any] | None) -> str:
 def extract_review_bundle(state: dict[str, Any] | None) -> dict[str, Any]:
     content = summary_content_payload(state)
     if not content:
-        return {"fields": {}, "sections": []}
+        return {"fields": {}, "sections": [], "blocks": []}
     review = get_review_summary_content(content)
+    structured_fields = dict(review.get("structured_fields") or {})
+    field_blocks = [
+        block for block in (review.get("review_field_blocks") or [])
+        if isinstance(block, dict)
+    ]
+    block_map = {
+        str(block.get("key") or ""): block
+        for block in field_blocks
+        if str(block.get("key") or "").strip()
+    }
+    for field_key, block in block_map.items():
+        summary_text = compact_text(block.get("summary") or "", 420)
+        if summary_text:
+            structured_fields[field_key] = summary_text
     return {
-        "fields": dict(review.get("structured_fields") or {}),
+        "fields": structured_fields,
         "sections": list(review.get("narrative_sections") or review.get("sections") or []),
+        "blocks": field_blocks,
     }
 
 
@@ -1027,7 +1043,7 @@ def normalize_text_list(value: Any, *, limit: int = 6) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for item in parse_compound_list(value, limit=limit):
-        text = compact_text(item, 200)
+        text = compact_text(item, 280)
         if not text or text in seen:
             continue
         seen.add(text)
@@ -1510,7 +1526,7 @@ def build_review_outline(
     }
 
 
-def join_sentences(parts: list[str], *, limit: int = 520) -> str:
+def join_sentences(parts: list[str], *, limit: int = 760) -> str:
     items: list[str] = []
     seen: set[str] = set()
     for part in parts:
@@ -1686,10 +1702,82 @@ def build_paper_draft_bundle(run_paper: ResearchMatrixRunPaper, summary_bundle: 
         "overview_sections": overview_sections,
         "review_fields": dict(review_bundle.get("fields") or {}),
         "review_sections": list(review_bundle.get("sections") or []),
+        "review_field_blocks": list(review_bundle.get("blocks") or []),
         "review_role": compact_text(run_paper.review_role or "", 180),
         "reproduction_sections": reproduction_sections,
         "reproduction_missing_items": extract_summary_missing_items(summary_bundle.get("reproduction")),
     }
+
+
+def first_positive_page(values: list[Any] | None) -> int | None:
+    for value in list(values or []):
+        if value in {None, ""}:
+            continue
+        try:
+            page_number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if page_number > 0:
+            return page_number
+    return None
+
+
+def review_field_block_items(review_field_blocks: list[dict[str, Any]], field_key: str, *, limit: int = 6) -> list[dict[str, Any]]:
+    for block in review_field_blocks:
+        if str(block.get("key") or "").strip() != field_key:
+            continue
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in list(block.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            text = compact_text(item.get("text") or "", 360)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            results.append(
+                {
+                    "text": text,
+                    "page": first_positive_page(item.get("source_pages") or []),
+                    "quote": compact_text(item.get("source_quote") or "", 240),
+                    "source_section": compact_text(item.get("source_section") or "", 180),
+                    "start_char": item.get("start_char"),
+                    "end_char": item.get("end_char"),
+                }
+            )
+            if len(results) >= limit:
+                break
+        return results
+    return []
+
+
+def append_review_block_entries(
+    entries: list[dict[str, Any]],
+    bundle: dict[str, Any],
+    field_key: str,
+    *,
+    limit: int = 4,
+) -> None:
+    paper_title = bundle["paper_title"]
+    paper_id = bundle.get("paper_id")
+    for item in review_field_block_items(bundle.get("review_field_blocks") or [], field_key, limit=limit):
+        append_section_entry(
+            entries,
+            text=item.get("text") or "",
+            paper_title=paper_title,
+            citations=[
+                citation_item(
+                    paper_id=paper_id,
+                    paper_title=paper_title,
+                    source_card_type="review",
+                    page=item.get("page"),
+                    quote=item.get("quote") or "",
+                    start_char=item.get("start_char"),
+                    end_char=item.get("end_char"),
+                    source_section=item.get("source_section") or field_key,
+                )
+            ],
+        )
 
 
 def append_section_entry(
@@ -1704,7 +1792,7 @@ def append_section_entry(
         return
     entries.append(
         {
-            "text": compact_text(normalized, 260),
+            "text": compact_text(normalized, 420),
             "paper_title": paper_title,
             "citations": dedupe_citations(list(citations or [])),
         }
@@ -1738,26 +1826,12 @@ def group_section_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
     return ordered
 
 
-def format_group_examples(titles: list[str], *, limit: int = 2) -> str:
-    unique_titles: list[str] = []
-    for title in titles:
-        value = str(title or "").strip()
-        if value and value not in unique_titles:
-            unique_titles.append(value)
-    if not unique_titles:
-        return ""
-    examples = "、".join(unique_titles[:limit])
-    if len(unique_titles) > limit:
-        examples += "等"
-    return examples
-
-
 def build_grouped_review_paragraph(
     prefix: str,
     groups: list[dict[str, Any]],
     *,
-    limit: int = 3,
-    text_limit: int = 560,
+    limit: int = 4,
+    text_limit: int = 820,
 ) -> dict[str, Any] | None:
     selected = list(groups[:limit])
     if not selected:
@@ -1768,9 +1842,6 @@ def build_grouped_review_paragraph(
         clause = str(group.get("text") or "").strip("；。;，, ")
         if not clause:
             continue
-        examples = format_group_examples(list(group.get("titles") or []))
-        if examples:
-            clause = f"{clause}（如{examples}）"
         clauses.append(clause)
         citations.extend(list(group.get("citations") or []))
     if not clauses:
@@ -1778,8 +1849,341 @@ def build_grouped_review_paragraph(
     merged_citations = dedupe_citations(citations)
     text = compact_text(f"{prefix}{'；'.join(clauses)}。", text_limit)
     return paragraph_item(text, merged_citations, paragraph_confidence(merged_citations))
+def extend_paragraphs(target: list[dict[str, Any]], *paragraphs: dict[str, Any] | None) -> None:
+    for paragraph in paragraphs:
+        if paragraph:
+            target.append(paragraph)
 
 
+def build_grouped_review_paragraph_series(
+    groups: list[dict[str, Any]],
+    prefixes: list[str],
+    *,
+    chunk_size: int = 4,
+    max_paragraphs: int = 2,
+    text_limit: int = 820,
+) -> list[dict[str, Any]]:
+    paragraphs: list[dict[str, Any]] = []
+    if not groups:
+        return paragraphs
+    chunks = [groups[index:index + chunk_size] for index in range(0, len(groups), chunk_size)]
+    for index, chunk in enumerate(chunks[:max_paragraphs]):
+        prefix = prefixes[min(index, len(prefixes) - 1)] if prefixes else ""
+        paragraph = build_grouped_review_paragraph(prefix, chunk, limit=chunk_size, text_limit=text_limit)
+        if paragraph:
+            paragraphs.append(paragraph)
+    return paragraphs
+
+
+def citation_has_anchor(citation: dict[str, Any]) -> bool:
+    return bool(citation.get("page") and compact_text(citation.get("quote") or "", 80))
+
+
+def review_field_label(field_key: str) -> str:
+    labels = {
+        "research_question": "Research Question",
+        "method_route": "Method Route",
+        "main_findings": "Main Findings",
+        "innovations": "Innovations",
+        "data_experiment": "Data and Experiment",
+        "baselines_metrics": "Baselines and Metrics",
+        "limitations": "Limitations",
+        "reproduction_missing_items": "Missing Reproduction Details",
+        "cross_paper_conflict": "Cross-paper Conflict",
+    }
+    return labels.get(field_key, field_key)
+
+
+def bundle_field_is_sparse(bundle: dict[str, Any], field_key: str) -> bool:
+    value = bundle.get("review_fields", {}).get(field_key)
+    if field_key in {"innovations", "limitations"}:
+        return not normalize_text_list(value, limit=6)
+    return not compact_text(value or "", 120)
+
+
+def collect_usage_counts(drafts: dict[str, Any]) -> Counter[str]:
+    usage: Counter[str] = Counter()
+    weighted_sections = {
+        "research_background": 1,
+        "research_status": 2,
+        "core_innovations": 2,
+        "method_compare": 2,
+        "result_analysis": 3,
+        "limitations_future": 2,
+        "final_integrated_review": 4,
+    }
+    for section_key, weight in weighted_sections.items():
+        section = drafts.get(section_key) or {}
+        for paragraph in list(section.get("paragraphs") or []):
+            titles = {
+                str(citation.get("paper_title") or "").strip()
+                for citation in list(paragraph.get("citations") or [])
+                if str(citation.get("paper_title") or "").strip()
+            }
+            for title in titles:
+                usage[title] += weight
+    outline = drafts.get("review_outline") or {}
+    for section in list(outline.get("outline_sections") or []):
+        for title in list(section.get("source_titles") or [])[:6]:
+            normalized = str(title or "").strip()
+            if normalized:
+                usage[normalized] += 1
+    return usage
+
+
+def collect_weak_title_counts(drafts: dict[str, Any]) -> Counter[str]:
+    weak_counts: Counter[str] = Counter()
+    for section_key in [*DRAFT_SECTION_ORDER[:6], "final_integrated_review"]:
+        section = drafts.get(section_key) or {}
+        for paragraph in list(section.get("paragraphs") or []):
+            has_weak_signal = (
+                str(paragraph.get("confidence") or "") == "weak"
+                or any(not citation_has_anchor(citation) for citation in list(paragraph.get("citations") or []))
+            )
+            if not has_weak_signal:
+                continue
+            titles = {
+                str(citation.get("paper_title") or "").strip()
+                for citation in list(paragraph.get("citations") or [])
+                if str(citation.get("paper_title") or "").strip()
+            }
+            for title in titles:
+                weak_counts[title] += 1
+    return weak_counts
+
+
+def collect_conflict_titles(bundles: list[dict[str, Any]], usage_counts: Counter[str]) -> set[str]:
+    findings_by_title: dict[str, set[str]] = {}
+    for bundle in bundles:
+        title = str(bundle.get("paper_title") or "").strip()
+        findings = compact_text(bundle.get("review_fields", {}).get("main_findings") or "", 320)
+        if not title or not findings:
+            continue
+        findings_by_title[title] = set(tokenize_topic_text(findings)[:8])
+    titles = [title for title in findings_by_title if usage_counts.get(title, 0) >= 2]
+    conflict_titles: set[str] = set()
+    for index, left in enumerate(titles):
+        left_tokens = findings_by_title.get(left) or set()
+        if not left_tokens:
+            continue
+        for right in titles[index + 1:]:
+            right_tokens = findings_by_title.get(right) or set()
+            if not right_tokens:
+                continue
+            if len(left_tokens & right_tokens) == 0:
+                conflict_titles.add(left)
+                conflict_titles.add(right)
+    return conflict_titles
+
+
+def build_priority_item(
+    *,
+    bundle: dict[str, Any],
+    field_key: str,
+    score: int,
+    usage_count: int,
+    signals: list[str],
+    reason_summary: str,
+    citations: list[dict[str, Any]],
+    focus_text: str = "",
+) -> dict[str, Any]:
+    priority_score = int(max(score, len(signals) + 1))
+    if priority_score >= 10:
+        priority_level = "high"
+    elif priority_score >= 6:
+        priority_level = "medium"
+    else:
+        priority_level = "low"
+    field_label = review_field_label(field_key)
+    top_citation = list(citations or [])[:3]
+    lead = top_citation[0] if top_citation else {}
+    return {
+        "paper_id": bundle.get("paper_id"),
+        "paper_title": str(bundle.get("paper_title") or "").strip(),
+        "field_key": field_key,
+        "field_label": field_label,
+        "priority_score": priority_score,
+        "priority_level": priority_level,
+        "usage_count": usage_count,
+        "signals": signals[:6],
+        "reason_summary": compact_text(reason_summary, 220),
+        "focus_text": compact_text(focus_text, 240),
+        "citations": top_citation,
+        "recommended_action": f"Revisit original text for {field_label} and verify page anchors, source quote, and scope.",
+        "quote": compact_text(focus_text or reason_summary, 240),
+        "usage_note": compact_text(f"{field_label} | {priority_level} priority", 120),
+        "page": lead.get("page"),
+        "source_card_type": lead.get("source_card_type") or "review",
+        "start_char": lead.get("start_char"),
+        "end_char": lead.get("end_char"),
+    }
+
+
+def dedupe_priority_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in sorted(
+        items,
+        key=lambda current: (
+            -int(current.get("priority_score") or 0),
+            -int(current.get("usage_count") or 0),
+            str(current.get("paper_title") or ""),
+            str(current.get("field_key") or ""),
+        ),
+    ):
+        key = (str(item.get("paper_title") or ""), str(item.get("field_key") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(item)
+    return ordered
+
+
+def ensure_section_paragraph_depth(
+    paragraphs: list[dict[str, Any]],
+    bundles: list[dict[str, Any]],
+    section_key: str,
+    *,
+    target_count: int = 3,
+) -> list[dict[str, Any]]:
+    if len(paragraphs) >= target_count:
+        return paragraphs
+    seen = {
+        str(item.get("text") or "").strip().lower()
+        for item in paragraphs
+        if str(item.get("text") or "").strip()
+    }
+    for bundle in bundles:
+        if len(paragraphs) >= target_count:
+            break
+        candidate = build_section_paragraph(bundle, section_key)
+        if not candidate:
+            continue
+        key = str(candidate.get("text") or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        paragraphs.append(candidate)
+    return paragraphs
+
+def build_evidence_priority_queue(bundles: list[dict[str, Any]], drafts: dict[str, Any]) -> dict[str, Any]:
+    usage_counts = collect_usage_counts(drafts)
+    weak_title_counts = collect_weak_title_counts(drafts)
+    conflict_titles = collect_conflict_titles(bundles, usage_counts)
+    items: list[dict[str, Any]] = []
+
+    for bundle in bundles:
+        paper_title = str(bundle.get("paper_title") or "").strip()
+        if not paper_title:
+            continue
+        paper_id = bundle.get("paper_id")
+        usage_count = int(usage_counts.get(paper_title, 0) or 0)
+        weak_count = int(weak_title_counts.get(paper_title, 0) or 0)
+        review_sections = bundle.get("review_sections") or []
+        reproduction_sections = bundle.get("reproduction_sections") or []
+
+        missing_items = list(bundle.get("reproduction_missing_items") or [])[:4]
+        if missing_items:
+            limit_sections = find_sections_by_hints(reproduction_sections, REPRO_LIMIT_HINTS, limit=3)
+            items.append(
+                build_priority_item(
+                    bundle=bundle,
+                    field_key="reproduction_missing_items",
+                    score=6 + len(missing_items) + min(usage_count, 3) + min(weak_count, 2),
+                    usage_count=usage_count,
+                    signals=["missing_items_not_empty", *( ["high_usage"] if usage_count >= 4 else [] ), *( ["weak_draft"] if weak_count else [] )],
+                    reason_summary=f"{len(missing_items)} missing reproduction details still affect comparison or citation.",
+                    citations=citations_from_sections(paper_title, "reproduction", limit_sections),
+                    focus_text="; ".join(missing_items),
+                )
+            )
+
+        for field_key in [
+            "research_question",
+            "method_route",
+            "main_findings",
+            "innovations",
+            "data_experiment",
+            "baselines_metrics",
+            "limitations",
+        ]:
+            block_items = review_field_block_items(bundle.get("review_field_blocks") or [], field_key, limit=8)
+            anchor_missing_items = [item for item in block_items if not item.get("page") or not compact_text(item.get("quote") or "", 60)]
+            sparse = field_key in {"data_experiment", "baselines_metrics", "limitations"} and bundle_field_is_sparse(bundle, field_key)
+            weak_signal = weak_count > 0 and field_key in {"main_findings", "data_experiment", "baselines_metrics", "limitations"}
+            conflict_signal = field_key == "main_findings" and paper_title in conflict_titles
+            if not any([anchor_missing_items, sparse, weak_signal, conflict_signal]):
+                continue
+
+            signals: list[str] = []
+            score = min(usage_count, 4)
+            if anchor_missing_items:
+                signals.append("missing_page_or_quote")
+                score += 3
+            if sparse:
+                signals.append("sparse_field")
+                score += 3
+            if weak_signal:
+                signals.append("weak_draft")
+                score += min(weak_count, 2)
+            if conflict_signal:
+                signals.append("cross_paper_conflict")
+                score += 3
+            if usage_count >= 4:
+                signals.append("high_usage")
+                score += 2
+
+            candidate_citations = [
+                citation_item(
+                    paper_id=paper_id,
+                    paper_title=paper_title,
+                    source_card_type="review",
+                    page=item.get("page"),
+                    quote=item.get("quote") or "",
+                    start_char=item.get("start_char"),
+                    end_char=item.get("end_char"),
+                    source_section=item.get("source_section") or field_key,
+                )
+                for item in anchor_missing_items[:3]
+            ]
+            if not candidate_citations:
+                candidate_citations = citations_from_sections(
+                    paper_title,
+                    "review",
+                    review_sections_for_field(review_sections, field_key),
+                )
+
+            field_value = bundle.get("review_fields", {}).get(field_key)
+            focus_candidates = normalize_text_list(field_value, limit=2) if isinstance(field_value, list) else [compact_text(field_value or "", 180)]
+            items.append(
+                build_priority_item(
+                    bundle=bundle,
+                    field_key=field_key,
+                    score=score,
+                    usage_count=usage_count,
+                    signals=signals,
+                    reason_summary="This field is weak, thin, conflicting, or repeatedly reused in the draft chain.",
+                    citations=candidate_citations,
+                    focus_text="; ".join([item for item in focus_candidates if item]),
+                )
+            )
+
+    deduped_items = dedupe_priority_items(items)[:12]
+    content = "\n".join(
+        f"{index}. {item['paper_title']} | {item['field_label']} | {item['reason_summary']}"
+        for index, item in enumerate(deduped_items, start=1)
+    )
+    return {
+        "key": "evidence_priority_queue",
+        "title": "Priority Revisit Queue",
+        "paragraphs": [],
+        "items": deduped_items,
+        "content": content or "No high-risk revisit items detected.",
+        "source_titles": [item["paper_title"] for item in deduped_items[:8] if item.get("paper_title")],
+        "copy_ready": bool(deduped_items),
+        "ai_generated": False,
+        "fallback_used": False,
+    }
 def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: str) -> list[dict[str, Any]]:
     paragraphs: list[dict[str, Any]] = []
 
@@ -1792,7 +2196,7 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
             overview_sections = bundle["overview_sections"]
             append_section_entry(
                 question_entries,
-                text=compact_text(bundle["review_fields"].get("research_question"), 220),
+                text=compact_text(bundle["review_fields"].get("research_question"), 320),
                 paper_title=paper_title,
                 citations=citations_from_sections(
                     paper_title,
@@ -1800,19 +2204,33 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                     review_sections_for_field(review_sections, "research_question"),
                 ),
             )
-            background_sections = find_sections_by_hints(overview_sections, OVERVIEW_BACKGROUND_HINTS, limit=2)
+            append_review_block_entries(question_entries, bundle, "research_question")
+            append_review_block_entries(background_entries, bundle, "background_motivation")
+            background_sections = find_sections_by_hints(overview_sections, OVERVIEW_BACKGROUND_HINTS, limit=3)
             append_section_entry(
                 background_entries,
-                text=join_sentences([section.get("body") or "" for section in background_sections], limit=280),
+                text=join_sentences([section.get("body") or "" for section in background_sections], limit=420),
                 paper_title=paper_title,
                 citations=citations_from_sections(paper_title, "overview", background_sections),
             )
-        for paragraph in [
-            build_grouped_review_paragraph("本批文献的研究背景主要围绕以下问题展开：", group_section_entries(question_entries)),
-            build_grouped_review_paragraph("从问题动机和应用场景看，相关研究大致延伸出以下主线：", group_section_entries(background_entries)),
-        ]:
-            if paragraph:
-                paragraphs.append(paragraph)
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(question_entries),
+            [
+                "本批文献的研究背景主要围绕以下问题展开：",
+                "这些问题在研究目标上还可以进一步归为相近的几类：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(background_entries),
+            [
+                "从问题动机和应用场景看，相关研究大致延伸出以下主线：",
+                "这些背景动机和应用语境也可以视为下一步方法分化的前提：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
 
     elif section_key == "research_status":
         method_entries: list[dict[str, Any]] = []
@@ -1822,7 +2240,7 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
             review_sections = bundle["review_sections"]
             append_section_entry(
                 method_entries,
-                text=compact_text(bundle["review_fields"].get("method_route"), 240),
+                text=compact_text(bundle["review_fields"].get("method_route"), 320),
                 paper_title=paper_title,
                 citations=citations_from_sections(
                     paper_title,
@@ -1830,9 +2248,10 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                     review_sections_for_field(review_sections, "method_route"),
                 ),
             )
+            append_review_block_entries(method_entries, bundle, "method_route")
             append_section_entry(
                 finding_entries,
-                text=compact_text(bundle["review_fields"].get("main_findings"), 240),
+                text=compact_text(bundle["review_fields"].get("main_findings"), 320),
                 paper_title=paper_title,
                 citations=citations_from_sections(
                     paper_title,
@@ -1840,12 +2259,25 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                     review_sections_for_field(review_sections, "main_findings"),
                 ),
             )
-        for paragraph in [
-            build_grouped_review_paragraph("从现有研究路径看，相关工作大致可以归为以下几类：", group_section_entries(method_entries)),
-            build_grouped_review_paragraph("就当前文献给出的结论而言，已有研究主要呈现出以下共识或差异：", group_section_entries(finding_entries)),
-        ]:
-            if paragraph:
-                paragraphs.append(paragraph)
+            append_review_block_entries(finding_entries, bundle, "main_findings")
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(method_entries),
+            [
+                "从现有研究路径看，相关工作大致可以归为以下几类：",
+                "如果按技术路线再细分，这些研究还可以继续拆出几类较稳定的方向：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(finding_entries),
+            [
+                "就当前文献给出的结论而言，已有研究主要呈现出以下共识或差异：",
+                "在这些结论之中，部分文献呈现出相对稳定的判断，部分则仍有明显分化：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
 
     elif section_key == "core_innovations":
         innovation_entries: list[dict[str, Any]] = []
@@ -1864,9 +2296,10 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                         review_sections_for_field(review_sections, "innovations"),
                     ),
                 )
+            append_review_block_entries(innovation_entries, bundle, "innovations", limit=5)
             append_section_entry(
                 method_entries,
-                text=compact_text(bundle["review_fields"].get("method_route"), 220),
+                text=compact_text(bundle["review_fields"].get("method_route"), 320),
                 paper_title=paper_title,
                 citations=citations_from_sections(
                     paper_title,
@@ -1874,12 +2307,25 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                     review_sections_for_field(review_sections, "method_route"),
                 ),
             )
-        for paragraph in [
-            build_grouped_review_paragraph("综合现有文献，核心创新主要体现在：", group_section_entries(innovation_entries), limit=4),
-            build_grouped_review_paragraph("这些创新通常依托以下技术路线展开：", group_section_entries(method_entries)),
-        ]:
-            if paragraph:
-                paragraphs.append(paragraph)
+            append_review_block_entries(method_entries, bundle, "method_route")
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(innovation_entries),
+            [
+                "综合现有文献，核心创新主要体现在：",
+                "如果再按创新类型细分，这些工作大致可以分成几种全然不同的切入点：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(method_entries),
+            [
+                "这些创新通常依托以下技术路线展开：",
+                "从方法支撑关系看，创新点之间并不是平行堆叠，而是各自依托不同的技术基底：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
 
     elif section_key == "method_compare":
         method_entries: list[dict[str, Any]] = []
@@ -1889,7 +2335,7 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
             review_sections = bundle["review_sections"]
             append_section_entry(
                 method_entries,
-                text=compact_text(bundle["review_fields"].get("method_route"), 240),
+                text=compact_text(bundle["review_fields"].get("method_route"), 320),
                 paper_title=paper_title,
                 citations=citations_from_sections(
                     paper_title,
@@ -1897,6 +2343,7 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                     review_sections_for_field(review_sections, "method_route"),
                 ),
             )
+            append_review_block_entries(method_entries, bundle, "method_route", limit=5)
             for item in normalize_text_list(bundle["review_fields"].get("baselines_metrics"), limit=5):
                 append_section_entry(
                     metric_entries,
@@ -1908,13 +2355,25 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                         review_sections_for_field(review_sections, "baselines_metrics"),
                     ),
                 )
-        for paragraph in [
-            build_grouped_review_paragraph("方法对比上，现有工作主要采用以下路线：", group_section_entries(method_entries)),
-            build_grouped_review_paragraph("用于比较的方法抓手和评价指标主要集中在：", group_section_entries(metric_entries), limit=4),
-        ]:
-            if paragraph:
-                paragraphs.append(paragraph)
-
+            append_review_block_entries(metric_entries, bundle, "baselines_metrics", limit=5)
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(method_entries),
+            [
+                "方法对比上，现有工作主要采用以下路线：",
+                "如果从细化的路线构成看，各类方法在输入、模型或决策抓手上还存在进一步差分：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(metric_entries),
+            [
+                "用于比较的方法抓手和评价指标主要集中在：",
+                "这些比较口径也决定了后续结论是否真正具有可比性：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
     elif section_key == "result_analysis":
         finding_entries: list[dict[str, Any]] = []
         evaluation_entries: list[dict[str, Any]] = []
@@ -1924,7 +2383,7 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
             reproduction_sections = bundle["reproduction_sections"]
             append_section_entry(
                 finding_entries,
-                text=compact_text(bundle["review_fields"].get("main_findings"), 240),
+                text=compact_text(bundle["review_fields"].get("main_findings"), 320),
                 paper_title=paper_title,
                 citations=citations_from_sections(
                     paper_title,
@@ -1932,9 +2391,10 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                     review_sections_for_field(review_sections, "main_findings"),
                 ),
             )
+            append_review_block_entries(finding_entries, bundle, "main_findings", limit=5)
             append_section_entry(
                 evaluation_entries,
-                text=compact_text(bundle["review_fields"].get("data_experiment"), 220),
+                text=compact_text(bundle["review_fields"].get("data_experiment"), 320),
                 paper_title=paper_title,
                 citations=citations_from_sections(
                     paper_title,
@@ -1942,19 +2402,32 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                     review_sections_for_field(review_sections, "data_experiment"),
                 ),
             )
-            result_sections = find_sections_by_hints(reproduction_sections, REPRO_RESULT_HINTS, limit=2)
+            append_review_block_entries(evaluation_entries, bundle, "data_experiment", limit=5)
+            result_sections = find_sections_by_hints(reproduction_sections, REPRO_RESULT_HINTS, limit=3)
             append_section_entry(
                 evaluation_entries,
-                text=join_sentences([section.get("body") or "" for section in result_sections], limit=260),
+                text=join_sentences([section.get("body") or "" for section in result_sections], limit=420),
                 paper_title=paper_title,
                 citations=citations_from_sections(paper_title, "reproduction", result_sections),
             )
-        for paragraph in [
-            build_grouped_review_paragraph("从实验结果看，现有文献主要支持以下判断：", group_section_entries(finding_entries)),
-            build_grouped_review_paragraph("在数据、样本与评估设置上，常见安排包括：", group_section_entries(evaluation_entries), limit=4),
-        ]:
-            if paragraph:
-                paragraphs.append(paragraph)
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(finding_entries),
+            [
+                "从实验结果看，现有文献主要支持以下判断：",
+                "如果把这些结果按证据类型拆开，还可以看到一批比较集中的判断：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(evaluation_entries),
+            [
+                "在数据、样本与评估设置上，常见安排包括：",
+                "而正是这些数据和评估口径的差异，决定了后续结论是否最终具有可比性：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
 
     elif section_key == "limitations_future":
         limitation_entries: list[dict[str, Any]] = []
@@ -1974,10 +2447,11 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                         review_sections_for_field(review_sections, "limitations"),
                     ),
                 )
-            limit_sections = find_sections_by_hints(reproduction_sections, REPRO_LIMIT_HINTS, limit=2)
+            append_review_block_entries(limitation_entries, bundle, "limitations", limit=5)
+            limit_sections = find_sections_by_hints(reproduction_sections, REPRO_LIMIT_HINTS, limit=3)
             append_section_entry(
                 future_entries,
-                text=join_sentences([section.get("body") or "" for section in limit_sections], limit=240),
+                text=join_sentences([section.get("body") or "" for section in limit_sections], limit=420),
                 paper_title=paper_title,
                 citations=citations_from_sections(paper_title, "reproduction", limit_sections),
             )
@@ -1988,12 +2462,24 @@ def build_review_section_paragraphs(bundles: list[dict[str, Any]], section_key: 
                     paper_title=paper_title,
                     citations=citations_from_sections(paper_title, "reproduction", limit_sections),
                 )
-        for paragraph in [
-            build_grouped_review_paragraph("现有研究的共性局限主要集中在：", group_section_entries(limitation_entries), limit=4),
-            build_grouped_review_paragraph("从后续研究与复现需求看，仍值得继续补齐的方向包括：", group_section_entries(future_entries), limit=4),
-        ]:
-            if paragraph:
-                paragraphs.append(paragraph)
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(limitation_entries),
+            [
+                "现有研究的共性局限主要集中在：",
+                "如果从研究边界和证据完整度看，这些局限还可以细化为几类：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
+        paragraphs.extend(build_grouped_review_paragraph_series(
+            group_section_entries(future_entries),
+            [
+                "从后续研究与复现需求看，仍值得继续补齐的方向包括：",
+                "这些未补齐的细节也可以直接转化为后续写作中的研究空白或回查卡点：",
+            ],
+            chunk_size=3,
+            max_paragraphs=2,
+        ))
 
     return paragraphs
 
@@ -2011,77 +2497,73 @@ def build_section_paragraph(bundle: dict[str, Any], section_key: str) -> dict[st
 
     if section_key == "research_background":
         background_sections = find_sections_by_hints(overview_sections, OVERVIEW_BACKGROUND_HINTS, limit=2)
-        overview_text = join_sentences([section.get("body") or "" for section in background_sections], limit=360)
-        research_question = compact_text(review_fields.get("research_question"), 220)
+        overview_text = join_sentences([section.get("body") or "" for section in background_sections], limit=520)
+        research_question = compact_text(review_fields.get("research_question"), 320)
         if overview_text:
-            parts.append(f"《{paper_title}》的研究背景与问题主线可概括为：{overview_text}")
+            parts.append(f"研究背景与问题主线可概括为：{overview_text}")
             citations.extend(citations_from_sections(paper_title, "overview", background_sections))
         if research_question:
-            parts.append(f"从综述卡片提炼的研究问题是：{research_question}")
+            parts.append(f"当前研究主要围绕以下问题展开：{research_question}")
             citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "research_question")))
 
     elif section_key == "research_status":
         status_sections = find_sections_by_hints(overview_sections, OVERVIEW_STATUS_HINTS, limit=2)
-        findings = compact_text(review_fields.get("main_findings"), 240)
-        review_role = compact_text(bundle.get("review_role"), 140)
-        overview_text = join_sentences([section.get("body") or "" for section in status_sections], limit=360)
+        findings = compact_text(review_fields.get("main_findings"), 320)
+        overview_text = join_sentences([section.get("body") or "" for section in status_sections], limit=520)
         if findings:
-            parts.append(f"从当前批次的研究现状看，《{paper_title}》给出的主要结论是：{findings}")
+            parts.append(f"从当前批次的研究现状看，主要结论包括：{findings}")
             citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "main_findings")))
         if overview_text:
-            parts.append(f"整篇总结补充的研究主线包括：{overview_text}")
+            parts.append(f"相关研究主线大致包括：{overview_text}")
             citations.extend(citations_from_sections(paper_title, "overview", status_sections))
-        if review_role:
-            parts.append(f"在本批综述写作中，这篇论文更适合作为“{review_role}”使用。")
-            citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "main_findings")))
 
     elif section_key == "core_innovations":
         innovations = normalize_text_list(review_fields.get("innovations"), limit=5)
-        method_route = compact_text(review_fields.get("method_route"), 220)
+        method_route = compact_text(review_fields.get("method_route"), 320)
         if innovations:
-            parts.append(f"《{paper_title}》可直接提炼的创新点包括：{'；'.join(innovations[:3])}。")
+            parts.append(f"可直接提炼的创新点包括：{'；'.join(innovations[:3])}。")
             citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "innovations")))
         if method_route:
             parts.append(f"这些创新主要落在以下方法路线：{method_route}")
             citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "method_route")))
 
     elif section_key == "method_compare":
-        method_route = compact_text(review_fields.get("method_route"), 240)
+        method_route = compact_text(review_fields.get("method_route"), 320)
         baselines_metrics = normalize_text_list(review_fields.get("baselines_metrics"), limit=5)
         if method_route:
-            parts.append(f"《{paper_title}》采用的方法路线是：{method_route}")
+            parts.append(f"现有工作采用的方法路线包括：{method_route}")
             citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "method_route")))
         if baselines_metrics:
             parts.append(f"用于比较的基线、评价指标或消融设置主要包括：{'；'.join(baselines_metrics[:4])}。")
             citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "baselines_metrics")))
 
     elif section_key == "result_analysis":
-        findings = compact_text(review_fields.get("main_findings"), 220)
-        data_experiment = compact_text(review_fields.get("data_experiment"), 220)
+        findings = compact_text(review_fields.get("main_findings"), 320)
+        data_experiment = compact_text(review_fields.get("data_experiment"), 320)
         result_sections = find_sections_by_hints(reproduction_sections, REPRO_RESULT_HINTS, limit=2)
-        reproduction_text = join_sentences([section.get("body") or "" for section in result_sections], limit=340)
+        reproduction_text = join_sentences([section.get("body") or "" for section in result_sections], limit=520)
         if findings:
-            parts.append(f"从结果上看，《{paper_title}》的核心发现是：{findings}")
+            parts.append(f"从结果上看，当前文献支持的核心发现包括：{findings}")
             citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "main_findings")))
         if data_experiment:
-            parts.append(f"它使用的数据、样本与实验设置信息为：{data_experiment}")
+            parts.append(f"常见的数据、样本与实验设置信息包括：{data_experiment}")
             citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "data_experiment")))
         if reproduction_text:
-            parts.append(f"复现总结补充的实验、指标或参数硬信息包括：{reproduction_text}")
+            parts.append(f"实验、指标或参数层面的补充信息包括：{reproduction_text}")
             citations.extend(citations_from_sections(paper_title, "reproduction", result_sections))
 
     elif section_key == "limitations_future":
         limitations = normalize_text_list(review_fields.get("limitations"), limit=5)
         limit_sections = find_sections_by_hints(reproduction_sections, REPRO_LIMIT_HINTS, limit=2)
-        reproduction_text = join_sentences([section.get("body") or "" for section in limit_sections], limit=320)
+        reproduction_text = join_sentences([section.get("body") or "" for section in limit_sections], limit=520)
         if limitations:
-            parts.append(f"这篇论文当前可见的局限或风险包括：{'；'.join(limitations[:3])}。")
+            parts.append(f"当前可见的局限或风险包括：{'；'.join(limitations[:3])}。")
             citations.extend(citations_from_sections(paper_title, "review", review_sections_for_field(review_sections, "limitations")))
         if reproduction_text:
             parts.append(f"从复现视角看，仍需回查的信息或工程难点包括：{reproduction_text}")
             citations.extend(citations_from_sections(paper_title, "reproduction", limit_sections))
         if reproduction_missing_items:
-            parts.append(f"复现总结明确标出的缺失信息有：{'；'.join(reproduction_missing_items[:4])}。")
+            parts.append(f"仍待补足的关键信息包括：{'；'.join(reproduction_missing_items[:4])}。")
             citations.extend(citations_from_sections(paper_title, "reproduction", limit_sections))
 
     text = join_sentences(parts)
@@ -2131,7 +2613,7 @@ def collect_quotable_items(source_map: dict[int, dict[str, Any]], paper_title_by
                         "source_section": compact_text(heading, 160),
                         "usage_note": quote_usage_note(summary_type, heading),
                     })
-                    if len(items) >= 16:
+                    if len(items) >= 24:
                         return items
     return items
 
@@ -2140,7 +2622,6 @@ def fallback_integrated_review(drafts: dict[str, Any]) -> dict[str, Any]:
     paragraphs: list[dict[str, Any]] = []
     for section_key in DRAFT_SECTION_ORDER[:6]:
         paragraphs.extend(list(drafts.get(section_key, {}).get("paragraphs") or []))
-    paragraphs = paragraphs[:10]
     source_titles = collect_source_titles_from_paragraphs(paragraphs)
     return {
         "key": "final_integrated_review",
@@ -2155,8 +2636,53 @@ def fallback_integrated_review(drafts: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def structured_integrated_review(drafts: dict[str, Any]) -> dict[str, Any]:
+    paragraphs: list[dict[str, Any]] = []
+    section_leads = {
+        "research_background": "从研究背景与问题缘起看，",
+        "research_status": "进一步梳理现有研究版图可以发现，",
+        "core_innovations": "就核心创新而言，现有工作已经形成若干较明确的切入方向，",
+        "method_compare": "如果转向方法比较层面，相关研究之间的差异主要体现在以下方面，",
+        "result_analysis": "从结果与证据层面继续归纳，可以看到已有研究的判断并非完全平行，",
+        "limitations_future": "最后回到局限与未来方向，现有文献暴露出的缺口与后续可补足的部分主要集中在，",
+    }
+    for section_key in DRAFT_SECTION_ORDER[:6]:
+        section = drafts.get(section_key) or {}
+        section_paragraphs = list(section.get("paragraphs") or [])
+        if not section_paragraphs:
+            continue
+        for index, paragraph in enumerate(section_paragraphs, start=1):
+            text = str(paragraph.get("text") or "").strip()
+            if not text:
+                continue
+            if index == 1:
+                lead = section_leads.get(section_key, "")
+                if lead and not text.startswith(lead):
+                    text = f"{lead}{text}"
+            paragraphs.append(
+                paragraph_item(
+                    text,
+                    list(paragraph.get("citations") or []),
+                    paragraph.get("confidence") or "weak",
+                )
+            )
+    source_titles = collect_source_titles_from_paragraphs(paragraphs)
+    return {
+        "key": "final_integrated_review",
+        "title": DRAFT_SECTION_TITLES["final_integrated_review"],
+        "paragraphs": paragraphs,
+        "items": [],
+        "content": "\n\n".join(paragraph.get("text") or "" for paragraph in paragraphs),
+        "source_titles": source_titles,
+        "copy_ready": bool(paragraphs),
+        "ai_generated": False,
+        "fallback_used": True,
+        "structured_fallback": True,
+    }
+
+
 def build_ai_integrated_review(db: Session, run: ResearchMatrixRun, drafts: dict[str, Any]) -> dict[str, Any]:
-    fallback = fallback_integrated_review(drafts)
+    fallback = structured_integrated_review(drafts)
     source_paragraphs: list[dict[str, Any]] = []
     for section_key in DRAFT_SECTION_ORDER[:6]:
         section = drafts.get(section_key) or {}
@@ -2177,7 +2703,7 @@ def build_ai_integrated_review(db: Session, run: ResearchMatrixRun, drafts: dict
     if not provider:
         return fallback
 
-    quote_items = list((drafts.get("quotable_sentences") or {}).get("items") or [])[:6]
+    quote_items = list((drafts.get("quotable_sentences") or {}).get("items") or [])[:18]
     prompt = f"""
 你是一个严谨的中文学术综述助手。请把给定的分块草稿整合成一份真正像“文献综述正文”的终稿，而不是逐篇论文摘要拼接。
 
@@ -2186,7 +2712,7 @@ def build_ai_integrated_review(db: Session, run: ResearchMatrixRun, drafts: dict
 2. 每段都必须引用 source_refs，source_refs 只能引用输入里的段落 id。
 3. 如果引用到任何 weak 段落，输出段落的 confidence 必须为 weak，且语气必须降调，明确保留不确定性。
 4. 不要重复“见上文”“本节”等元话语，不要输出 Markdown。
-5. 输出 4-8 段，优先组织成连续的综述正文，段落之间应体现“研究主题、方法分化、结果差异、局限与趋势”的归纳关系。
+5. 输出 8-14 段，优先组织成连续的综述正文，段落之间应体现“研究主题、方法分化、结果差异、局限与趋势”的归纳关系。
 6. 不要按“某篇论文提出了……”逐篇串讲；优先使用“现有研究”“相关工作”“一类方法”“另一类研究”这类综述口吻，只有在确有必要区分证据来源时才点论文名举例。
 7. 若输入证据不足，请照样整合，但不要把弱证据写成确定结论。
 8. 输出必须是 JSON，不要代码块。
@@ -2216,7 +2742,7 @@ def build_ai_integrated_review(db: Session, run: ResearchMatrixRun, drafts: dict
             api_key=api_key,
             model=provider.model,
             prompt=prompt,
-            max_tokens=2200,
+            max_tokens=5200,
         )
         payload = parse_json_object(raw)
     except Exception:
@@ -2224,7 +2750,7 @@ def build_ai_integrated_review(db: Session, run: ResearchMatrixRun, drafts: dict
 
     source_by_id = {item["id"]: item for item in source_paragraphs}
     paragraphs: list[dict[str, Any]] = []
-    for item in list(payload.get("paragraphs") or [])[:10]:
+    for item in list(payload.get("paragraphs") or [])[:20]:
         if not isinstance(item, dict):
             continue
         text = compact_text(item.get("text") or "", 1200)
@@ -2238,7 +2764,8 @@ def build_ai_integrated_review(db: Session, run: ResearchMatrixRun, drafts: dict
             confidence = "weak"
         paragraphs.append(paragraph_item(text, citations, confidence))
 
-    if not paragraphs:
+    total_chars = sum(len(paragraph.get("text") or "") for paragraph in paragraphs)
+    if not paragraphs or len(paragraphs) < 10 or total_chars < 1800:
         return fallback
 
     return {
@@ -2269,6 +2796,7 @@ def populate_structured_review_sections(
         paragraphs = build_review_section_paragraphs(bundles, key)
         if not paragraphs:
             paragraphs = [paragraph for bundle in bundles if (paragraph := build_section_paragraph(bundle, key))]
+        paragraphs = ensure_section_paragraph_depth(paragraphs, bundles, key, target_count=3)
         drafts[key]["paragraphs"] = paragraphs
         drafts[key]["copy_ready"] = bool(paragraphs)
         drafts[key]["content"] = "\n\n".join(item.get("text") or "" for item in paragraphs)
@@ -2344,6 +2872,17 @@ def build_structured_drafts_for_bundles(
     if not cohesion["is_cohesive"]:
         drafts["topic_diagnostic"], guidance = build_topic_diagnostic_section(cohesion, bundles)
         drafts["review_outline"] = build_review_outline(drafts, cohesion, grouping_mode=grouping_mode)
+        drafts["evidence_priority_queue"] = {
+            "key": "evidence_priority_queue",
+            "title": "Priority Revisit Queue",
+            "paragraphs": [],
+            "items": [],
+            "content": "Current batch is better handled as grouped mini-reviews first.",
+            "source_titles": [],
+            "copy_ready": False,
+            "ai_generated": False,
+            "fallback_used": False,
+        }
         drafts["final_integrated_review"] = {
             "key": "final_integrated_review",
             "title": DRAFT_SECTION_TITLES["final_integrated_review"],
@@ -2364,6 +2903,7 @@ def build_structured_drafts_for_bundles(
         }
         return drafts, cohesion
 
+    drafts["evidence_priority_queue"] = build_evidence_priority_queue(bundles, drafts)
     quotable_items = collect_quotable_items(source_map, paper_title_by_id)
     drafts["quotable_sentences"]["items"] = quotable_items
     drafts["quotable_sentences"]["copy_ready"] = bool(quotable_items)
@@ -3160,6 +3700,17 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
                 run = load_run_with_papers(db, run_id)
             if run:
                 mark_run_worker_finished(db, run)
+                create_notification(
+                    db,
+                    user_id=run.user_id,
+                    source_kind="research_matrix",
+                    source_id=int(run.id),
+                    event_kind="completed",
+                    title=f"{compact_notification_text(run.title or '文献矩阵', 80)} 已完成",
+                    message=compact_notification_text(run.title or "当前矩阵批次", 120),
+                    action_kind="open-matrix",
+                    action_payload={"run_id": run.id},
+                )
             return
 
         failed_titles = [item.title_snapshot for item in run.papers if item.summary_status != "generated" or item.is_missing]
@@ -3171,6 +3722,17 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
         )
         update_run_progress(run)
         db.commit()
+        create_notification(
+            db,
+            user_id=run.user_id,
+            source_kind="research_matrix",
+            source_id=int(run.id),
+            event_kind="failed",
+            title=f"{compact_notification_text(run.title or '文献矩阵', 80)} 失败",
+            message=compact_notification_text(run.error_message or "批次生成失败", 120),
+            action_kind="open-matrix",
+            action_payload={"run_id": run.id},
+        )
         mark_run_worker_failed(db, run, run.error_message or "批次生成失败")
     except Exception as exc:
         run = load_run_with_papers(db, run_id)
@@ -3597,8 +4159,41 @@ def serialize_run_list_item(db: Session, run: ResearchMatrixRun, user_id: int) -
     }
 
 
+def run_needs_draft_snapshot_self_heal(run: ResearchMatrixRun, *, preferred_mode: str) -> bool:
+    if run.status != "completed":
+        return False
+    draft_state = serialize_draft_state(run)
+    if int(draft_state.get("draft_progress_percent", 0) or 0) < 100:
+        return False
+    variants, _available_modes, active_mode = unpack_mode_variant_snapshot(
+        run.drafts_snapshot or {},
+        preferred_mode=preferred_mode,
+    )
+    selected_drafts = variants.get(preferred_mode) or variants.get(active_mode) or (
+        run.drafts_snapshot if isinstance(run.drafts_snapshot, dict) else {}
+    )
+    if not isinstance(selected_drafts, dict) or not selected_drafts:
+        return True
+    outline = selected_drafts.get("review_outline")
+    if not isinstance(outline, dict):
+        return True
+    has_outline_content = bool(outline.get("outline_sections")) or bool(outline.get("content")) or bool(outline.get("topic_groups"))
+    if not has_outline_content:
+        return True
+    integrated = selected_drafts.get("final_integrated_review")
+    if not isinstance(integrated, dict):
+        return True
+    has_integrated_content = bool(integrated.get("paragraphs")) or bool(integrated.get("content")) or bool(integrated.get("copy_ready"))
+    return not has_integrated_content
+
+
 def serialize_run_detail(db: Session, run: ResearchMatrixRun, user_id: int) -> dict[str, Any]:
     run = normalize_run_runtime_state(db, run)
+    preferred_mode = str((run.config_json or {}).get("grouping_mode") or "topic_first")
+    if run_needs_draft_snapshot_self_heal(run, preferred_mode=preferred_mode):
+        sync_run_draft_snapshot(db, run)
+        refreshed = load_run_with_papers(db, run.id)
+        run = refreshed or run
     base = serialize_run_list_item(db, run, user_id)
     draft_state = serialize_draft_state(run)
     drafts_snapshot = run.drafts_snapshot or {}

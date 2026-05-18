@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Columns3,
+  Copy,
   Download,
   Eye,
   FileSpreadsheet,
@@ -11,7 +12,6 @@ import {
   GitBranch,
   LoaderCircle,
   MoreHorizontal,
-  Network,
   ListTree,
   PenSquare,
   Plus,
@@ -35,7 +35,6 @@ import {
   retryPendingResearchMatrixRun,
   updateResearchMatrixRun,
   updateResearchMatrixRunPaper,
-  updateResearchMatrixRunOutline,
   refreshResearchMatrixInsights,
 } from '../../services/paperReaderApi'
 
@@ -183,13 +182,13 @@ function getFolderName(paper, folders, uncategorizedFolderId) {
 }
 
 function triggerDownload(content, fileName, type) {
-  const blob = new Blob([content], { type })
+  const blob = new Blob(typeof content === 'string' ? ['\uFEFF', content] : [content], { type })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
   link.download = fileName
   link.click()
-  URL.revokeObjectURL(url)
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
 function escapeHtml(value) {
@@ -231,48 +230,18 @@ function exportRunExcel(run) {
       ${buildMatrixTableHtml(run)}
     </body></html>
   `
-  triggerDownload(html, `${run.title || '文献矩阵'}.xls`, 'application/vnd.ms-excel;charset=utf-8')
+  triggerDownload(html, `${buildRunExportFileStem(run, '文献矩阵')}.xls`, 'application/vnd.ms-excel;charset=utf-8')
 }
 
-function exportRunWord(run) {
-  if (!run) return
-  const drafts = run.drafts || {}
-  const draftHtml = Object.entries(drafts).map(([, draft]) => {
-    const paragraphs = normalizeDraftParagraphs(draft)
-    const items = normalizeDraftItems(draft)
-    const paragraphHtml = paragraphs.length
-      ? paragraphs.map((paragraph) => `
-          <p>${escapeHtml(paragraph.text || '')}</p>
-          <p><strong>来源脚注：</strong>${escapeHtml(formatCitationFootnotes(paragraph.citations || []))}</p>
-          ${paragraph.confidence === 'weak' ? '<p><em>依据较弱，建议回查原文。</em></p>' : ''}
-        `).join('')
-      : `<p>${escapeHtml(draft.content || '')}</p>`
-    const itemsHtml = items.length
-      ? `<ul>${items.map((item) => `<li>${escapeHtml(`${item.paper_title || ''} p.${item.page || '?'}：${item.quote || ''}（${item.usage_note || ''}）`)}</li>`).join('')}</ul>`
-      : ''
-    return `
-      <h2>${escapeHtml(draft.title || '')}</h2>
-      ${paragraphHtml}
-      ${itemsHtml}
-      <p><strong>来源：</strong>${escapeHtml((draft.source_titles || []).join('；'))}</p>
-    `
-  }).join('')
-  const html = `
-    <html><head><meta charset="utf-8" />
-    <style>
-      body { font-family: "Microsoft YaHei", sans-serif; color: #172033; }
-      h1 { color: #0f3b82; }
-      table { border-collapse: collapse; width: 100%; }
-      th, td { border: 1px solid #dbe5f5; padding: 8px; vertical-align: top; }
-      th { background: #eaf2ff; }
-    </style></head><body>
-      <h1>${escapeHtml(run.title || '当前批次')}</h1>
-      ${draftHtml}
-      <h2>文献矩阵</h2>
-      ${buildMatrixTableHtml(run)}
-    </body></html>
-  `
-  triggerDownload(html, `${run.title || '文献矩阵'}.doc`, 'application/msword;charset=utf-8')
+function sanitizeFileBaseName(value) {
+  return String(value || '')
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || '文献综述'
+}
+
+function buildRunExportFileStem(run, suffix) {
+  return `${sanitizeFileBaseName(getRunDisplayTitle(run))}-${suffix}`
 }
 
 const DRAFT_SECTION_ORDER = [
@@ -282,6 +251,7 @@ const DRAFT_SECTION_ORDER = [
   'method_compare',
   'result_analysis',
   'limitations_future',
+  'evidence_priority_queue',
   'quotable_sentences',
   'final_integrated_review',
 ]
@@ -603,29 +573,152 @@ function DraftCitationList({ citations = [], onJumpToEvidence }) {
     return <div className="matrix-drafts-view__footnote">当前段落缺少明确脚注，请回查本批次来源卡片。</div>
   }
   return (
-    <div className="matrix-drafts-view__citations">
-      {citations.map((citation, index) => (
-        <div key={`${citation.paper_title || 'citation'}-${index}`} className="matrix-drafts-view__citation-item">
-          <strong>[{index + 1}]</strong>
-          <span>{citation.paper_title || '未命名论文'} · {citation.source_card_type || 'review'}{citation.page ? ` · p.${citation.page}` : ''}</span>
-          {citation.paper_id && citation.page ? (
-            <button
-              type="button"
-              className="matrix-link-button"
-              onClick={() => onJumpToEvidence?.(citation.paper_id, {
-                page: citation.page,
-                quote: citation.quote || '',
-                start_char: citation.start_char ?? null,
-                end_char: citation.end_char ?? null,
-              })}
-            >
-              查看原文
-            </button>
-          ) : null}
+    <details className="matrix-drafts-view__citations-shell">
+      <summary className="matrix-drafts-view__citations-toggle">
+        <div>
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <path d="M4 2.5L7.5 6L4 9.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <b>证据来源</b>
         </div>
-      ))}
+        <span>{`${citations.length} 条`}</span>
+      </summary>
+      <div className="matrix-drafts-view__citations">
+        {citations.map((citation, index) => (
+          <div key={`${citation.paper_title || 'citation'}-${index}`} className="matrix-drafts-view__citation-item">
+            <strong>[{index + 1}]</strong>
+            <span>{citation.paper_title || '未命名论文'} · {citation.source_card_type || 'review'}{citation.page ? ` · p.${citation.page}` : ''}</span>
+            {citation.paper_id && citation.page ? (
+              <button
+                type="button"
+                className="matrix-link-button"
+                onClick={() => onJumpToEvidence?.(citation.paper_id, {
+                  page: citation.page,
+                  quote: citation.quote || '',
+                  start_char: citation.start_char ?? null,
+                  end_char: citation.end_char ?? null,
+                })}
+              >
+                查看原文
+              </button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+function DraftActionButton({
+  icon: Icon,
+  label,
+  busyLabel = label,
+  busy = false,
+  disabled = false,
+  onClick,
+  variant = 'copy',
+}) {
+  const ResolvedIcon = busy ? LoaderCircle : Icon
+  const accessibleLabel = busy ? busyLabel : label
+
+  return (
+    <button
+      type="button"
+      className={`matrix-drafts-view__action-button matrix-drafts-view__action-button--${variant}${busy ? ' is-busy' : ''}`}
+      onClick={onClick}
+      disabled={disabled}
+      title={accessibleLabel}
+      aria-label={accessibleLabel}
+      aria-busy={busy || undefined}
+    >
+      <ResolvedIcon size={16} strokeWidth={1.9} aria-hidden="true" />
+    </button>
+  )
+}
+
+function StageIconButton({
+  icon: Icon,
+  label,
+  onClick,
+  disabled = false,
+  open = false,
+}) {
+  return (
+    <button
+      type="button"
+      className={`matrix-stage-icon-button${open ? ' is-open' : ''}`}
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      aria-label={label}
+      aria-expanded={open || undefined}
+    >
+      <Icon size={16} strokeWidth={1.9} aria-hidden="true" />
+    </button>
+  )
+}
+
+function StageDownloadMenu({
+  disabled = false,
+  items = [],
+  label = '下载当前内容',
+}) {
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    if (!open) return undefined
+    const handleClose = () => setOpen(false)
+    document.addEventListener('click', handleClose)
+    return () => {
+      document.removeEventListener('click', handleClose)
+    }
+  }, [open])
+
+  return (
+    <div className="matrix-action-popover">
+      <StageIconButton
+        icon={Download}
+        label={label}
+        disabled={disabled}
+        open={open}
+        onClick={(event) => {
+          event.stopPropagation()
+          if (disabled) return
+          setOpen((current) => !current)
+        }}
+      />
+      {open && !disabled ? (
+        <div className="matrix-run-card__menu matrix-run-card__menu--right">
+          {items.map((item) => {
+            const Icon = item.icon
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => {
+                  setOpen(false)
+                  item.onClick?.()
+                }}
+              >
+                <Icon size={14} />
+                <span>{item.label}</span>
+              </button>
+            )
+          })}
+        </div>
+      ) : null}
     </div>
   )
+}
+
+function normalizeOutlinePointItems(points = []) {
+  const source = Array.isArray(points)
+    ? points
+    : String(points || '')
+      .split('\n')
+  return source
+    .map((item) => item.trim())
+    .filter(Boolean)
 }
 
 function buildDraftCopyText(draft) {
@@ -737,6 +830,867 @@ function buildOutlineCopyText(run) {
     }
   })
   return lines.join('\n')
+}
+
+function buildExportMetaHtml(items = []) {
+  const visibleItems = items.filter(Boolean)
+  if (!visibleItems.length) return ''
+  return `
+    <div class="export-doc__meta">
+      ${visibleItems.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
+    </div>
+  `
+}
+
+function renderExportRichTextHtml(value) {
+  const paragraphs = String(value || '')
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+  if (!paragraphs.length) return ''
+  return paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph).replace(/\n/g, '<br />')}</p>`).join('')
+}
+
+function buildExportListHtml(items = [], ordered = false, className = 'export-doc__list') {
+  const visibleItems = items.filter(Boolean)
+  if (!visibleItems.length) return ''
+  const tag = ordered ? 'ol' : 'ul'
+  return `
+    <${tag} class="${className}">
+      ${visibleItems.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}
+    </${tag}>
+  `
+}
+
+function buildExportDraftParagraphHtml(paragraph, options = {}) {
+  const {
+    includeNotes = true,
+    includeEvidence = true,
+    includeWarning = true,
+    blockClassName = 'export-doc__paragraph-block',
+    paragraphClassName = '',
+  } = options
+  const readableParagraph = buildReadableDraftParagraph(paragraph)
+  const bodyHtml = renderExportRichTextHtml(readableParagraph.text)
+  if (!bodyHtml) return ''
+  const bodyWrapperOpen = paragraphClassName ? `<div class="${paragraphClassName}">` : '<div>'
+  return `
+    <div class="${blockClassName}">
+      ${bodyWrapperOpen}${bodyHtml}</div>
+      ${includeNotes && readableParagraph.liftedNotes.length ? `<div class="export-doc__note">补充说明：${escapeHtml(readableParagraph.liftedNotes.join('；'))}</div>` : ''}
+      ${includeEvidence ? `<div class="export-doc__footnote">证据来源：${escapeHtml(formatCitationFootnotes(paragraph.citations || []))}</div>` : ''}
+      ${includeWarning && paragraph.confidence === 'weak' ? '<div class="export-doc__note export-doc__warning">依据较弱，建议回查原文。</div>' : ''}
+    </div>
+  `
+}
+
+function buildExportQuoteItemsHtml(items = []) {
+  const quoteItems = items.filter((item) => item?.quote || item?.paper_title)
+  if (!quoteItems.length) return ''
+  return `
+    <div class="export-doc__quote-list">
+      ${quoteItems.map((item) => `
+        <article class="export-doc__quote-item">
+          ${item.quote ? `<blockquote>${escapeHtml(item.quote)}</blockquote>` : ''}
+          <p>${escapeHtml([
+            item.paper_title || '未命名论文',
+            item.source_card_type || 'review',
+            item.page ? `p.${item.page}` : '',
+            item.usage_note || '',
+          ].filter(Boolean).join(' · '))}</p>
+        </article>
+      `).join('')}
+    </div>
+  `
+}
+
+function buildIntegratedEvidenceAppendixHtml(paragraphs = []) {
+  const appendixItems = paragraphs.reduce((items, paragraph, index) => {
+    const readableParagraph = buildReadableDraftParagraph(paragraph)
+    const notes = []
+    if (readableParagraph.liftedNotes.length) {
+      notes.push(`补充说明：${readableParagraph.liftedNotes.join('；')}`)
+    }
+    if (paragraph?.confidence === 'weak') {
+      notes.push('依据较弱，建议回查原文。')
+    }
+    const sources = Array.isArray(paragraph?.citations) ? paragraph.citations : []
+    if (!sources.length && !notes.length) return items
+    items.push({
+      index: index + 1,
+      sources: formatCitationFootnotes(sources),
+      notes,
+    })
+    return items
+  }, [])
+
+  if (!appendixItems.length) return ''
+
+  return `
+    <section class="export-doc__appendix">
+      <h2 class="export-doc__section-title">段落证据索引</h2>
+      <div class="export-doc__appendix-list">
+        ${appendixItems.map((item) => `
+          <article class="export-doc__appendix-item">
+            <strong>第 ${item.index} 段</strong>
+            <p>${escapeHtml(item.sources)}</p>
+            ${item.notes.length ? `<small>${escapeHtml(item.notes.join('；'))}</small>` : ''}
+          </article>
+        `).join('')}
+      </div>
+    </section>
+  `
+}
+
+function getExportDocumentStyles() {
+  return `
+    :root {
+      color-scheme: light;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: #f8fafc;
+      color: #1f2937;
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+    }
+
+    .export-doc {
+      width: 794px;
+      margin: 0 auto;
+      padding: 48px 56px 64px;
+      background: #ffffff;
+    }
+
+    .export-doc__hero {
+      padding-bottom: 24px;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    .export-doc__eyebrow {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 11px;
+      border-radius: 999px;
+      background: #eff6ff;
+      color: #1d4ed8;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+    }
+
+    .export-doc__title {
+      margin: 14px 0 10px;
+      color: #0f172a;
+      font-size: 30px;
+      line-height: 1.24;
+      font-weight: 800;
+    }
+
+    .export-doc__summary {
+      margin: 0;
+      color: #475569;
+      font-size: 15px;
+      line-height: 1.85;
+    }
+
+    .export-doc__meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .export-doc__meta span {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 0 12px;
+      border: 1px solid #e2e8f0;
+      border-radius: 999px;
+      background: #f8fafc;
+      color: #475569;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .export-doc__stack {
+      display: grid;
+      gap: 18px;
+      margin-top: 28px;
+    }
+
+    .export-doc__section {
+      padding: 22px 0;
+      border-top: 1px solid #e2e8f0;
+    }
+
+    .export-doc__section,
+    .export-doc__panel,
+    .export-doc__paragraph-block,
+    .export-doc__quote-item,
+    .export-doc__appendix-item {
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+
+    .export-doc__section:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .export-doc__section-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+
+    .export-doc__section-mark {
+      min-width: 42px;
+      height: 42px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #eff6ff 0%, #eef2ff 100%);
+      color: #1d4ed8;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .export-doc__section-title {
+      margin: 0;
+      color: #0f172a;
+      font-size: 22px;
+      line-height: 1.35;
+      font-weight: 800;
+    }
+
+    .export-doc__section-subtitle {
+      margin: 6px 0 0;
+      color: #64748b;
+      font-size: 13px;
+      line-height: 1.75;
+    }
+
+    .export-doc__subsection + .export-doc__subsection {
+      margin-top: 18px;
+    }
+
+    .export-doc__label {
+      display: block;
+      margin-bottom: 8px;
+      color: #94a3b8;
+      font-size: 11px;
+      line-height: 1.4;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .export-doc p {
+      margin: 0;
+      color: #1f2937;
+      font-size: 15px;
+      line-height: 1.9;
+    }
+
+    .export-doc p + p {
+      margin-top: 12px;
+    }
+
+    .export-doc__list {
+      margin: 0;
+      padding-left: 22px;
+      color: #1f2937;
+    }
+
+    .export-doc__list li {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.85;
+    }
+
+    .export-doc__list li + li {
+      margin-top: 10px;
+    }
+
+    .export-doc__panel {
+      padding: 18px 20px;
+      border: 1px solid #e2e8f0;
+      border-radius: 18px;
+      background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+    }
+
+    .export-doc__panel-title {
+      margin: 0 0 14px;
+      color: #0f172a;
+      font-size: 18px;
+      line-height: 1.4;
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .export-doc__paragraph-block + .export-doc__paragraph-block {
+      margin-top: 18px;
+    }
+
+    .export-doc__article-paragraph p {
+      color: #102033;
+      font-family: "Source Han Serif SC", "Noto Serif SC", "Songti SC", "STSong", serif;
+      font-size: 16px;
+      line-height: 2;
+      text-align: justify;
+      text-indent: 2em;
+      text-wrap: pretty;
+    }
+
+    .export-doc__note,
+    .export-doc__footnote {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: #f8fafc;
+      color: #475569;
+      font-size: 12px;
+      line-height: 1.75;
+    }
+
+    .export-doc__warning {
+      background: #fff7ed;
+      color: #9a3412;
+      border: 1px solid #fed7aa;
+    }
+
+    .export-doc__quote-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .export-doc__quote-item {
+      padding: 14px 16px;
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      background: #fffaf5;
+    }
+
+    .export-doc__quote-item blockquote {
+      margin: 0 0 10px;
+      color: #0f172a;
+      font-size: 14px;
+      line-height: 1.85;
+    }
+
+    .export-doc__quote-item p {
+      color: #64748b;
+      font-size: 12px;
+      line-height: 1.7;
+    }
+
+    .export-doc__reference-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: grid;
+      gap: 10px;
+    }
+
+    .export-doc__reference-list li {
+      display: grid;
+      grid-template-columns: 38px minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+    }
+
+    .export-doc__reference-list li span {
+      display: inline-grid;
+      place-items: center;
+      min-height: 32px;
+      border-radius: 999px;
+      background: #eff6ff;
+      color: #1d4ed8;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .export-doc__appendix {
+      margin-top: 28px;
+      padding-top: 22px;
+      border-top: 1px dashed #cbd5e1;
+    }
+
+    .export-doc__appendix-list {
+      display: grid;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .export-doc__appendix-item {
+      padding: 14px 16px;
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      background: #f8fafc;
+    }
+
+    .export-doc__appendix-item strong {
+      display: block;
+      margin: 0 0 8px;
+      color: #0f172a;
+      font-size: 13px;
+      line-height: 1.5;
+      font-weight: 800;
+    }
+
+    .export-doc__appendix-item p {
+      color: #475569;
+      font-size: 12px;
+      line-height: 1.8;
+    }
+
+    .export-doc__appendix-item small {
+      display: block;
+      margin-top: 8px;
+      color: #8b5e34;
+      font-size: 11px;
+      line-height: 1.75;
+      font-weight: 700;
+    }
+
+    @media print {
+      body {
+        background: #ffffff;
+      }
+
+      .export-doc {
+        width: auto;
+        margin: 0;
+        padding: 0;
+      }
+    }
+  `
+}
+
+function buildExportDocumentHtml(title, contentHtml) {
+  return `
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>${escapeHtml(title)}</title>
+        <style>${getExportDocumentStyles()}</style>
+      </head>
+      <body>${contentHtml}</body>
+    </html>
+  `
+}
+
+function buildExportHeroHtml({ eyebrow, title, summary, meta = [] }) {
+  return `
+    <header class="export-doc__hero">
+      <span class="export-doc__eyebrow">${escapeHtml(eyebrow)}</span>
+      <h1 class="export-doc__title">${escapeHtml(title)}</h1>
+      ${summary ? `<p class="export-doc__summary">${escapeHtml(summary)}</p>` : ''}
+      ${buildExportMetaHtml(meta)}
+    </header>
+  `
+}
+
+function buildInsightsExportPayload(run) {
+  const insights = run?.insights || {}
+  const sections = [
+    { title: '当前共识', items: Array.isArray(insights.consensus) ? insights.consensus : [] },
+    { title: '主要分歧', items: Array.isArray(insights.differences) ? insights.differences : [] },
+    { title: '研究空白', items: Array.isArray(insights.gaps) ? insights.gaps : [] },
+  ].filter((section) => section.items.length)
+  if (!sections.length) return null
+  const heroHtml = buildExportHeroHtml({
+    eyebrow: '比较导读',
+    title: `${getRunDisplayTitle(run)} · 比较导读`,
+    summary: '围绕当前批次文献的共识、分歧与研究空白，整理成连续阅读的导读稿。',
+    meta: [
+      `${getRunEvidenceCount(run)} 篇文献`,
+      insights.updated_at ? `更新于 ${formatDate(insights.updated_at)}` : null,
+    ],
+  })
+  const bodyHtml = `
+    <main class="export-doc">
+      ${heroHtml}
+      <div class="export-doc__stack">
+        ${sections.map((section) => `
+          <section class="export-doc__panel">
+            <h2 class="export-doc__panel-title">${escapeHtml(section.title)}</h2>
+            ${buildExportListHtml(section.items)}
+          </section>
+        `).join('')}
+      </div>
+    </main>
+  `
+  return {
+    title: `${getRunDisplayTitle(run)} 比较导读`,
+    fileStem: buildRunExportFileStem(run, '比较导读'),
+    contentHtml: bodyHtml,
+  }
+}
+
+function buildOutlineExportPayload(run) {
+  const outline = run?.drafts?.review_outline || null
+  const topicDiagnostic = run?.drafts?.topic_diagnostic || null
+  const sections = Array.isArray(outline?.outline_sections) ? outline.outline_sections : []
+  const groups = Array.isArray(outline?.topic_groups) ? outline.topic_groups : []
+  const consensusPoints = Array.isArray(outline?.consensus_points) ? outline.consensus_points : []
+  const divergencePoints = Array.isArray(outline?.divergence_points) ? outline.divergence_points : []
+  const gapPoints = Array.isArray(outline?.gap_points) ? outline.gap_points : []
+  const isDiagnostic = Boolean(outline?.diagnostic && groups.length > 1)
+  if (!sections.length && !consensusPoints.length && !divergencePoints.length && !gapPoints.length && !topicDiagnostic?.content && !groups.length) {
+    return null
+  }
+  const briefTitle = isDiagnostic
+    ? '当前批次建议先按主题分组整理，再分别展开小综述。'
+    : '当前批次主题相对集中，可以直接沿着这份大纲继续撰写。'
+  const briefMeta = isDiagnostic
+    ? `共识别出 ${groups.length} 个主题组，建议先切换到单个主题组再继续展开。`
+    : '先看章节目标与要点，再进入后续草稿，会更容易保持结构稳定。'
+  const heroHtml = buildExportHeroHtml({
+    eyebrow: '综述大纲',
+    title: outline?.active_group_label ? `${outline.active_group_label} · 综述大纲` : `${getRunDisplayTitle(run)} · 综述大纲`,
+    summary: briefTitle,
+    meta: [
+      `${sections.length} 节结构`,
+      `${getRunEvidenceCount(run)} 篇文献`,
+      outline?.active_group_label ? `当前主题：${outline.active_group_label}` : null,
+    ],
+  })
+  const insightSections = [
+    { title: '当前共识', items: consensusPoints },
+    { title: '主要分歧', items: divergencePoints },
+    { title: '研究空白', items: gapPoints },
+  ].filter((section) => section.items.length)
+
+  const bodyHtml = `
+    <main class="export-doc">
+      ${heroHtml}
+      <div class="export-doc__stack">
+        <section class="export-doc__panel">
+          <h2 class="export-doc__panel-title">阅读提示</h2>
+          <p>${escapeHtml(briefMeta)}</p>
+        </section>
+        ${topicDiagnostic?.content ? `
+          <section class="export-doc__panel">
+            <h2 class="export-doc__panel-title">分组原因</h2>
+            ${renderExportRichTextHtml(topicDiagnostic.content)}
+          </section>
+        ` : ''}
+        ${groups.length ? `
+          <section class="export-doc__panel">
+            <h2 class="export-doc__panel-title">主题分组建议</h2>
+            ${buildExportListHtml(groups.map((group, index) => `${index + 1}. ${group.label || `主题 ${index + 1}`}：${(group.paper_titles || []).join('、') || '暂无论文'}`))}
+          </section>
+        ` : ''}
+        ${insightSections.map((section) => `
+          <section class="export-doc__panel">
+            <h2 class="export-doc__panel-title">${escapeHtml(section.title)}</h2>
+            ${buildExportListHtml(section.items)}
+          </section>
+        `).join('')}
+        ${sections.map((section, index) => {
+          const pointItems = normalizeOutlinePointItems(section.points)
+          const referenceItems = Array.isArray(section.source_titles) ? section.source_titles.filter(Boolean) : []
+          return `
+            <section class="export-doc__section">
+              <div class="export-doc__section-head">
+                <span class="export-doc__section-mark">${`${index + 1}`.padStart(2, '0')}</span>
+                <div>
+                  <h2 class="export-doc__section-title">${escapeHtml(section.title || `章节 ${index + 1}`)}</h2>
+                  <p class="export-doc__section-subtitle">${escapeHtml(`${pointItems.length} 个要点${referenceItems.length ? ` · ${referenceItems.length} 篇参考文献` : ''}`)}</p>
+                </div>
+              </div>
+              ${section.goal ? `
+                <div class="export-doc__subsection">
+                  <span class="export-doc__label">章节目标</span>
+                  ${renderExportRichTextHtml(section.goal)}
+                </div>
+              ` : ''}
+              ${section.summary ? `
+                <div class="export-doc__subsection">
+                  <span class="export-doc__label">写作提示</span>
+                  ${renderExportRichTextHtml(section.summary)}
+                </div>
+              ` : ''}
+              ${pointItems.length ? `
+                <div class="export-doc__subsection">
+                  <span class="export-doc__label">本节正文要点</span>
+                  ${buildExportListHtml(pointItems)}
+                </div>
+              ` : ''}
+              ${referenceItems.length ? `
+                <div class="export-doc__subsection">
+                  <span class="export-doc__label">本节参考文献</span>
+                  <ol class="export-doc__reference-list">
+                    ${referenceItems.map((title, sourceIndex) => `
+                      <li>
+                        <span>${`${sourceIndex + 1}`.padStart(2, '0')}</span>
+                        <p>${escapeHtml(title)}</p>
+                      </li>
+                    `).join('')}
+                  </ol>
+                </div>
+              ` : ''}
+            </section>
+          `
+        }).join('')}
+      </div>
+    </main>
+  `
+
+  return {
+    title: `${getRunDisplayTitle(run)} 综述大纲`,
+    fileStem: buildRunExportFileStem(run, '综述大纲'),
+    contentHtml: bodyHtml,
+  }
+}
+
+function buildDraftsExportPayload(run) {
+  const draftSections = getOrderedDraftSections(run).filter(([key, draft]) => (
+    key !== 'review_outline'
+    && key !== 'topic_diagnostic'
+    && key !== 'final_integrated_review'
+    && (
+      normalizeDraftParagraphs(draft).length
+      || normalizeDraftItems(draft).length
+      || Boolean(String(draft?.content || '').trim())
+    )
+  ))
+  if (!draftSections.length) return null
+
+  const heroHtml = buildExportHeroHtml({
+    eyebrow: '分节草稿',
+    title: `${getRunDisplayTitle(run)} · 分节草稿`,
+    summary: '按当前批次矩阵与证据来源整理出的连续正文草稿，便于顺着章节向下阅读。',
+    meta: [
+      `${draftSections.length} 节内容`,
+      `${getRunEvidenceCount(run)} 篇文献`,
+    ],
+  })
+
+  const bodyHtml = `
+    <main class="export-doc">
+      ${heroHtml}
+      ${draftSections.map(([key, draft], index) => {
+        const paragraphs = normalizeDraftParagraphs(draft)
+        const items = normalizeDraftItems(draft)
+        const badges = [
+          draft?.ai_generated ? 'AI 约束整合' : '',
+          draft?.diagnostic ? '主题诊断' : '',
+          draft?.fallback_used ? '规则回退' : '',
+        ].filter(Boolean)
+        return `
+          <section class="export-doc__section">
+            <div class="export-doc__section-head">
+              <span class="export-doc__section-mark">${`${index + 1}`.padStart(2, '0')}</span>
+              <div>
+                <h2 class="export-doc__section-title">${escapeHtml(draft.title || key || `章节 ${index + 1}`)}</h2>
+                ${badges.length ? `<p class="export-doc__section-subtitle">${escapeHtml(badges.join(' · '))}</p>` : ''}
+              </div>
+            </div>
+            ${items.length
+              ? buildExportQuoteItemsHtml(items)
+              : paragraphs.length
+                ? paragraphs.map((paragraph) => buildExportDraftParagraphHtml(paragraph)).join('')
+                : `
+                  ${renderExportRichTextHtml(draft.content || '')}
+                  ${(draft.source_titles || []).length ? `<div class="export-doc__footnote">来源参考：${escapeHtml((draft.source_titles || []).join('；'))}</div>` : ''}
+                `}
+          </section>
+        `
+      }).join('')}
+    </main>
+  `
+
+  return {
+    title: `${getRunDisplayTitle(run)} 分节草稿`,
+    fileStem: buildRunExportFileStem(run, '分节草稿'),
+    contentHtml: bodyHtml,
+  }
+}
+
+function buildIntegratedExportPayload(run) {
+  const drafts = run?.drafts || {}
+  const finalDraft = drafts.final_integrated_review || null
+  const paragraphs = normalizeDraftParagraphs(finalDraft)
+  const quoteItems = normalizeDraftItems(drafts.quotable_sentences)
+  const fallbackContent = !paragraphs.length ? buildIntegratedCopyText(run) : ''
+  if (!paragraphs.length && !fallbackContent) return null
+
+  const heroHtml = buildExportHeroHtml({
+    eyebrow: '初稿整合',
+    title: `${getRunDisplayTitle(run)} · 初稿整合`,
+    summary: '将分节草稿收束成一篇连续综述初稿，方便直接通读和进一步润色。',
+    meta: [
+      `${getRunEvidenceCount(run)} 篇文献`,
+      quoteItems.length ? `${quoteItems.length} 条可回查原句` : null,
+    ],
+  })
+
+  const bodyHtml = `
+    <main class="export-doc">
+      ${heroHtml}
+      <section class="export-doc__section">
+        <div class="export-doc__section-head">
+          <span class="export-doc__section-mark">稿</span>
+          <div>
+            <h2 class="export-doc__section-title">${escapeHtml(finalDraft?.title || '综述初稿')}</h2>
+            <p class="export-doc__section-subtitle">连续阅读版本</p>
+          </div>
+        </div>
+        ${paragraphs.length
+          ? paragraphs.map((paragraph) => buildExportDraftParagraphHtml(paragraph, {
+            includeNotes: false,
+            includeEvidence: false,
+            includeWarning: false,
+            paragraphClassName: 'export-doc__article-paragraph',
+          })).join('')
+          : `<div class="export-doc__article-paragraph">${renderExportRichTextHtml(fallbackContent)}</div>`}
+      </section>
+      ${paragraphs.length ? buildIntegratedEvidenceAppendixHtml(paragraphs) : ''}
+      ${quoteItems.length ? `
+        <section class="export-doc__appendix">
+          <h2 class="export-doc__section-title">可回查原句</h2>
+          <div class="export-doc__stack">
+            ${buildExportQuoteItemsHtml(quoteItems)}
+          </div>
+        </section>
+      ` : ''}
+    </main>
+  `
+
+  return {
+    title: `${getRunDisplayTitle(run)} 初稿整合`,
+    fileStem: buildRunExportFileStem(run, '初稿整合'),
+    contentHtml: bodyHtml,
+  }
+}
+
+function hasMatrixExportContent(run) {
+  return Boolean(run?.status === 'completed' && run?.matrix?.rows?.length)
+}
+
+function hasInsightsExportContent(run) {
+  const insights = run?.insights || {}
+  return Boolean(
+    (Array.isArray(insights.consensus) && insights.consensus.length)
+    || (Array.isArray(insights.differences) && insights.differences.length)
+    || (Array.isArray(insights.gaps) && insights.gaps.length)
+  )
+}
+
+function hasOutlineExportContent(run) {
+  const outline = run?.drafts?.review_outline || null
+  return Boolean(
+    (Array.isArray(outline?.outline_sections) && outline.outline_sections.length)
+    || (Array.isArray(outline?.consensus_points) && outline.consensus_points.length)
+    || (Array.isArray(outline?.divergence_points) && outline.divergence_points.length)
+    || (Array.isArray(outline?.gap_points) && outline.gap_points.length)
+    || run?.drafts?.topic_diagnostic?.content
+  )
+}
+
+function hasDraftsExportContent(run) {
+  return getOrderedDraftSections(run).some(([key, draft]) => (
+    key !== 'review_outline'
+    && key !== 'topic_diagnostic'
+    && key !== 'final_integrated_review'
+    && (
+      normalizeDraftParagraphs(draft).length
+      || normalizeDraftItems(draft).length
+      || Boolean(String(draft?.content || '').trim())
+    )
+  ))
+}
+
+function hasIntegratedExportContent(run) {
+  const finalDraft = run?.drafts?.final_integrated_review || null
+  return Boolean(
+    normalizeDraftParagraphs(finalDraft).length
+    || String(finalDraft?.content || '').trim()
+    || buildIntegratedCopyText(run)
+  )
+}
+
+function getStageExportPayload(run, stageKey) {
+  if (!run) return null
+  if (stageKey === 'insights') return buildInsightsExportPayload(run)
+  if (stageKey === 'outline') return buildOutlineExportPayload(run)
+  if (stageKey === 'drafts') return buildDraftsExportPayload(run)
+  if (stageKey === 'integrated') return buildIntegratedExportPayload(run)
+  return null
+}
+
+function downloadExportPayloadAsWord(payload) {
+  if (!payload) return
+  const html = buildExportDocumentHtml(payload.title, payload.contentHtml)
+  triggerDownload(html, `${payload.fileStem}.doc`, 'application/msword;charset=utf-8')
+}
+
+async function downloadExportPayloadAsPdf(payload) {
+  if (!payload) return
+  const { jsPDF } = await import('jspdf')
+  const container = document.createElement('div')
+  container.setAttribute('aria-hidden', 'true')
+  container.style.position = 'fixed'
+  container.style.left = '-10000px'
+  container.style.top = '0'
+  container.style.width = '794px'
+  container.style.pointerEvents = 'none'
+  container.style.zIndex = '-1'
+  container.style.background = '#ffffff'
+  container.innerHTML = `<style>${getExportDocumentStyles()}</style>${payload.contentHtml}`
+  document.body.appendChild(container)
+
+  try {
+    if (document.fonts?.ready) {
+      await document.fonts.ready
+    }
+    await new Promise((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(resolve)
+      })
+    })
+    const pdf = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4',
+      compress: true,
+    })
+    const target = container.querySelector('.export-doc') || container
+    await new Promise((resolve, reject) => {
+      pdf.html(target, {
+        autoPaging: 'text',
+        margin: [14, 14, 16, 14],
+        width: 182,
+        windowWidth: 794,
+        html2canvas: {
+          scale: 1,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+        },
+        callback: (doc) => {
+          try {
+            doc.save(`${payload.fileStem}.pdf`)
+            resolve()
+          } catch (error) {
+            reject(error)
+          }
+        },
+      })
+    })
+  } finally {
+    container.remove()
+  }
 }
 
 async function copyTextToClipboard(text) {
@@ -1271,15 +2225,11 @@ function MatrixRunRail({
 function MatrixContentHeader({
   currentRun,
   activeStage = 'matrix',
-  exportMenuOpen,
   busy = false,
   onRetryRun,
   onRefreshStatus,
-  onExport,
   onStageChange,
-  onToggleExportMenu,
 }) {
-  const exportDisabled = !currentRun || currentRun.status !== 'completed'
   const runProcessing = isRunProcessing(currentRun)
   const progressMeta = currentRun ? getRunProgressMeta(currentRun) : null
   const stability = getRunStabilityStatus(currentRun)
@@ -1342,30 +2292,6 @@ function MatrixContentHeader({
                 继续补齐
               </button>
             ) : null}
-            <div className="matrix-action-popover">
-              <button
-                type="button"
-                className="matrix-run-rail__icon"
-                title="导出"
-                aria-expanded={exportMenuOpen}
-                disabled={exportDisabled}
-                onClick={onToggleExportMenu}
-              >
-                <Download />
-              </button>
-              {exportMenuOpen && !exportDisabled ? (
-                <div className="matrix-run-card__menu matrix-run-card__menu--right">
-                  <button type="button" onClick={() => onExport('excel')}>
-                    <FileSpreadsheet size={14} />
-                    <span>Excel</span>
-                  </button>
-                  <button type="button" onClick={() => onExport('word')}>
-                    <FileText size={14} />
-                    <span>Word</span>
-                  </button>
-                </div>
-              ) : null}
-            </div>
           </div>
         </div>
       ) : null}
@@ -1562,7 +2488,7 @@ function MatrixCellEditorDialog({ busy, editingCell, onClose, onSave }) {
   )
 }
 
-function ResearchMatrixTable({ run, busy = false, onEditCell, onRefreshInsights }) {
+function ResearchMatrixTable({ run, busy = false, onEditCell, onRefreshInsights, onDownload }) {
   const rows = run?.matrix?.rows || []
   const fields = useMemo(() => normalizeFields(run?.matrix?.fields), [run])
   const [previewCell, setPreviewCell] = useState(null)
@@ -1668,6 +2594,14 @@ function ResearchMatrixTable({ run, busy = false, onEditCell, onRefreshInsights 
               <strong>矩阵表格</strong>
               <span>{rows.length} 行 · {fields.length} 个字段</span>
             </div>
+            <div className="matrix-stage-actions">
+              <StageIconButton
+                icon={FileSpreadsheet}
+                label="下载文献矩阵表格"
+                disabled={busy || !rows.length}
+                onClick={onDownload}
+              />
+            </div>
           </div>
 
           <div className="research-matrix-table__sticky-head">
@@ -1760,7 +2694,16 @@ function ResearchMatrixTable({ run, busy = false, onEditCell, onRefreshInsights 
   )
 }
 
-function MatrixDraftsView({ run, onCopySection, onCopyAll, onRewriteSection, rewritingSectionKey = '', onJumpToEvidence }) {
+function MatrixDraftsView({
+  run,
+  onCopySection,
+  onCopyAll,
+  onRewriteSection,
+  rewritingSectionKey = '',
+  onJumpToEvidence,
+  onExport,
+  busy = false,
+}) {
   const drafts = getOrderedDraftSections(run)
   const draftStatus = run?.draft_status || 'idle'
   const total = run?.draft_total_count || 0
@@ -1783,14 +2726,14 @@ function MatrixDraftsView({ run, onCopySection, onCopyAll, onRewriteSection, rew
     )
   }
 
-  if ((draftStatus === 'running' && !hasDraftContent) || (draftStatus === 'idle' && !drafts.length)) {
+  if (((draftStatus === 'running' && progress < 100) && !hasDraftContent) || (draftStatus === 'idle' && !drafts.length)) {
     return (
       <section className="matrix-drafts-view matrix-drafts-view--pending">
         <DraftProgressPanel
           run={run}
           eyebrow="分节草稿"
-          title="正在准备分节草稿"
-          description={progress >= 100 ? '来源卡已齐，正在整理分节正文。' : '系统会用当前批次论文的 overview、review 和 reproduction 来源卡生成分节正文。'}
+          title={progress >= 100 ? '分节草稿已完成，正在同步展示' : '正在准备分节草稿'}
+          description={progress >= 100 ? '分节草稿已生成完成，可以直接开始阅读和继续整理。' : '系统会用当前批次论文的 overview、review 和 reproduction 来源卡生成分节正文。'}
         />
         {run?.draft_error_message ? (
           <div className="matrix-inline-message">{run.draft_error_message}</div>
@@ -1809,19 +2752,19 @@ function MatrixDraftsView({ run, onCopySection, onCopyAll, onRewriteSection, rew
         </div>
         <div className="matrix-drafts-view__header-actions">
           <span>{`${drafts.length} 节内容`}</span>
-          <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={onCopyAll}>
-            复制正文
-          </button>
+          <div className="matrix-drafts-view__section-actions">
+            <StageDownloadMenu
+              disabled={busy}
+              label="下载分节草稿"
+              items={[
+                { key: 'word', label: 'Word 文档', icon: FileText, onClick: () => onExport?.('word') },
+                { key: 'pdf', label: 'PDF 文档', icon: Download, onClick: () => onExport?.('pdf') },
+              ]}
+            />
+            <DraftActionButton icon={Copy} label="复制正文" onClick={onCopyAll} variant="copy" />
+          </div>
         </div>
-      </div>
-      <div className="matrix-drafts-view__toc">
-        {drafts.map(([key, draft]) => (
-          <a key={key} className="matrix-drafts-view__toc-link" href={`#draft-section-${key}`}>
-            {draft?.title || key}
-          </a>
-        ))}
-      </div>
-      <div className="matrix-drafts-view__document">
+      </div>      <div className="matrix-drafts-view__document">
         <div className="matrix-drafts-view__paper">
           {drafts.map(([key, draft]) => (
             <article key={key} id={`draft-section-${key}`} className="matrix-drafts-view__section">
@@ -1837,12 +2780,16 @@ function MatrixDraftsView({ run, onCopySection, onCopyAll, onRewriteSection, rew
                 ) : null}
               </div>
               <div className="matrix-drafts-view__section-actions">
-                <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={() => onRewriteSection?.(key)} disabled={rewritingSectionKey === key}>
-                  {rewritingSectionKey === key ? '重写中' : '重写本节'}
-                </button>
-                <button type="button" className="matrix-soft-button matrix-soft-button--quiet matrix-drafts-view__copy-button" onClick={() => onCopySection(draft)}>
-                复制本节
-                </button>
+                <DraftActionButton
+                  icon={RotateCcw}
+                  label="重写本节"
+                  busyLabel="重写中"
+                  busy={rewritingSectionKey === key}
+                  disabled={rewritingSectionKey === key}
+                  onClick={() => onRewriteSection?.(key)}
+                  variant="rewrite"
+                />
+                <DraftActionButton icon={Copy} label="复制本节" onClick={() => onCopySection(draft)} variant="copy" />
               </div>
             </div>
 
@@ -1915,7 +2862,15 @@ function MatrixDraftsView({ run, onCopySection, onCopyAll, onRewriteSection, rew
   )
 }
 
-function IntegratedDraftView({ run, onCopyAll, onRewriteSection, rewritingSectionKey = '', onJumpToEvidence }) {
+function IntegratedDraftView({
+  run,
+  onCopyAll,
+  onRewriteSection,
+  rewritingSectionKey = '',
+  onJumpToEvidence,
+  onExport,
+  busy = false,
+}) {
   const drafts = run?.drafts || {}
   const finalDraft = drafts.final_integrated_review || null
   const draftStatus = run?.draft_status || 'idle'
@@ -1933,14 +2888,14 @@ function IntegratedDraftView({ run, onCopyAll, onRewriteSection, rewritingSectio
     )
   }
 
-  if (!hasContent) {
+  if (!hasContent && Number(run?.draft_progress_percent || 0) < 100) {
     return (
       <section className="matrix-drafts-view matrix-drafts-view--pending matrix-integrated-view">
         <DraftProgressPanel
           run={run}
           eyebrow="初稿整合"
-          title={draftStatus === 'running' ? '正在准备整合初稿' : '等待分节草稿完成'}
-          description={Number(run?.draft_progress_percent || 0) >= 100 ? '来源卡已齐，正在整理连续综述初稿。' : '来源卡和分节草稿齐后，这里会展示连续综述初稿。'}
+          title={Number(run?.draft_progress_percent || 0) >= 100 ? '整合初稿已完成，正在同步展示' : (draftStatus === 'running' ? '正在准备整合初稿' : '等待分节草稿完成')}
+          description={Number(run?.draft_progress_percent || 0) >= 100 ? '整合初稿已生成完成，可以直接阅读和复制。' : '来源卡和分节草稿齐后，这里会展示连续综述初稿。'}
         />
       </section>
     )
@@ -1955,17 +2910,26 @@ function IntegratedDraftView({ run, onCopyAll, onRewriteSection, rewritingSectio
           <span className="matrix-drafts-view__support">{`基于当前批次 ${evidenceCount} 篇文献的分节草稿整合`}</span>
         </div>
         <div className="matrix-drafts-view__header-actions">
-          <button
-            type="button"
-            className="matrix-soft-button matrix-soft-button--quiet"
-            onClick={() => onRewriteSection?.('final_integrated_review')}
-            disabled={rewritingSectionKey === 'final_integrated_review'}
-          >
-            {rewritingSectionKey === 'final_integrated_review' ? '重整中' : '重新整合'}
-          </button>
-          <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={onCopyAll}>
-            复制初稿
-          </button>
+          <div className="matrix-drafts-view__section-actions">
+            <StageDownloadMenu
+              disabled={busy}
+              label="下载初稿整合"
+              items={[
+                { key: 'word', label: 'Word 文档', icon: FileText, onClick: () => onExport?.('word') },
+                { key: 'pdf', label: 'PDF 文档', icon: Download, onClick: () => onExport?.('pdf') },
+              ]}
+            />
+            <DraftActionButton
+              icon={RotateCcw}
+              label="重新整合"
+              busyLabel="重整中"
+              busy={rewritingSectionKey === 'final_integrated_review'}
+              disabled={rewritingSectionKey === 'final_integrated_review'}
+              onClick={() => onRewriteSection?.('final_integrated_review')}
+              variant="rewrite"
+            />
+            <DraftActionButton icon={Copy} label="复制初稿" onClick={onCopyAll} variant="copy" />
+          </div>
         </div>
       </div>
 
@@ -2019,7 +2983,14 @@ function IntegratedDraftView({ run, onCopyAll, onRewriteSection, rewritingSectio
   )
 }
 
-function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', onCopyAll, onSaveOutline, saving = false }) {
+function ReviewOutlineView({
+  run,
+  topicGroups = [],
+  activeTopicGroupId = 'all',
+  onCopyAll,
+  onExport,
+  busy = false,
+}) {
   const outline = run?.drafts?.review_outline || null
   const topicDiagnostic = run?.drafts?.topic_diagnostic || null
   const sections = Array.isArray(outline?.outline_sections) ? outline.outline_sections : []
@@ -2036,14 +3007,15 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
   const briefMeta = isDiagnostic
     ? `已识别 ${groups.length} 个主题组，建议先切换到单个主题组，再查看对应矩阵和草稿。`
     : '先看这一页的章节目标和要点，再进入综述草稿会更清楚。'
-  const [draftSections, setDraftSections] = useState([])
-
-  useEffect(() => {
-    setDraftSections(sections.map((section) => ({
+  const draftSections = useMemo(() => (
+    sections.map((section) => ({
       ...section,
-      points: Array.isArray(section.points) ? section.points.join('\n') : '',
-    })))
-  }, [outline?.active_group_label, sections])
+      pointItems: normalizeOutlinePointItems(section.points),
+      goalText: String(section.goal || '').trim(),
+      summaryText: String(section.summary || '').trim(),
+      titleText: String(section.title || '').trim(),
+    }))
+  ), [sections])
 
   if (!run) {
     return (
@@ -2054,14 +3026,14 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
     )
   }
 
-  if (!outline && !topicDiagnostic) {
+  if (!outline && !topicDiagnostic && Number(run?.draft_progress_percent || 0) < 100) {
     return (
       <section className="matrix-drafts-view matrix-drafts-view--pending">
         <DraftProgressPanel
           run={run}
           eyebrow="综述大纲"
-          title="正在准备综述大纲"
-          description={Number(run?.draft_progress_percent || 0) >= 100 ? '来源卡已齐，正在整理主题分组和章节结构。' : '来源卡补齐后会先生成主题分组和章节结构，再进入分节草稿。'}
+          title={Number(run?.draft_progress_percent || 0) >= 100 ? '综述大纲已完成，正在同步展示' : '正在准备综述大纲'}
+          description={Number(run?.draft_progress_percent || 0) >= 100 ? '综述大纲已生成完成，可以直接阅读和复制。' : '来源卡补齐后会先生成主题分组和章节结构，再进入分节草稿。'}
         />
       </section>
     )
@@ -2077,14 +3049,17 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
         </div>
         <div className="matrix-drafts-view__header-actions">
           <span>{`${sections.length || 0} 节结构`}</span>
-          {draftSections.length ? (
-            <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={() => onSaveOutline?.(draftSections)} disabled={saving}>
-              {saving ? '保存中' : '保存大纲'}
-            </button>
-          ) : null}
-          <button type="button" className="matrix-soft-button matrix-soft-button--quiet" onClick={onCopyAll}>
-            复制大纲
-          </button>
+          <div className="matrix-drafts-view__section-actions">
+            <StageDownloadMenu
+              disabled={busy}
+              label="下载综述大纲"
+              items={[
+                { key: 'word', label: 'Word 文档', icon: FileText, onClick: () => onExport?.('word') },
+                { key: 'pdf', label: 'PDF 文档', icon: Download, onClick: () => onExport?.('pdf') },
+              ]}
+            />
+            <DraftActionButton icon={Copy} label="复制大纲" onClick={onCopyAll} variant="copy" />
+          </div>
         </div>
       </div>
 
@@ -2165,79 +3140,71 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
         ) : null}
 
         {draftSections.length ? (
-          <div className="matrix-outline-document">
+          <div className="matrix-outline-document matrix-outline-manuscript">
             {draftSections.map((section, index) => (
               <article key={section.key || index} className="matrix-outline-section">
-                <div className="matrix-outline-section__head">
-                  <div>
-                    <span className="matrix-outline-section__index">{`${index + 1}`.padStart(2, '0')}</span>
-                    <div className="matrix-outline-section__heading">
-                      <input
-                        className="matrix-outline-edit__title"
-                        value={section.title || ''}
-                        onChange={(event) => {
-                          const value = event.target.value
-                          setDraftSections((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, title: value } : item))
-                        }}
-                        placeholder={`章节 ${index + 1}`}
-                      />
-                      <input
-                        className="matrix-outline-edit__goal"
-                        value={section.goal || ''}
-                        onChange={(event) => {
-                          const value = event.target.value
-                          setDraftSections((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, goal: value } : item))
-                        }}
-                        placeholder="章节目标"
-                      />
-                    </div>
+                <div className="matrix-outline-section__rail">
+                  <span className="matrix-outline-section__index">{`${index + 1}`.padStart(2, '0')}</span>
+                  <div className="matrix-outline-section__meta">
+                    <span>{`${section.pointItems.length} 个要点`}</span>
+                    {Array.isArray(section.source_titles) && section.source_titles.length ? (
+                      <span>{`${section.source_titles.length} 篇参考文献`}</span>
+                    ) : null}
                   </div>
                 </div>
 
-                <div className="matrix-outline-card">
-                  <div className="matrix-outline-card__block">
-                      <div className="matrix-outline-card__label">
-                        <Network size={15} />
-                        <span>本节要点</span>
-                      </div>
-                      <textarea
-                        className="matrix-outline-edit__points"
-                        value={section.points || ''}
-                        onChange={(event) => {
-                          const value = event.target.value
-                          setDraftSections((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, points: value } : item))
-                        }}
-                        placeholder="每行一个要点"
-                      />
+                <div className="matrix-outline-section__content">
+                  <div className="matrix-outline-section__heading">
+                    <span className="matrix-outline-section__eyebrow matrix-outline-section__eyebrow--title">章节标题</span>
+                    <div className="matrix-outline-edit__title matrix-outline-edit__title--manuscript">
+                      {section.titleText || `章节 ${index + 1}`}
+                    </div>
                   </div>
 
-                  {section.summary ? (
-                    <div className="matrix-outline-card__block matrix-outline-card__block--summary">
-                      <div className="matrix-outline-card__label">
-                        <ScrollText size={15} />
-                        <span>写作目的</span>
+                  {section.goalText ? (
+                    <div className="matrix-outline-section__goal-block">
+                      <span className="matrix-outline-section__field-label matrix-outline-section__field-label--goal">章节目标</span>
+                      <p className="matrix-outline-edit__goal matrix-outline-edit__goal--lead">{section.goalText}</p>
+                    </div>
+                  ) : null}
+
+                  {section.summaryText ? (
+                    <div className="matrix-outline-section__summary-block">
+                      <span className="matrix-outline-section__field-label matrix-outline-section__field-label--summary">写作提示</span>
+                      <p className="matrix-outline-edit__summary matrix-outline-edit__summary--lead">{section.summaryText}</p>
+                    </div>
+                  ) : null}
+
+                  {section.pointItems.length ? (
+                    <div className="matrix-outline-section__body">
+                      <div className="matrix-outline-section__body-head">
+                        <span className="matrix-outline-section__field-label matrix-outline-section__field-label--body">本节正文要点</span>
+                        <span className="matrix-outline-section__count">{`${section.pointItems.length} 条`}</span>
                       </div>
-                      <textarea
-                        className="matrix-outline-edit__summary"
-                        value={section.summary || ''}
-                        onChange={(event) => {
-                          const value = event.target.value
-                          setDraftSections((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, summary: value } : item))
-                        }}
-                        placeholder="写作目的"
-                      />
+                      <div className="matrix-outline-edit__points matrix-outline-edit__points--article">
+                        {section.pointItems.map((point, pointIndex) => (
+                          <p key={`${section.key || index}-point-${pointIndex}`} className="matrix-outline-section__point">
+                            {point}
+                          </p>
+                        ))}
+                      </div>
                     </div>
                   ) : null}
 
                   {Array.isArray(section.source_titles) && section.source_titles.length ? (
-                    <div className="matrix-outline-card__block">
-                      <div className="matrix-outline-card__label">
-                        <FileText size={15} />
-                        <span>本节参考论文</span>
+                    <div className="matrix-outline-section__references">
+                      <div className="matrix-outline-section__references-head">
+                        <span className="matrix-outline-section__field-label matrix-outline-section__field-label--references">本节参考论文</span>
+                        <span>{`${section.source_titles.length} 篇`}</span>
                       </div>
-                      <div className="matrix-outline-card__tags">
-                        {section.source_titles.map((title, sourceIndex) => <span key={`${section.key}-source-${sourceIndex}`}>{title}</span>)}
-                      </div>
+                      <ol className="matrix-outline-section__reference-list">
+                        {section.source_titles.map((title, sourceIndex) => (
+                          <li key={`${section.key}-source-${sourceIndex}`}>
+                            <span>{`${sourceIndex + 1}`.padStart(2, '0')}</span>
+                            <p>{title}</p>
+                          </li>
+                        ))}
+                      </ol>
                     </div>
                   ) : null}
                 </div>
@@ -2250,15 +3217,24 @@ function ReviewOutlineView({ run, topicGroups = [], activeTopicGroupId = 'all', 
   )
 }
 
-function MatrixInsightsPanel({ busy, run, onRefreshInsights }) {
+function MatrixInsightsPanel({ busy, run, onRefreshInsights, onExport }) {
   const insights = run?.insights || {}
   const status = insights.status || 'idle'
   const consensus = Array.isArray(insights.consensus) ? insights.consensus : []
   const differences = Array.isArray(insights.differences) ? insights.differences : []
   const gaps = Array.isArray(insights.gaps) ? insights.gaps : []
   const hasContent = consensus.length || differences.length || gaps.length
+  const shouldShowAction = Boolean(run?.id) && ['idle', 'stale', 'failed'].includes(status)
+  const actionLabel = status === 'idle' ? '生成导读' : '重新整理'
 
-  if (!run || (!hasContent && status === 'idle')) return null
+  if (!run) {
+    return (
+      <section className="matrix-drafts-empty">
+        <h3>比较导读</h3>
+        <p>先选择一条历史批次，这里会汇总该批次文献之间的共识、分歧和研究空白。</p>
+      </section>
+    )
+  }
 
   return (
     <section className="matrix-insights-panel">
@@ -2277,21 +3253,36 @@ function MatrixInsightsPanel({ busy, run, onRefreshInsights }) {
                     : '当前还没有导读摘要'}
           </span>
         </div>
-        {(status === 'stale' || status === 'failed') ? (
-          <button
-            type="button"
-            className={`matrix-soft-button matrix-soft-button--quiet${status === 'failed' ? ' is-warn' : ''}`}
-            onClick={onRefreshInsights}
-            disabled={busy || !run?.id}
-          >
-            <RefreshCcw size={14} />
-            重新整理
-          </button>
-        ) : null}
+        <div className="matrix-stage-actions">
+          <StageDownloadMenu
+            disabled={busy || !hasContent}
+            label="下载比较导读"
+            items={[
+              { key: 'word', label: 'Word 文档', icon: FileText, onClick: () => onExport?.('word') },
+              { key: 'pdf', label: 'PDF 文档', icon: Download, onClick: () => onExport?.('pdf') },
+            ]}
+          />
+          {shouldShowAction ? (
+            <button
+              type="button"
+              className={`matrix-soft-button matrix-soft-button--quiet${status === 'failed' ? ' is-warn' : ''}`}
+              onClick={onRefreshInsights}
+              disabled={busy || !run?.id}
+            >
+              <RefreshCcw size={14} />
+              重新整理
+            </button>
+          ) : null}
+        </div>
       </div>
 
       {status === 'running' ? (
         <div className="matrix-inline-message is-success">系统正在后台归纳比较导读，新的共识、分歧和研究空白会自动补到这里。</div>
+      ) : null}
+      {status === 'idle' ? (
+        <div className="matrix-insights-panel__empty">
+          当前这批还没有比较导读。点击上方“生成导读”后，这里会展示该批次的共识、分歧和研究空白。
+        </div>
       ) : null}
       {status === 'stale' ? (
         <div className="matrix-inline-message">当前矩阵已经更新过，导读还是旧版本。建议刷新一次，让上面的阅读导向和下面的论文内容保持一致。</div>
@@ -2327,7 +3318,7 @@ function MatrixInsightsPanel({ busy, run, onRefreshInsights }) {
             </article>
           ) : null}
         </div>
-      ) : status !== 'running' ? (
+      ) : status !== 'running' && status !== 'idle' ? (
         <div className="matrix-insights-panel__empty">向下逐篇补充并刷新后，这里会自动汇总当前批次的共识、分歧与研究空白。</div>
       ) : null}
     </section>
@@ -2427,7 +3418,6 @@ export function ResearchMatrixPage({
   const [creatingRun, setCreatingRun] = useState(false)
   const [, startTransition] = useTransition()
   const [showCreateDialog, setShowCreateDialog] = useState(false)
-  const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const [runMenuOpenId, setRunMenuOpenId] = useState(null)
   const [reviewStatuses, setReviewStatuses] = useState(new Map())
   const [showRunPapers, setShowRunPapers] = useState(false)
@@ -2435,7 +3425,6 @@ export function ResearchMatrixPage({
   const [groupingMode, setGroupingMode] = useState('topic_first')
   const [activeStage, setActiveStage] = useState('matrix')
   const [editingCell, setEditingCell] = useState(null)
-  const [savingOutline, setSavingOutline] = useState(false)
   const [rewritingSectionKey, setRewritingSectionKey] = useState('')
   const [preparingDraftSources, setPreparingDraftSources] = useState(false)
   const [editingRunId, setEditingRunId] = useState(null)
@@ -2543,8 +3532,36 @@ export function ResearchMatrixPage({
   }, [activeStage, displayRun?.draft_status, displayRun?.id])
 
   useEffect(() => {
+    if (!currentRun?.id) return
+    if (!displayRun) return
+    if (!['outline', 'drafts', 'integrated'].includes(activeStage)) return
+    if (Number(displayRun?.draft_progress_percent || 0) < 100) return
+    const outlineReady = Boolean(displayRun?.drafts?.review_outline || displayRun?.drafts?.topic_diagnostic)
+    const draftsReady = getOrderedDraftSections(displayRun).some(([, draft]) => (
+      normalizeDraftParagraphs(draft).length
+      || normalizeDraftItems(draft).length
+      || Boolean(draft?.copy_ready)
+    ))
+    const integratedReady = Boolean(
+      displayRun?.drafts?.final_integrated_review?.copy_ready
+      || normalizeDraftParagraphs(displayRun?.drafts?.final_integrated_review).length
+      || displayRun?.drafts?.final_integrated_review?.content
+    )
+    const stageReady = (
+      (activeStage === 'outline' && outlineReady)
+      || (activeStage === 'drafts' && draftsReady)
+      || (activeStage === 'integrated' && integratedReady)
+    )
+    if (stageReady) return
+    fetchResearchMatrixRun(currentRun.id)
+      .then((detail) => {
+        applyRunDetail(detail)
+      })
+      .catch(() => {})
+  }, [activeStage, currentRun?.id, displayRun])
+
+  useEffect(() => {
     const handler = () => {
-      setExportMenuOpen(false)
       setRunMenuOpenId(null)
     }
     document.addEventListener('click', handler)
@@ -2596,7 +3613,6 @@ export function ResearchMatrixPage({
 
   function openCreateDialog() {
     setShowCreateDialog(true)
-    setExportMenuOpen(false)
     setRunMenuOpenId(null)
   }
 
@@ -2718,7 +3734,6 @@ async function handleCreateRunInBackground() {
   async function handleSelectRun(runId) {
     setBusy(true)
     setNotice(null)
-    setExportMenuOpen(false)
     setRunMenuOpenId(null)
     setEditingRunId(null)
     try {
@@ -2930,14 +3945,37 @@ async function handleCreateRunInBackground() {
     })
   }
 
-  function handleExport(format) {
-    setExportMenuOpen(false)
+  async function handleStageExport(stageKey, format) {
     if (!displayRun || displayRun.status !== 'completed') return
-    if (format === 'excel') {
-      exportRunExcel(displayRun)
-      return
+    const stageLabel = WORKFLOW_STAGES.find((stage) => stage.key === stageKey)?.label || '当前内容'
+    setBusy(true)
+    setNotice(null)
+    try {
+      if (stageKey === 'matrix') {
+        exportRunExcel(displayRun)
+        setNotice({ type: 'success', text: '文献矩阵表格已开始下载。' })
+        return
+      }
+
+      const payload = getStageExportPayload(displayRun, stageKey)
+      if (!payload) {
+        setNotice({ type: 'error', text: `${stageLabel} 当前还没有可导出的内容。` })
+        return
+      }
+
+      if (format === 'pdf') {
+        await downloadExportPayloadAsPdf(payload)
+        setNotice({ type: 'success', text: `${stageLabel} 已导出为 PDF。` })
+        return
+      }
+
+      downloadExportPayloadAsWord(payload)
+      setNotice({ type: 'success', text: `${stageLabel} 已导出为 Word。` })
+    } catch (err) {
+      setNotice({ type: 'error', text: err?.message || `${stageLabel} 导出失败，请稍后重试。` })
+    } finally {
+      setBusy(false)
     }
-    exportRunWord(displayRun)
   }
 
   async function handleRefreshInsights() {
@@ -2953,34 +3991,6 @@ async function handleCreateRunInBackground() {
       setNotice({ type: 'error', text: err.message || '刷新比较导读失败' })
     } finally {
       setBusy(false)
-    }
-  }
-
-  async function handleSaveOutline(nextSections) {
-    if (!displayRun?.id || !Array.isArray(nextSections)) return
-    setSavingOutline(true)
-    setNotice(null)
-    try {
-      const payload = {
-        outline_sections: nextSections.map((section) => ({
-          ...section,
-          title: String(section.title || '').trim(),
-          goal: String(section.goal || '').trim(),
-          summary: String(section.summary || '').trim(),
-          points: String(section.points || '')
-            .split('\n')
-            .map((item) => item.trim())
-            .filter(Boolean),
-        })),
-      }
-      const detail = await updateResearchMatrixRunOutline(displayRun.id, payload)
-      setCurrentRun(detail)
-      await loadRuns(false)
-      setNotice({ type: 'success', text: '综述大纲已保存。' })
-    } catch (err) {
-      setNotice({ type: 'error', text: err.message || '保存综述大纲失败' })
-    } finally {
-      setSavingOutline(false)
     }
   }
 
@@ -3041,6 +4051,7 @@ async function handleCreateRunInBackground() {
             busy={busy}
             run={displayRun}
             onRefreshInsights={handleRefreshInsights}
+            onExport={(format) => handleStageExport('insights', format)}
           />
         </section>
       )
@@ -3052,8 +4063,8 @@ async function handleCreateRunInBackground() {
           topicGroups={displayRun?.dashboard?.topic_groups || []}
           activeTopicGroupId={activeTopicGroupId}
           onCopyAll={handleCopyOutline}
-          onSaveOutline={handleSaveOutline}
-          saving={savingOutline}
+          onExport={(format) => handleStageExport('outline', format)}
+          busy={busy}
         />
       )
     }
@@ -3066,6 +4077,8 @@ async function handleCreateRunInBackground() {
           onRewriteSection={handleRewriteDraftSection}
           rewritingSectionKey={rewritingSectionKey}
           onJumpToEvidence={onJumpToPaperEvidence}
+          onExport={(format) => handleStageExport('drafts', format)}
+          busy={busy}
         />
       )
     }
@@ -3077,6 +4090,8 @@ async function handleCreateRunInBackground() {
           onRewriteSection={handleRewriteDraftSection}
           rewritingSectionKey={rewritingSectionKey}
           onJumpToEvidence={onJumpToPaperEvidence}
+          onExport={(format) => handleStageExport('integrated', format)}
+          busy={busy}
         />
       )
     }
@@ -3086,6 +4101,7 @@ async function handleCreateRunInBackground() {
         busy={busy}
         onEditCell={beginEditCell}
         onRefreshInsights={handleRefreshInsights}
+        onDownload={() => handleStageExport('matrix', 'excel')}
       />
     )
   }
@@ -3123,16 +4139,10 @@ async function handleCreateRunInBackground() {
         <MatrixContentHeader
           currentRun={displayRun}
           activeStage={activeStage}
-          exportMenuOpen={exportMenuOpen}
           busy={busy}
           onRetryRun={handleRetryRun}
           onRefreshStatus={handleRefreshCurrentRunStatus}
-          onExport={handleExport}
           onStageChange={setActiveStage}
-          onToggleExportMenu={(event) => {
-            stopMenuBubble(event)
-            setExportMenuOpen((value) => !value)
-          }}
         />
 
         {notice ? (

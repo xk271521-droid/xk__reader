@@ -78,16 +78,6 @@ function buildPaperTitle(fileName) {
   return fileName.replace(/\.pdf$/i, '')
 }
 
-function buildCompactModelLabel(providerLabel) {
-  if (!providerLabel) return '模型准备中'
-  const parts = String(providerLabel)
-    .split('/')
-    .map((part) => part.trim())
-    .filter(Boolean)
-  const rawLabel = parts[1] || parts[0] || ''
-  return rawLabel.replace(/^智谱\s*/i, '').replace(/\s*\(官方\)\s*/g, '').trim() || '模型已连接'
-}
-
 const NOTEBOOK_TEMPLATE_ICON_MAP = {
   blank: NotebookPen,
   default: Layers3,
@@ -1146,7 +1136,6 @@ function NotesPanel({
 
 function AskPanel({
   currentUser,
-  providerLabel,
   asking,
   messages,
   inputText,
@@ -1159,7 +1148,6 @@ function AskPanel({
 }) {
   const listRef = useRef(null)
   const userInitials = (currentUser?.nickname || '我').slice(0, 2).toUpperCase()
-  const modelLabel = useMemo(() => buildCompactModelLabel(providerLabel), [providerLabel])
   const [activeFollowupTabs, setActiveFollowupTabs] = useState({})
   const hasMessages = (messages || []).length > 0
 
@@ -1246,9 +1234,6 @@ function AskPanel({
       <div className="ask-chat__header">
         <div className="ask-chat__header-main">
           <strong className="ask-chat__title">边读边问</strong>
-          <span className="ask-chat__subtitle">
-            {modelLabel}
-          </span>
         </div>
       </div>
 
@@ -2301,6 +2286,7 @@ function QualityLiteratureSummaryPanel({
   providerId,
   onJumpToEvidence,
   onClearAnnotations,
+  initialSummaryId = '',
 }) {
   const pollersRef = useRef(new Map())
   const [activeSummaryId, setActiveSummaryId] = useState('')
@@ -2402,6 +2388,12 @@ function QualityLiteratureSummaryPanel({
   useEffect(() => {
     setExportMenuOpen(false)
   }, [activeSummaryId])
+
+  useEffect(() => {
+    if (initialSummaryId && QUALITY_SUMMARY_TYPES.some((type) => type.id === initialSummaryId)) {
+      setActiveSummaryId(initialSummaryId)
+    }
+  }, [initialSummaryId, paperId])
 
   useEffect(() => {
     annotationFingerprintRef.current = ''
@@ -2837,7 +2829,6 @@ export function SideWorkspacePanel({
   chatInitialSuggestions,
   chatInitialSuggestionsLoading,
   chatFollowupLoadingMessageId,
-  providerLabel,
   uiFontScale = 1,
   onChatInputChange,
   onChatSubmit,
@@ -2845,6 +2836,7 @@ export function SideWorkspacePanel({
   onInsertSummaryNote,
   onJumpToEvidence,
   onClearAnnotations,
+  initialSummaryId = '',
 }) {
   if (!activePanel) return null
 
@@ -2868,7 +2860,6 @@ export function SideWorkspacePanel({
       {activePanel === 'ask' ? (
         <AskPanel
           currentUser={currentUser}
-          providerLabel={providerLabel}
           messages={chatMessages || []}
           inputText={chatInput || ''}
           asking={chatAsking || false}
@@ -2891,6 +2882,7 @@ export function SideWorkspacePanel({
           onJumpToEvidence={onJumpToEvidence}
           onClearAnnotations={onClearAnnotations}
           onInsertSummaryNote={onInsertSummaryNote}
+          initialSummaryId={initialSummaryId}
         />
       ) : null}
     </aside>
