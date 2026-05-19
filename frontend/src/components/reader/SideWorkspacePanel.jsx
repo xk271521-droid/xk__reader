@@ -72,6 +72,7 @@ import {
   TabsList,
   TabsTrigger,
 } from '../ui/tabs'
+import { resolveAssetUrl } from '../../utils/assetUrl'
 
 function buildPaperTitle(fileName) {
   if (!fileName) return 'Untitled paper'
@@ -1148,6 +1149,7 @@ function AskPanel({
 }) {
   const listRef = useRef(null)
   const userInitials = (currentUser?.nickname || '我').slice(0, 2).toUpperCase()
+  const currentUserAvatarSrc = resolveAssetUrl(currentUser?.avatar_url)
   const [activeFollowupTabs, setActiveFollowupTabs] = useState({})
   const hasMessages = (messages || []).length > 0
 
@@ -1159,8 +1161,8 @@ function AskPanel({
 
   function renderAvatar(isUser) {
     if (isUser) {
-      if (currentUser?.avatar_url) {
-        return <img src={currentUser.avatar_url} alt={currentUser.nickname || '用户'} />
+      if (currentUserAvatarSrc) {
+        return <img src={currentUserAvatarSrc} alt={currentUser.nickname || '用户'} />
       }
       return <span>{userInitials}</span>
     }

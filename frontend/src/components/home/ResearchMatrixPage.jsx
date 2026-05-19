@@ -65,6 +65,12 @@ const RUN_STATUS_LABELS = {
 
 const MATRIX_REQUIRED_TYPES = ['review']
 const REVIEW_WORKSPACE_SOURCE_TYPES = ['overview', 'review', 'reproduction']
+const RESEARCH_MATRIX_SESSION_CACHE = {
+  initialized: false,
+  runs: [],
+  currentRunId: null,
+  runDetails: new Map(),
+}
 
 const SUMMARY_TYPE_LABELS = {
   review: '综述卡片',
@@ -112,6 +118,49 @@ function getGroupingModeLabel(mode) {
 
 function isRunProcessing(run) {
   return RUNNING_STATUSES.has(run?.status)
+}
+
+function cloneRunSummary(run) {
+  return run ? { ...run } : run
+}
+
+function shouldRefreshResearchMatrixSession(runs = [], currentRun = null) {
+  if (!RESEARCH_MATRIX_SESSION_CACHE.initialized) return true
+  const knownRuns = [...runs, currentRun].filter(Boolean)
+  return knownRuns.some((run) => (
+    RUNNING_STATUSES.has(run?.status)
+    || run?.draft_status === 'running'
+    || run?.insights?.status === 'running'
+  ))
+}
+
+function getResearchMatrixSessionSnapshot() {
+  const runs = Array.isArray(RESEARCH_MATRIX_SESSION_CACHE.runs)
+    ? RESEARCH_MATRIX_SESSION_CACHE.runs.map(cloneRunSummary).filter(Boolean)
+    : []
+  const runDetails = new Map(RESEARCH_MATRIX_SESSION_CACHE.runDetails)
+  const currentRunId = RESEARCH_MATRIX_SESSION_CACHE.currentRunId
+  const currentRun = currentRunId
+    ? runDetails.get(currentRunId) || runs.find((run) => run.id === currentRunId) || null
+    : runs[0] || null
+  return {
+    currentRun,
+    initialized: RESEARCH_MATRIX_SESSION_CACHE.initialized,
+    runDetails,
+    runs,
+  }
+}
+
+function syncResearchMatrixSessionCache({ currentRun, initialized, runDetails, runs }) {
+  RESEARCH_MATRIX_SESSION_CACHE.initialized = initialized
+  RESEARCH_MATRIX_SESSION_CACHE.runs = Array.isArray(runs)
+    ? runs.map(cloneRunSummary).filter(Boolean)
+    : []
+  RESEARCH_MATRIX_SESSION_CACHE.currentRunId = currentRun?.id || null
+  RESEARCH_MATRIX_SESSION_CACHE.runDetails = new Map(runDetails || [])
+  if (currentRun?.id) {
+    RESEARCH_MATRIX_SESSION_CACHE.runDetails.set(currentRun.id, currentRun)
+  }
 }
 
 function getRunStabilityStatus(run) {
@@ -326,6 +375,30 @@ function getInitialGroupingMode(run, preferredMode = null) {
   if (preferredMode && availableModes.includes(preferredMode)) return preferredMode
   const defaultMode = run?.grouping_mode || 'topic_first'
   return availableModes.includes(defaultMode) ? defaultMode : (availableModes[0] || 'topic_first')
+}
+
+function hasRunDetailPayload(run) {
+  if (!run || typeof run !== 'object') return false
+  if (Array.isArray(run?.matrix?.rows)) return true
+  if (Array.isArray(run?.papers)) return true
+  if (hasObjectEntries(run?.drafts)) return true
+  if (hasObjectEntries(run?.draft_variants)) return true
+  if (hasObjectEntries(run?.dashboard)) return true
+  return false
+}
+
+function stripRunDetail(run) {
+  if (!run || typeof run !== 'object') return run
+  const {
+    matrix,
+    drafts,
+    draft_variants,
+    dashboard,
+    papers,
+    refresh_available,
+    ...summary
+  } = run
+  return summary
 }
 
 function getTopicGroups(run) {
@@ -2046,6 +2119,8 @@ function MatrixRunRail({
   collapsed,
   editingRunId,
   editingRunTitle,
+  loading = false,
+  loadingRunId = null,
   menuOpenId,
   runs,
   onCreateNew,
@@ -2076,6 +2151,7 @@ function MatrixRunRail({
       <div className="matrix-run-rail__list">
         {runs.length ? runs.map((run) => {
           const isActive = activeRunId === run.id
+          const isLoading = loadingRunId === run.id
           const menuOpen = menuOpenId === run.id
           const progressMeta = getRunProgressMeta(run)
           const isRunning = isRunProcessing(run)
@@ -2094,10 +2170,17 @@ function MatrixRunRail({
                 type="button"
                 className="matrix-run-card__main"
                 aria-current={isActive ? 'true' : undefined}
+                aria-busy={isLoading || undefined}
                 onClick={() => onSelectRun(run.id)}
                 title={run.title}
               >
-                <span className={`matrix-run-card__dot${run.has_updates ? ' has-update' : ''}${isRunning ? ' is-running' : ''}${isFailed ? ' is-failed' : ''}`} />
+                {isLoading ? (
+                  <span className="matrix-loading-indicator matrix-loading-indicator--inline" aria-hidden="true">
+                    <LoaderCircle size={16} strokeWidth={1.9} />
+                  </span>
+                ) : (
+                  <span className={`matrix-run-card__dot${run.has_updates ? ' has-update' : ''}${isRunning ? ' is-running' : ''}${isFailed ? ' is-failed' : ''}`} />
+                )}
                 {!collapsed ? (
                   <span className="matrix-run-card__content">
                     {showBadgeRow ? (
@@ -2214,7 +2297,16 @@ function MatrixRunRail({
           )
         }) : (
           <div className="matrix-run-rail__empty">
-            {!collapsed ? <span>还没有矩阵记录</span> : null}
+            {!collapsed ? (
+              loading ? (
+                <div className="matrix-loading-indicator matrix-loading-indicator--stacked" role="status" aria-live="polite">
+                  <LoaderCircle size={22} strokeWidth={1.9} />
+                  <span>正在加载历史批次...</span>
+                </div>
+              ) : (
+                <span>还没有矩阵记录</span>
+              )
+            ) : null}
           </div>
         )}
       </div>
@@ -3401,14 +3493,34 @@ function PendingRunView({ busy, run, onOpenRunPapers, onRetryRun, onRefreshStatu
   )
 }
 
+function RunDetailLoadingView({ run }) {
+  const title = run ? getRunDisplayTitle(run) : '正在加载文献矩阵'
+  return (
+    <section className="research-matrix-table is-empty">
+      <div className="matrix-loading-indicator matrix-loading-indicator--stacked" role="status" aria-live="polite">
+        <LoaderCircle size={28} strokeWidth={1.9} />
+        <span>正在加载中...</span>
+      </div>
+      <h3>{title}</h3>
+      <p>{run ? '正在加载这个批次的矩阵和草稿内容，左侧批次已切换完成，内容会在准备好后自动显示。' : '正在准备文献矩阵页面内容，请稍候。'}</p>
+    </section>
+  )
+}
+
 export function ResearchMatrixPage({
   folders = [],
   onJumpToPaperEvidence,
   recentPapers = [],
   uncategorizedFolderId,
 }) {
-  const [runs, setRuns] = useState([])
-  const [currentRun, setCurrentRun] = useState(null)
+  const initialSessionRef = useRef(getResearchMatrixSessionSnapshot())
+  const initialSessionSnapshot = initialSessionRef.current
+  const [runs, setRuns] = useState(() => initialSessionSnapshot.runs)
+  const [currentRun, setCurrentRun] = useState(() => initialSessionSnapshot.currentRun)
+  const [initialLoading, setInitialLoading] = useState(() => !initialSessionSnapshot.initialized)
+  const [loadingRunId, setLoadingRunId] = useState(null)
+  const runDetailsRef = useRef(new Map(initialSessionSnapshot.runDetails))
+  const inFlightRunDetailsRef = useRef(new Map())
   const [selectedIds, setSelectedIds] = useState(() => new Set())
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedFolderId, setSelectedFolderId] = useState('all')
@@ -3448,22 +3560,91 @@ export function ResearchMatrixPage({
     [currentRun?.insights?.status, runs],
   )
 
-  const displayRun = currentRun
+  const displayRun = useMemo(() => {
+    if (!currentRun) return null
+    const runForMode = buildRunForGroupingMode(currentRun, groupingMode)
+    return filterRunByTopicGroup(runForMode, activeTopicGroupId)
+  }, [activeTopicGroupId, currentRun, groupingMode])
 
-  function applyRunDetail(detail) {
+  const currentRunHasDetail = hasRunDetailPayload(currentRun)
+
+  useEffect(() => {
+    syncResearchMatrixSessionCache({
+      currentRun,
+      initialized: !initialLoading || RESEARCH_MATRIX_SESSION_CACHE.initialized,
+      runDetails: runDetailsRef.current,
+      runs,
+    })
+  }, [currentRun, initialLoading, runs])
+
+  function applyRunDetail(detail, options = {}) {
     if (!detail?.id) return
-    setCurrentRun(detail)
+    const { setAsCurrent = true } = options
+    setLoadingRunId((current) => (current === detail.id ? null : current))
+    runDetailsRef.current.set(detail.id, detail)
+    if (setAsCurrent) {
+      setCurrentRun(detail)
+    }
+    const nextSummary = stripRunDetail(detail)
     setRuns((previous) => {
       const exists = previous.some((run) => run.id === detail.id)
       const nextRuns = exists
-        ? previous.map((run) => (run.id === detail.id ? { ...run, ...detail } : run))
-        : [detail, ...previous]
+        ? previous.map((run) => (run.id === detail.id ? { ...run, ...nextSummary } : run))
+        : [nextSummary, ...previous]
       return nextRuns
     })
   }
 
+  function getKnownRun(runId) {
+    if (!runId) return null
+    if (currentRun?.id === runId) return currentRun
+    return runDetailsRef.current.get(runId) || runs.find((run) => run.id === runId) || null
+  }
+
+  async function fetchRunDetailCached(runId) {
+    const existing = inFlightRunDetailsRef.current.get(runId)
+    if (existing) return existing
+    const request = fetchResearchMatrixRun(runId)
+      .finally(() => {
+        inFlightRunDetailsRef.current.delete(runId)
+      })
+    inFlightRunDetailsRef.current.set(runId, request)
+    return request
+  }
+
+  function selectRunLocally(run, options = {}) {
+    if (!run?.id) return
+    const { resetStage = true } = options
+    setCurrentRun(run)
+    setActiveTopicGroupId('all')
+    setGroupingMode((current) => getInitialGroupingMode(run, current))
+    if (resetStage) {
+      setActiveStage('matrix')
+    }
+  }
+
   useEffect(() => {
     let cancelled = false
+    const cachedRuns = initialSessionSnapshot.runs
+    const cachedCurrentRun = initialSessionSnapshot.currentRun
+    const selectedRunId = cachedCurrentRun?.id || cachedRuns[0]?.id || null
+    const needsCurrentRunDetail = Boolean(selectedRunId) && !hasRunDetailPayload(cachedCurrentRun)
+    const shouldRefresh = shouldRefreshResearchMatrixSession(cachedRuns, cachedCurrentRun)
+
+    async function hydrateCurrentRunDetail(runId) {
+      setLoadingRunId(runId)
+      try {
+        const detail = await fetchRunDetailCached(runId)
+        if (cancelled) return
+        applyRunDetail(detail)
+        if (detail?.has_deleted_papers && detail?.deleted_paper_message) {
+          setNotice({ type: 'error', text: detail.deleted_paper_message })
+        }
+      } catch (err) {
+        if (!cancelled) setNotice({ type: 'error', text: err.message || '加载批次详情失败' })
+      }
+    }
+
     async function load() {
       try {
         const runPayload = await fetchResearchMatrixRuns()
@@ -3471,22 +3652,35 @@ export function ResearchMatrixPage({
         const nextRuns = runPayload?.runs || []
         setRuns(nextRuns)
         if (nextRuns[0]) {
-          const detail = await fetchResearchMatrixRun(nextRuns[0].id)
-          if (!cancelled) {
-            applyRunDetail(detail)
-            setActiveTopicGroupId('all')
-            setGroupingMode(getInitialGroupingMode(detail))
-            setActiveStage('matrix')
-            if (detail?.has_deleted_papers && detail?.deleted_paper_message) {
-              setNotice({ type: 'error', text: detail.deleted_paper_message })
-            }
-          }
+          setLoadingRunId(nextRuns[0].id)
+          selectRunLocally(nextRuns[0])
+          fetchRunDetailCached(nextRuns[0].id)
+            .then((detail) => {
+              if (cancelled) return
+              applyRunDetail(detail)
+              if (detail?.has_deleted_papers && detail?.deleted_paper_message) {
+                setNotice({ type: 'error', text: detail.deleted_paper_message })
+              }
+            })
+            .catch((err) => {
+              if (!cancelled) setNotice({ type: 'error', text: err.message || '鍔犺浇鏂囩尞鐭╅樀澶辫触' })
+            })
         }
       } catch (err) {
         if (!cancelled) setNotice({ type: 'error', text: err.message || '加载文献矩阵失败' })
       }
     }
-    load()
+    if (!shouldRefresh) {
+      if (needsCurrentRunDetail) {
+        hydrateCurrentRunDetail(selectedRunId)
+      }
+      return () => {
+        cancelled = true
+      }
+    }
+    load().finally(() => {
+      if (!cancelled) setInitialLoading(false)
+    })
     return () => {
       cancelled = true
     }
@@ -3553,7 +3747,7 @@ export function ResearchMatrixPage({
       || (activeStage === 'integrated' && integratedReady)
     )
     if (stageReady) return
-    fetchResearchMatrixRun(currentRun.id)
+    fetchRunDetailCached(currentRun.id)
       .then((detail) => {
         applyRunDetail(detail)
       })
@@ -3577,11 +3771,11 @@ export function ResearchMatrixPage({
       try {
         const [runPayload, detail] = await Promise.all([
           fetchResearchMatrixRuns(),
-          currentRun?.id ? fetchResearchMatrixRun(currentRun.id) : Promise.resolve(null),
+          currentRun?.id ? fetchRunDetailCached(currentRun.id) : Promise.resolve(null),
         ])
         if (cancelled) return
         const detailMap = new Map()
-        if (detail?.id) detailMap.set(detail.id, detail)
+        if (detail?.id) detailMap.set(detail.id, stripRunDetail(detail))
         const nextRuns = (runPayload?.runs || []).map((run) => detailMap.get(run.id) || run)
         setRuns(nextRuns)
         if (detail?.id && !cancelled) {
@@ -3632,10 +3826,9 @@ export function ResearchMatrixPage({
     const nextRuns = payload?.runs || []
     setRuns(nextRuns)
     if (selectFirst && nextRuns[0]) {
-      const detail = await fetchResearchMatrixRun(nextRuns[0].id)
+      selectRunLocally(nextRuns[0], { resetStage: false })
+      const detail = await fetchRunDetailCached(nextRuns[0].id)
       applyRunDetail(detail)
-      setActiveTopicGroupId('all')
-      setGroupingMode(getInitialGroupingMode(detail))
     }
     if (selectFirst && !nextRuns.length) {
       setCurrentRun(null)
@@ -3644,13 +3837,20 @@ export function ResearchMatrixPage({
   }
 
   async function openRunPapers(runId) {
-    setBusy(true)
     setNotice(null)
+    const knownRun = getKnownRun(runId)
+    if (knownRun) {
+      selectRunLocally(knownRun, { resetStage: false })
+      setShowRunPapers(true)
+      setRunMenuOpenId(null)
+      if (hasRunDetailPayload(knownRun) && !isRunProcessing(knownRun)) return
+    }
+    setLoadingRunId(runId)
+    setBusy(true)
     try {
-      const detail = currentRun?.id === runId ? currentRun : await fetchResearchMatrixRun(runId)
+      const detail = await fetchRunDetailCached(runId)
       applyRunDetail(detail)
-      setActiveTopicGroupId('all')
-      setGroupingMode(getInitialGroupingMode(detail))
+      selectRunLocally(detail, { resetStage: false })
       setShowRunPapers(true)
       setRunMenuOpenId(null)
     } catch (err) {
@@ -3712,10 +3912,9 @@ async function handleCreateRunInBackground() {
       })
       if (!preserveCurrentView) {
         applyRunDetail(detail)
-        setActiveTopicGroupId('all')
-        setActiveStage('matrix')
+        selectRunLocally(detail)
       }
-      setRuns((previous) => [detail, ...previous.filter((run) => run.id !== detail.id)])
+      setRuns((previous) => [stripRunDetail(detail), ...previous.filter((run) => run.id !== detail.id)])
       loadRuns(false).catch(() => {})
       setNotice({
         type: 'success',
@@ -3732,15 +3931,25 @@ async function handleCreateRunInBackground() {
   }
 
   async function handleSelectRun(runId) {
-    setBusy(true)
     setNotice(null)
     setRunMenuOpenId(null)
     setEditingRunId(null)
+    const knownRun = getKnownRun(runId)
+    if (knownRun) {
+      selectRunLocally(knownRun)
+      if (hasRunDetailPayload(knownRun) && !isRunProcessing(knownRun) && !knownRun?.has_updates) {
+        if (knownRun?.has_deleted_papers && knownRun?.deleted_paper_message) {
+          setNotice({ type: 'error', text: knownRun.deleted_paper_message })
+        }
+        return
+      }
+    }
+    setLoadingRunId(runId)
+    setBusy(true)
     try {
-      const detail = await fetchResearchMatrixRun(runId)
+      const detail = await fetchRunDetailCached(runId)
       applyRunDetail(detail)
-      setActiveTopicGroupId('all')
-      setActiveStage('matrix')
+      selectRunLocally(detail)
       if (detail?.has_deleted_papers && detail?.deleted_paper_message) {
         setNotice({ type: 'error', text: detail.deleted_paper_message })
       }
@@ -3756,7 +3965,7 @@ async function handleCreateRunInBackground() {
     setBusy(true)
     setNotice(null)
     try {
-      const latestRun = await fetchResearchMatrixRun(currentRun.id)
+      const latestRun = await fetchRunDetailCached(currentRun.id)
       if (latestRun?.has_deleted_papers) {
         applyRunDetail(latestRun)
         setNotice({ type: 'error', text: latestRun.deleted_paper_message || '当前批次引用的原论文已删除，请重新建批次。' })
@@ -3782,7 +3991,7 @@ async function handleCreateRunInBackground() {
     setNotice(null)
     setRunMenuOpenId(null)
     try {
-      const latestRun = await fetchResearchMatrixRun(targetRunId)
+      const latestRun = await fetchRunDetailCached(targetRunId)
       if (latestRun?.has_deleted_papers) {
         if (currentRun?.id === targetRunId) {
           applyRunDetail(latestRun)
@@ -3798,8 +4007,7 @@ async function handleCreateRunInBackground() {
         grouping_mode: groupingMode,
       })
       applyRunDetail(detail)
-      setActiveTopicGroupId('all')
-      setActiveStage('matrix')
+      selectRunLocally(detail)
       loadRuns(false).catch(() => {})
       setNotice({
         type: 'success',
@@ -3831,15 +4039,15 @@ async function handleCreateRunInBackground() {
     setNotice(null)
     setRunMenuOpenId(null)
     try {
-      const latestRun = await fetchResearchMatrixRun(runId)
+      const latestRun = await fetchRunDetailCached(runId)
       if (latestRun?.has_deleted_papers) {
-        setCurrentRun(latestRun)
+        applyRunDetail(latestRun)
         setNotice({ type: 'error', text: latestRun.deleted_paper_message || '当前批次引用的原论文已删除，请重新建批次。' })
         return
       }
       const detail = await retryPendingResearchMatrixRun(runId)
       if (currentRun?.id === runId) {
-        setCurrentRun(detail)
+        applyRunDetail(detail)
         setActiveStage('matrix')
       }
       await loadRuns(false)
@@ -3883,7 +4091,7 @@ async function handleCreateRunInBackground() {
     try {
       const detail = await updateResearchMatrixRun(runId, { title: nextTitle })
       if (currentRun?.id === runId) {
-        setCurrentRun(detail)
+        applyRunDetail(detail)
       }
       await loadRuns(false)
       setEditingRunId(null)
@@ -3905,7 +4113,7 @@ async function handleCreateRunInBackground() {
         ? { run_field_updates: { [editingCell.fieldKey]: nextValue } }
         : { paper_field_updates: { [editingCell.fieldKey]: nextValue } }
       const detail = await updateResearchMatrixRunPaper(currentRun.id, editingCell.paperId, payload)
-      setCurrentRun(detail)
+      applyRunDetail(detail)
       setEditingCell(null)
       await loadRuns(false)
       setNotice({
@@ -3984,7 +4192,7 @@ async function handleCreateRunInBackground() {
     setNotice(null)
     try {
       const detail = await refreshResearchMatrixInsights(currentRun.id)
-      setCurrentRun(detail)
+      applyRunDetail(detail)
       await loadRuns(false)
       setNotice({ type: 'success', text: '比较导读已开始刷新。' })
     } catch (err) {
@@ -4000,7 +4208,7 @@ async function handleCreateRunInBackground() {
     setNotice(null)
     try {
       const detail = await rewriteResearchMatrixDraftSection(displayRun.id, { section_key: sectionKey })
-      setCurrentRun(detail)
+      applyRunDetail(detail)
       await loadRuns(false)
       setNotice({ type: 'success', text: '本节草稿已基于当前证据重新整理。' })
     } catch (err) {
@@ -4018,7 +4226,7 @@ async function handleCreateRunInBackground() {
       const detail = await prepareResearchMatrixDraftSources(displayRun.id, {
         summary_types: ['overview', 'reproduction'],
       })
-      setCurrentRun(detail)
+      applyRunDetail(detail)
       await loadRuns(false)
     } catch (err) {
       setNotice({ type: 'error', text: err.message || '准备综述来源卡失败' })
@@ -4033,6 +4241,9 @@ async function handleCreateRunInBackground() {
   }
 
   function renderStageContent() {
+    if (initialLoading && !currentRun) {
+      return <RunDetailLoadingView run={null} />
+    }
     if (currentRun && currentRun.status !== 'completed') {
       return (
         <PendingRunView
@@ -4043,6 +4254,9 @@ async function handleCreateRunInBackground() {
           onRefreshStatus={handleRefreshCurrentRunStatus}
         />
       )
+    }
+    if (currentRun && !currentRunHasDetail) {
+      return <RunDetailLoadingView run={currentRun} />
     }
     if (activeStage === 'insights') {
       return (
@@ -4113,6 +4327,8 @@ async function handleCreateRunInBackground() {
         collapsed={railCollapsed}
         editingRunId={editingRunId}
         editingRunTitle={editingRunTitle}
+        loading={initialLoading}
+        loadingRunId={loadingRunId}
         menuOpenId={runMenuOpenId}
         runs={runs}
         onCreateNew={openCreateDialog}

@@ -4117,11 +4117,94 @@ def inspect_run_source_state(db: Session, run: ResearchMatrixRun, user_id: int) 
     }
 
 
-def serialize_run_list_item(db: Session, run: ResearchMatrixRun, user_id: int) -> dict[str, Any]:
+def build_run_source_state_map(
+    db: Session,
+    runs: list[ResearchMatrixRun],
+    user_id: int,
+) -> dict[int, dict[str, Any]]:
+    if not runs:
+        return {}
+
+    all_paper_ids: list[int] = []
+    seen_paper_ids: set[int] = set()
+    for run in runs:
+        for item in run.papers:
+            if not item.paper_id or item.paper_id in seen_paper_ids:
+                continue
+            seen_paper_ids.add(item.paper_id)
+            all_paper_ids.append(item.paper_id)
+
+    papers = {paper.id: paper for paper in get_owned_papers(db, user_id, all_paper_ids)}
+    summaries = get_summaries_by_paper(db, user_id, all_paper_ids)
+    states: dict[int, dict[str, Any]] = {}
+
+    for run in runs:
+        paper_ids = [item.paper_id for item in run.papers if item.paper_id]
+        if not paper_ids:
+            states[run.id] = {
+                "has_deleted_papers": False,
+                "deleted_paper_count": 0,
+                "deleted_paper_message": None,
+                "has_updates": False,
+            }
+            continue
+
+        deleted_items = [item for item in run.papers if item.paper_id and item.paper_id not in papers]
+        has_deleted_papers = bool(deleted_items)
+        deleted_paper_message = DELETED_SOURCE_PAPER_MESSAGE if has_deleted_papers else None
+
+        if run.status in {"queued", "running"} or has_deleted_papers:
+            states[run.id] = {
+                "has_deleted_papers": has_deleted_papers,
+                "deleted_paper_count": len(deleted_items),
+                "deleted_paper_message": deleted_paper_message,
+                "has_updates": False,
+            }
+            continue
+
+        has_updates = False
+        for item in run.papers:
+            if not item.paper_id:
+                continue
+            paper = papers.get(item.paper_id)
+            if not paper:
+                continue
+            current = summaries.get((item.paper_id, "review"))
+            if not current:
+                if not item.is_missing:
+                    has_updates = True
+                    break
+                continue
+            if current.status != item.summary_status:
+                has_updates = True
+                break
+            if (iso(current.updated_at) or "") != (item.summary_updated_at or ""):
+                has_updates = True
+                break
+            if is_summary_stale(db, paper, current) != bool(item.is_stale):
+                has_updates = True
+                break
+
+        states[run.id] = {
+            "has_deleted_papers": False,
+            "deleted_paper_count": 0,
+            "deleted_paper_message": None,
+            "has_updates": has_updates,
+        }
+
+    return states
+
+
+def serialize_run_list_item(
+    db: Session,
+    run: ResearchMatrixRun,
+    user_id: int,
+    source_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     run = normalize_run_runtime_state(db, run)
     missing_count = sum(1 for item in run.papers if item.is_missing)
     stale_count = sum(1 for item in run.papers if item.is_stale)
-    source_state = inspect_run_source_state(db, run, user_id)
+    source_state = source_state or inspect_run_source_state(db, run, user_id)
     draft_state = serialize_draft_state(run)
     preferred_mode = str((run.config_json or {}).get("grouping_mode") or "topic_first")
     _variants, available_modes, _active_mode = unpack_mode_variant_snapshot(run.drafts_snapshot or {}, preferred_mode=preferred_mode)
@@ -4203,7 +4286,7 @@ def serialize_run_detail(db: Session, run: ResearchMatrixRun, user_id: int) -> d
     )
     selected_drafts = variants.get(base["grouping_mode"]) or variants.get(active_mode) or drafts_snapshot
     dashboard_snapshot = run.dashboard_snapshot or {}
-    if not dashboard_snapshot:
+    if not dashboard_snapshot and run.status == "completed":
         dashboard_snapshot = build_dashboard_snapshot(
             db,
             user_id,
@@ -4211,6 +4294,10 @@ def serialize_run_detail(db: Session, run: ResearchMatrixRun, user_id: int) -> d
             list((run.matrix_snapshot or {}).get("missing") or []),
             list((run.matrix_snapshot or {}).get("stale") or []),
         )
+        run.dashboard_snapshot = dashboard_snapshot
+        db.add(run)
+        db.commit()
+        db.refresh(run)
     return {
         **base,
         **draft_state,

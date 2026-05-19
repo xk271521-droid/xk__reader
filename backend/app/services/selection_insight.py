@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import List
 
-from sqlalchemy import select
+from app.models import AiProvider
 
 from app.schemas.selection import (
     SelectionGlossaryItem,
@@ -211,44 +211,28 @@ def _ai_explanation_or_fallback(
     glossary: List[SelectionGlossaryItem],
     summary: str | None,
     context: str,
-    provider_id: int | None,
+    provider: AiProvider | None,
+    api_key: str = "",
 ) -> str:
-    if not provider_id:
+    if not provider or not api_key:
         return _ai_oops() + FRIENDLY_HINT
 
     if not summary or not summary.strip():
         return _ai_oops() + "\n\n> 还没生成论文摘要，AI 暂时没有上下文可以参考。先读完或者生成摘要再试～"
 
     try:
-        from app.db.session import SessionLocal
-        from app.models.ai_provider import AiProvider
-        from app.services.crypto import decrypt_api_key
         from app.services.llm import explain_selection
 
-        db = SessionLocal()
-        try:
-            provider = db.scalar(
-                select(AiProvider).where(
-                    AiProvider.id == provider_id,
-                    AiProvider.is_active.is_(True),
-                )
-            )
-            if not provider:
-                return _ai_oops()
-
-            api_key = decrypt_api_key(provider.encrypted_api_key)
-            result = explain_selection(
-                base_url=provider.base_url,
-                api_key=api_key,
-                model=provider.model,
-                selected_text=text,
-                summary=summary,
-                context=context,
-            )
-            if result:
-                return result
-        finally:
-            db.close()
+        result = explain_selection(
+            base_url=provider.base_url,
+            api_key=api_key,
+            model=provider.model,
+            selected_text=text,
+            summary=summary,
+            context=context,
+        )
+        if result:
+            return result
     except Exception:
         pass
 

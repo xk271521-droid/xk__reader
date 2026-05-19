@@ -97,6 +97,13 @@ export function usePdfSearch(readerRef, { pdfDocument = null, pageNumbers = [] }
     setMatchIndex(nextIndex)
   }, [])
 
+  const resetMatchesState = useCallback(() => {
+    matchesRef.current = []
+    matchIndexRef.current = -1
+    setMatches([])
+    setMatchIndex(-1)
+  }, [])
+
   const performSearch = useCallback((term, pageIndexes) => {
     if (pageIndexes?.length) {
       renderedPageIndexesRef.current = pageIndexes
@@ -111,18 +118,28 @@ export function usePdfSearch(readerRef, { pdfDocument = null, pageNumbers = [] }
 
   useEffect(() => {
     let cancelled = false
+    const resetTimer = window.setTimeout(() => {
+      if (cancelled) return
+      resetMatchesState()
+    }, 0)
+
     pageIndexesRef.current = []
     renderedPageIndexesRef.current = []
-    setMatches([])
-    setMatchIndex(-1)
 
-    if (!pdfDocument || !pageNumbers.length) {
-      return undefined
+    const stablePageNumbers = pageNumbersKey
+      ? pageNumbersKey.split(',').map((value) => Number(value)).filter((value) => !Number.isNaN(value))
+      : []
+
+    if (!pdfDocument || !stablePageNumbers.length) {
+      return () => {
+        cancelled = true
+        window.clearTimeout(resetTimer)
+      }
     }
 
     async function buildDocumentSearchIndex() {
       const nextIndexes = []
-      for (const pageNum of pageNumbers) {
+      for (const pageNum of stablePageNumbers) {
         if (cancelled) return
         const page = await pdfDocument.getPage(pageNum)
         if (cancelled) return
@@ -148,26 +165,29 @@ export function usePdfSearch(readerRef, { pdfDocument = null, pageNumbers = [] }
 
     return () => {
       cancelled = true
+      window.clearTimeout(resetTimer)
     }
-  }, [pdfDocument, pageNumbersKey, runSearch])
+  }, [pageNumbersKey, pdfDocument, resetMatchesState, runSearch])
 
-  function goToMatch(idx) {
-    if (idx < 0 || idx >= matches.length) return
+  const goToMatch = useCallback((idx) => {
+    if (idx < 0 || idx >= matchesRef.current.length) return
     matchIndexRef.current = idx
     setMatchIndex(idx)
-  }
+  }, [])
 
   const goNext = useCallback(() => {
-    if (matches.length === 0) return
-    const next = (matchIndex + 1) % matches.length
+    const totalMatches = matchesRef.current.length
+    if (totalMatches === 0) return
+    const next = (matchIndexRef.current + 1) % totalMatches
     goToMatch(next)
-  }, [matches, matchIndex])
+  }, [goToMatch])
 
   const goPrev = useCallback(() => {
-    if (matches.length === 0) return
-    const prev = matchIndex <= 0 ? matches.length - 1 : matchIndex - 1
+    const totalMatches = matchesRef.current.length
+    if (totalMatches === 0) return
+    const prev = matchIndexRef.current <= 0 ? totalMatches - 1 : matchIndexRef.current - 1
     goToMatch(prev)
-  }, [matches, matchIndex])
+  }, [goToMatch])
 
   const handleSearchChange = useCallback((term) => {
     setSearchTerm(term)

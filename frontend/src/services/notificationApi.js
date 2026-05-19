@@ -52,3 +52,19 @@ export async function markAllNotificationsRead() {
   })
   return parseJsonResponse(response)
 }
+
+export async function deleteNotification(notificationId) {
+  const response = await fetch(`/api/notifications/${notificationId}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function clearAllNotifications() {
+  const response = await fetch('/api/notifications', {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}

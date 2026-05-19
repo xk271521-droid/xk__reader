@@ -33,6 +33,7 @@ from app.services.research_matrix import (
     DELETED_SOURCE_PAPER_MESSAGE,
     WORKER_MAX_RETRIES,
     build_dashboard_snapshot,
+    build_run_source_state_map,
     create_matrix_run,
     ensure_unique_paper_ids,
     get_owned_papers,
@@ -131,8 +132,17 @@ def list_matrix_runs(
     for run in runs:
         if run.status == "queued":
             _spawn_matrix_run_task(run.id, None)
+    source_state_map = build_run_source_state_map(db, runs, current_user.id)
     return ResearchMatrixRunListResponse(
-        runs=[serialize_run_list_item(db, run, current_user.id) for run in runs]
+        runs=[
+            serialize_run_list_item(
+                db,
+                run,
+                current_user.id,
+                source_state=source_state_map.get(run.id),
+            )
+            for run in runs
+        ]
     )
 
 

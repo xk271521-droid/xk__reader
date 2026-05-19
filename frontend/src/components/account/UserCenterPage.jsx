@@ -21,6 +21,7 @@ import {
   UI_FONT_SIZE_MIN,
   UI_FONT_SIZE_STEP,
 } from '../../services/uiPreferences'
+import { resolveAssetUrl } from '../../utils/assetUrl'
 
 const NAV_ITEMS = [
   { key: 'profile', label: '个人信息', icon: UserRound },
@@ -73,6 +74,7 @@ export function UserCenterPage({
   onUiFontSizeChange,
   onUploadAvatar,
 }) {
+  const avatarSrc = resolveAssetUrl(currentUser?.avatar_url)
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState('')
   const [isSaving, setIsSaving] = useState(false)
@@ -231,8 +233,8 @@ export function UserCenterPage({
               <div className="account-profile-card">
                 <div className="account-profile-card__hero">
                   <div className="account-avatar">
-                    {currentUser?.avatar_url ? (
-                      <img src={currentUser.avatar_url} alt={currentUser.nickname || '用户头像'} />
+                    {avatarSrc ? (
+                      <img src={avatarSrc} alt={currentUser.nickname || '用户头像'} />
                     ) : (
                       initials
                     )}

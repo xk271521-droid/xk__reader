@@ -3,14 +3,34 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
+from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", encoding="utf-8-sig")
 
 
 def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_database_url() -> str:
+    explicit_url = os.getenv("DATABASE_URL", "").strip()
+    if explicit_url:
+        return explicit_url
+
+    driver = os.getenv("DB_DRIVER", "mysql+pymysql").strip() or "mysql+pymysql"
+    user = quote_plus(os.getenv("DB_USER", "root"))
+    password = quote_plus(os.getenv("DB_PASSWORD", "123456"))
+    host = os.getenv("DB_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    port = os.getenv("DB_PORT", "3306").strip() or "3306"
+    name = os.getenv("DB_NAME", "xk_reader").strip() or "xk_reader"
+    charset = os.getenv("DB_CHARSET", "utf8mb4").strip() or "utf8mb4"
+    return f"{driver}://{user}:{password}@{host}:{port}/{name}?charset={charset}"
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -19,6 +39,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 @dataclass(frozen=True)
 class Settings:
     app_name: str = "Paper Reader MVP API"
+    app_env: str = os.getenv("APP_ENV", "development").strip().lower() or "development"
     allowed_origins: tuple[str, ...] = field(
         default_factory=lambda: _split_csv(
             os.getenv(
@@ -42,10 +63,7 @@ class Settings:
             )
         )
     )
-    database_url: str = os.getenv(
-        "DATABASE_URL",
-        "mysql+pymysql://root:123456@127.0.0.1:3306/xk_reader?charset=utf8mb4",
-    )
+    database_url: str = _build_database_url()
     database_pool_recycle_seconds: int = int(
         os.getenv("DATABASE_POOL_RECYCLE_SECONDS", "1800")
     )
@@ -111,6 +129,16 @@ class Settings:
     avatar_upload_dir: str = os.getenv("AVATAR_UPLOAD_DIR", str(BASE_DIR / "uploads" / "avatars"))
     avatar_max_size_bytes: int = int(os.getenv("AVATAR_MAX_SIZE_BYTES", str(2 * 1024 * 1024)))
     papers_upload_dir: str = os.getenv("PAPERS_UPLOAD_DIR", str(BASE_DIR / "uploads" / "papers"))
+    papers_max_size_bytes: int = int(os.getenv("PAPERS_MAX_SIZE_BYTES", str(25 * 1024 * 1024)))
+    translation_debug_log_enabled: bool = _env_flag("TRANSLATION_DEBUG_LOG_ENABLED", "false")
+    startup_schema_sync_enabled: bool = _env_flag("STARTUP_SCHEMA_SYNC_ENABLED", "true")
+    upload_mirror_enabled: bool = _env_flag("UPLOAD_MIRROR_ENABLED", "false")
+    upload_mirror_remote_dir: str = os.getenv("UPLOAD_MIRROR_REMOTE_DIR", "/www/xk-reader/backend/uploads")
+    upload_mirror_sftp_host: str = os.getenv("UPLOAD_MIRROR_SFTP_HOST", "")
+    upload_mirror_sftp_port: int = int(os.getenv("UPLOAD_MIRROR_SFTP_PORT", "22"))
+    upload_mirror_sftp_username: str = os.getenv("UPLOAD_MIRROR_SFTP_USERNAME", "")
+    upload_mirror_sftp_password: str = os.getenv("UPLOAD_MIRROR_SFTP_PASSWORD", "")
+    upload_mirror_timeout_seconds: int = int(os.getenv("UPLOAD_MIRROR_TIMEOUT_SECONDS", "15"))
     baidu_translate_appid: str = os.getenv("BAIDU_TRANSLATE_APPID", "")
     baidu_translate_secret: str = os.getenv("BAIDU_TRANSLATE_SECRET", "")
     aliyun_docmind_enabled: bool = os.getenv("ALIYUN_DOCMIND_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
@@ -199,6 +227,21 @@ class Settings:
             and self.tencent_sms_sign_name
             and self.tencent_sms_template_id
         )
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env in {"production", "prod"}
+
+    def validate_runtime(self) -> tuple[str, ...]:
+        issues: list[str] = []
+        if self.is_production:
+            if self.secret_key == "change-me-before-production":
+                issues.append("SECRET_KEY must be set in production.")
+            if self.jwt_secret_key == "change-me-before-production":
+                issues.append("JWT_SECRET_KEY must be set in production.")
+            if not os.getenv("DATABASE_URL", "").strip() and os.getenv("DB_PASSWORD", "123456").strip() == "123456":
+                issues.append("DB_PASSWORD must be changed or DATABASE_URL must be provided in production.")
+        return tuple(issues)
 
     @property
     def system_providers(self) -> list[dict[str, str]]:

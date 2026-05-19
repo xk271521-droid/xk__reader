@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models import AiProvider, Annotation, Paper, PaperFullTranslation, PaperSummary
 from app.schemas.paper_summary import normalize_summary_content
+from app.services.ai_provider_manager import resolve_user_provider
 from app.services.crypto import decrypt_api_key
 from app.services.notification import compact_notification_text, create_notification
 
@@ -431,22 +432,12 @@ def summary_title(summary_type: str) -> str:
 
 
 def load_available_provider(db: Session, user_id: int, provider_id: int | None = None) -> AiProvider | None:
-    owned_or_system = (AiProvider.user_id == user_id) | (AiProvider.user_id.is_(None))
-    if provider_id:
-        provider = db.scalar(
-            select(AiProvider).where(
-                AiProvider.id == provider_id,
-                AiProvider.is_active.is_(True),
-                owned_or_system,
-            )
-        )
-        if provider:
-            return provider
-    return db.scalar(
-        select(AiProvider)
-        .where(AiProvider.is_active.is_(True), owned_or_system)
-        .order_by(AiProvider.user_id.is_(None), AiProvider.sort_order, AiProvider.id)
-        .limit(1)
+    return resolve_user_provider(
+        db,
+        user_id,
+        provider_id,
+        require_active=True,
+        fallback_to_active=True,
     )
 
 

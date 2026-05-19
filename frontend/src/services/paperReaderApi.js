@@ -64,7 +64,9 @@ export async function deleteFolder(id) {
     try {
       const payload = await response.json()
       if (typeof payload?.detail === 'string') detail = payload.detail
-    } catch {}
+    } catch {
+      void 0
+    }
     throw new Error(detail)
   }
   return null
@@ -120,7 +122,9 @@ export async function deletePaper(id) {
     try {
       const payload = await response.json()
       if (typeof payload?.detail === 'string') detail = payload.detail
-    } catch {}
+    } catch {
+      void 0
+    }
     throw new Error(detail)
   }
   return null
@@ -151,7 +155,9 @@ export async function permanentlyDeletePaper(id) {
     try {
       const payload = await response.json()
       if (typeof payload?.detail === 'string') detail = payload.detail
-    } catch {}
+    } catch {
+      void 0
+    }
     throw new Error(detail)
   }
   return null
@@ -416,7 +422,9 @@ export async function deleteResearchMatrixRun(runId) {
     try {
       const payload = await response.json()
       if (typeof payload?.detail === 'string') detail = payload.detail
-    } catch {}
+    } catch {
+      void 0
+    }
     throw new Error(detail)
   }
   return null
@@ -454,6 +462,7 @@ export async function fetchSelectionInsight(payload) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...authHeaders(),
     },
     body: JSON.stringify(payload),
   })
@@ -463,7 +472,7 @@ export async function fetchSelectionInsight(payload) {
 export async function fetchSelectionInsightExplain(payload) {
   const response = await fetch('/api/selection-insight/explain', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
   })
   return parseJsonResponse(response)
@@ -503,7 +512,12 @@ export async function deleteAiProvider(id) {
   })
   if (!response.ok) {
     let detail = '删除失败'
-    try { const p = await response.json(); if (typeof p?.detail === 'string') detail = p.detail } catch {}
+    try {
+      const p = await response.json()
+      if (typeof p?.detail === 'string') detail = p.detail
+    } catch {
+      void 0
+    }
     throw new Error(detail)
   }
   return null

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
@@ -17,11 +17,21 @@ from app.schemas.ai_provider import (
 )
 from app.services.crypto import decrypt_api_key, encrypt_api_key
 from app.services.llm import generate_summary
+from app.services.ai_provider_manager import (
+    activate_user_provider,
+    ensure_active_provider_after_delete,
+    get_next_user_provider_sort_order,
+    is_builtin_provider,
+    list_user_providers,
+    resolve_user_provider,
+)
 
 router = APIRouter()
 
 
 def _mask_key(key: str) -> str:
+    if not key:
+        return "(not configured)"
     if len(key) <= 8:
         return key[:2] + "****" + key[-2:]
     return key[:4] + "****" + key[-4:]
@@ -35,7 +45,7 @@ def _provider_to_response(provider: AiProvider, decrypted_key: str) -> AiProvide
         api_key_masked=_mask_key(decrypted_key),
         model=provider.model,
         is_active=provider.is_active,
-        is_system=provider.user_id is None,
+        is_system=is_builtin_provider(provider),
         sort_order=provider.sort_order,
     )
 
@@ -45,15 +55,7 @@ def list_providers(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AiProviderListResponse:
-    # 系统厂商（user_id=NULL）+ 用户自己的厂商
-    stmt = (
-        select(AiProvider)
-        .where(
-            (AiProvider.user_id == user.id) | (AiProvider.user_id.is_(None))
-        )
-        .order_by(AiProvider.sort_order, AiProvider.id)
-    )
-    providers = db.scalars(stmt).all()
+    providers = list_user_providers(db, user.id)
     result = []
     for p in providers:
         try:
@@ -70,6 +72,7 @@ def create_provider(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AiProviderResponse:
+    existing_providers = list_user_providers(db, user.id)
     encrypted = encrypt_api_key(payload.api_key)
     provider = AiProvider(
         user_id=user.id,
@@ -77,6 +80,8 @@ def create_provider(
         base_url=payload.base_url,
         encrypted_api_key=encrypted,
         model=payload.model,
+        is_active=not any(item.is_active for item in existing_providers),
+        sort_order=get_next_user_provider_sort_order(db, user.id),
     )
     db.add(provider)
     db.commit()
@@ -92,32 +97,29 @@ def update_provider(
     db: Session = Depends(get_db),
 ) -> AiProviderResponse:
     provider = db.scalar(
-        select(AiProvider).where(AiProvider.id == provider_id)
+        select(AiProvider).where(
+            AiProvider.id == provider_id,
+            AiProvider.user_id == user.id,
+        )
     )
     if not provider:
-        raise HTTPException(status_code=404, detail="厂商不存在")
-    is_system = provider.user_id is None
-    if not is_system and provider.user_id != user.id:
         raise HTTPException(status_code=404, detail="厂商不存在或无权修改")
 
-    # 互斥：启用当前厂商时，把同一用户下其他厂商全关掉
     if payload.is_active is True:
-        db.execute(
-            update(AiProvider)
-            .where(
-                AiProvider.id != provider_id,
-                (AiProvider.user_id == user.id) | (AiProvider.user_id.is_(None)),
-            )
-            .values(is_active=False)
-        )
-        provider.is_active = True
+        activated_provider = activate_user_provider(db, user.id, provider_id)
+        if not activated_provider:
+            raise HTTPException(status_code=404, detail="厂商不存在或无权修改")
+        provider = activated_provider
     elif payload.is_active is not None:
         provider.is_active = False
+        remaining_providers = db.scalars(
+            select(AiProvider).where(AiProvider.user_id == user.id)
+        ).all()
+        ensure_active_provider_after_delete(db, user.id, remaining_providers)
 
-    if is_system:
-        # 系统厂商只允许切换启用状态
+    if is_builtin_provider(provider):
         if any(getattr(payload, f) is not None for f in ("label", "base_url", "api_key", "model")):
-            raise HTTPException(status_code=403, detail="系统厂商只能切换启用状态")
+            raise HTTPException(status_code=403, detail="默认厂商只能切换启用状态")
     else:
         if payload.label is not None:
             provider.label = payload.label
@@ -147,7 +149,20 @@ def delete_provider(
     )
     if not provider:
         raise HTTPException(status_code=404, detail="厂商不存在或无权删除")
+    if is_builtin_provider(provider):
+        raise HTTPException(status_code=403, detail="默认厂商不支持删除")
+
+    was_active = bool(provider.is_active)
+    remaining_providers = db.scalars(
+        select(AiProvider).where(
+            AiProvider.user_id == user.id,
+            AiProvider.id != provider.id,
+        )
+    ).all()
     db.delete(provider)
+    db.flush()
+    if was_active:
+        ensure_active_provider_after_delete(db, user.id, remaining_providers)
     db.commit()
     return {"ok": True}
 
@@ -155,14 +170,15 @@ def delete_provider(
 @router.post("/summarize", response_model=SummarizeResponse)
 def summarize(
     payload: SummarizeRequest,
-    _user: User = Depends(get_current_user),  # 仅验证登录
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> SummarizeResponse:
-    provider = db.scalar(
-        select(AiProvider).where(
-            AiProvider.id == payload.provider_id,
-            AiProvider.is_active.is_(True),
-        )
+    provider = resolve_user_provider(
+        db,
+        user.id,
+        payload.provider_id,
+        require_active=True,
+        fallback_to_active=False,
     )
     if not provider:
         raise HTTPException(status_code=404, detail="厂商不存在或已禁用")

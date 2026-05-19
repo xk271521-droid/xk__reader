@@ -33,13 +33,16 @@ from app.schemas.paper import (
     PaperUpdate,
 )
 from app.services.crypto import decrypt_api_key
+from app.services.ai_provider_manager import resolve_user_provider
 from app.services.notification import compact_notification_text, create_notification
 from app.services.translate import translate_title
+from app.services.upload_mirror import mirror_upload_file, remove_mirrored_upload
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
 ALLOWED_PDF_TYPES = {"application/pdf"}
 TRASH_RETENTION = timedelta(days=7)
+UPLOAD_READ_CHUNK_SIZE = 1024 * 1024
 
 
 def build_folder_response(folder: Folder) -> FolderResponse:
@@ -97,6 +100,41 @@ def active_paper_query(paper_id: int, user_id: int):
     )
 
 
+async def _persist_uploaded_pdf(upload: UploadFile, destination: Path, *, max_size_bytes: int) -> int:
+    written = 0
+    try:
+        with destination.open("wb") as handle:
+            while True:
+                chunk = await upload.read(UPLOAD_READ_CHUNK_SIZE)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_size_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"PDF file exceeds the {max_size_bytes // (1024 * 1024)} MB upload limit.",
+                    )
+                handle.write(chunk)
+    except Exception:
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        await upload.close()
+    return written
+
+
+def _append_translation_debug_log(message: str) -> None:
+    if not settings.translation_debug_log_enabled:
+        return
+    log_path = Path(settings.uploads_dir).resolve().parent / "translate_debug.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(message)
+
+
 def _clear_generated_content(db: Session, paper_id: int, user_id: int) -> None:
     db.execute(sql_delete(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
     db.execute(
@@ -112,6 +150,7 @@ def _permanently_delete_paper(db: Session, paper: Paper) -> None:
     if actual_file and actual_file.exists():
         try:
             actual_file.unlink()
+            remove_mirrored_upload(f"papers/{actual_file.name}")
         except OSError:
             pass
     db.delete(paper)
@@ -270,22 +309,13 @@ def is_completed_translation_cache_hit(
     return False
 
 
-def load_active_provider(db: Session, provider_id: int | None = None) -> AiProvider | None:
-    provider = None
-    if provider_id:
-        provider = db.scalar(
-            select(AiProvider).where(
-                AiProvider.id == provider_id,
-                AiProvider.is_active.is_(True),
-            )
-        )
-    if provider:
-        return provider
-    return db.scalar(
-        select(AiProvider)
-        .where(AiProvider.is_active.is_(True))
-        .order_by(AiProvider.sort_order)
-        .limit(1)
+def load_active_provider(db: Session, user_id: int, provider_id: int | None = None) -> AiProvider | None:
+    return resolve_user_provider(
+        db,
+        user_id,
+        provider_id,
+        require_active=True,
+        fallback_to_active=True,
     )
 
 
@@ -734,13 +764,20 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
             return
 
         translation_engine = get_translation_engine()
-        provider = load_active_provider(db, provider_id)
+        paper = db.get(Paper, item.paper_id)
+        if not paper:
+            item.status = "error"
+            item.error_message = "关联论文不存在或已被删除。"
+            db.add(item)
+            db.commit()
+            return
+
+        provider = load_active_provider(db, paper.user_id, provider_id)
         if translation_engine == "ai" and not provider:
             item.status = "error"
             item.error_message = "没有可用的 AI 厂商，请先在 AI 配置中启用一个。"
             db.add(item)
             db.commit()
-            paper = db.get(Paper, item.paper_id)
             if paper:
                 create_notification(
                     db,
@@ -1327,9 +1364,14 @@ async def upload_paper(
     if file.content_type not in ALLOWED_PDF_TYPES:
         raise HTTPException(status_code=400, detail="仅支持 PDF 格式。")
 
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="上传文件为空。")
+    content_length = request.headers.get("content-length", "").strip()
+    if content_length.isdigit():
+        max_request_bytes = settings.papers_max_size_bytes + 512 * 1024
+        if int(content_length) > max_request_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"PDF file exceeds the {settings.papers_max_size_bytes // (1024 * 1024)} MB upload limit.",
+            )
 
     # 解析 metadata（前端传的 JSON 字符串）
     meta = PaperMetadata()
@@ -1357,7 +1399,14 @@ async def upload_paper(
     suffix = ".pdf"
     file_name_on_disk = f"{current_user.uid}_{time_ns() // 1_000_000}{suffix}"
     file_path = papers_dir / file_name_on_disk
-    file_path.write_bytes(content)
+    file_size_bytes = await _persist_uploaded_pdf(
+        file,
+        file_path,
+        max_size_bytes=settings.papers_max_size_bytes,
+    )
+    if file_size_bytes <= 0:
+        raise HTTPException(status_code=400, detail="上传文件为空。")
+    mirror_upload_file(file_path, f"papers/{file_name_on_disk}")
 
     file_url = f"/uploads/papers/{file_name_on_disk}"
 
@@ -1366,7 +1415,7 @@ async def upload_paper(
         folder_id=target_folder_id,
         file_name=file.filename or "untitled.pdf",
         file_path=file_url,
-        file_size=f"{len(content)}",
+        file_size=str(file_size_bytes),
         title=meta.title or (file.filename or "").replace(".pdf", ""),
         author=meta.author,
         subject=meta.subject,
@@ -1379,19 +1428,27 @@ async def upload_paper(
         page_count=meta.page_count,
         last_viewed_at=datetime.now(timezone.utc),
     )
-    db.add(paper)
-    db.commit()
-    db.refresh(paper)
+    try:
+        db.add(paper)
+        db.commit()
+        db.refresh(paper)
+    except Exception:
+        try:
+            file_path.unlink()
+            remove_mirrored_upload(f"papers/{file_name_on_disk}")
+        except OSError:
+            pass
+        raise
 
     # 自动翻译标题为中文
     discipline = current_user.profile.discipline if current_user.profile else ""
     try:
         translated = translate_title(paper.title, discipline)
-        with open("translate_debug.log", "a", encoding="utf-8") as f:
-            f.write(f"title={paper.title}\ndiscipline={discipline}\ntranslated={translated}\n---\n")
+        _append_translation_debug_log(
+            f"title={paper.title}\ndiscipline={discipline}\ntranslated={translated}\n---\n"
+        )
     except Exception as e:
-        with open("translate_debug.log", "a", encoding="utf-8") as f:
-            f.write(f"ERROR: {e}\n---\n")
+        _append_translation_debug_log(f"ERROR: {e}\n---\n")
         translated = None
     if translated:
         paper.translated_title = translated

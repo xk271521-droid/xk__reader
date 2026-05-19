@@ -15,6 +15,7 @@ export default defineConfig({
     allowedHosts: ['30c07cd5.r40.cpolar.top'],
     proxy: {
       '/api': 'http://127.0.0.1:8000',
+      '/uploads': 'http://127.0.0.1:8000',
     },
   },
 })

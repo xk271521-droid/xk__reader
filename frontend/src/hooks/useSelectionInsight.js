@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { getStoredAuthToken } from '../services/authApi'
 import { fetchAiProviders, fetchSelectionInsight, fetchSelectionInsightExplain } from '../services/paperReaderApi'
 
 function createInitialSelectionState() {
@@ -55,9 +56,12 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
   const [selectionCard, setSelectionCard] = useState(createInitialSelectionState)
   const [aiEnabled, setAiEnabled] = useState(true)
   const summaryRef = useRef(paperSummary)
-  summaryRef.current = paperSummary
   const providerRef = useRef(null)
   const explRef = useRef('')
+
+  useEffect(() => {
+    summaryRef.current = paperSummary
+  }, [paperSummary])
 
   useEffect(() => {
     let cancelled = false
@@ -167,9 +171,13 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
         setSelectionCard((current) => ({ ...current, explaining: true, explanation: '' }))
         explRef.current = ''
         try {
+          const token = getStoredAuthToken()
           const response = await fetch('/api/selection-insight/explain-stream', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
             body: JSON.stringify({
               text: selectedText,
               paper_title: paperTitle,
@@ -199,7 +207,9 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
               }
             }
           }
-        } catch (_) {}
+        } catch {
+          void 0
+        }
 
         if (activeRequestRef.current !== requestId) {
           return
@@ -217,14 +227,16 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
             if (activeRequestRef.current === requestId && fallback?.explanation) {
               setSelectionCard((current) => ({ ...current, explanation: fallback.explanation }))
             }
-          } catch (_) {}
+          } catch {
+            void 0
+          }
         }
 
         if (activeRequestRef.current === requestId) {
           setSelectionCard((current) => ({ ...current, explaining: false }))
         }
       }
-    } catch (_) {
+    } catch {
       if (activeRequestRef.current !== requestId) {
         return
       }

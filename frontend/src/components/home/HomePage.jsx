@@ -1134,6 +1134,7 @@ function TrashSection({
 }
 
 export function HomePage({
+  currentUser,
   folders,
   importConflict,
   isImporting,
@@ -1165,7 +1166,9 @@ export function HomePage({
   uiFontScale = 1,
   uncategorizedFolderId,
   initialSection = 'recent',
+  onRequestLogin,
 }) {
+  const isGuest = !currentUser
   const [activeSection, setActiveSection] = useState(initialSection || 'recent')
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedFolderId, setSelectedFolderId] = useState(uncategorizedFolderId)
@@ -1178,6 +1181,7 @@ export function HomePage({
   const [highlightPaperId, setHighlightPaperId] = useState('')
   const [jumpPaperId, setJumpPaperId] = useState('')
   const [matrixRuns, setMatrixRuns] = useState([])
+  const visibleHomeSections = homeSections
 
   useEffect(() => {
     if (uncategorizedFolderId && selectedFolderId === '') {
@@ -1266,6 +1270,15 @@ export function HomePage({
     [libraryStatusFilter],
   )
 
+  function requireLogin(featureLabel = '该功能') {
+    if (!isGuest) return false
+    const shouldLogin = window.confirm(`${featureLabel}需要登录后才能使用。现在去登录吗？`)
+    if (shouldLogin) {
+      onRequestLogin?.()
+    }
+    return true
+  }
+
   function handleOpenResource(paper, resource, trigger) {
     const paperId = paper?.id ?? paper?.paper_id
     if (!paperId) return
@@ -1334,6 +1347,7 @@ export function HomePage({
   }, [activeSection, searchTerm, recentPapers, folders, uncategorizedFolderId])
 
   function handleGlobalSearchClick(paper) {
+    if (requireLogin('打开文献')) return
     setSearchTerm('')
     setSelectedFolderId(paper.folderId)
     setLibraryStatusFilter('all')
@@ -1348,6 +1362,7 @@ export function HomePage({
   }
 
   async function handleCreateFolder() {
+    if (requireLogin('新建分类')) return
     const result = await onCreateFolder(folderName)
     if (result.ok) {
       setFolderName('')
@@ -1358,11 +1373,13 @@ export function HomePage({
   }
 
   function handleImportToFolder(folderId) {
+    if (requireLogin('导入文献')) return
     setShowImportMenu(false)
     onOpenFilePicker(folderId, { activate: false })
   }
 
   function handleDeleteFolder(folderId) {
+    if (requireLogin('删除分类')) return
     onDeleteFolder(folderId)
     if (selectedFolderId === folderId) {
       setSelectedFolderId(uncategorizedFolderId)
@@ -1370,6 +1387,10 @@ export function HomePage({
   }
 
   function handleSelectSection(sectionId) {
+    if (isGuest && ['library', 'insights', 'matrix', 'trash'].includes(sectionId)) {
+      requireLogin(homeSections.find((item) => item.id === sectionId)?.label || '该功能')
+      return
+    }
     setActiveSection(sectionId)
     if (sectionId === 'trash') {
       onRefreshTrash?.()
@@ -1377,16 +1398,19 @@ export function HomePage({
   }
 
   function handleOpenResourcePreview(paper, resource) {
+    if (requireLogin('查看资源')) return
     handleOpenResource(paper, resource, null)
   }
 
   function handleBrowseLibrary() {
+    if (requireLogin('我的文献')) return
     setActiveSection('library')
     setLibraryStatusFilter('all')
     setSearchTerm('')
   }
 
   function handlePendingTaskClick(task) {
+    if (requireLogin(task.title || '该功能')) return
     if (task.id === 'matrix-pending') {
       setActiveSection('matrix')
       return
@@ -1407,7 +1431,7 @@ export function HomePage({
     <section className="home-shell">
       <aside className="home-sidebar">
         <div className="home-sidebar__group">
-          {homeSections.map((item) => {
+          {visibleHomeSections.map((item) => {
             const Icon = item.icon
             const isActive = activeSection === item.id
             const isLibrary = item.id === 'library'
@@ -1616,15 +1640,22 @@ export function HomePage({
 
         {activeSection === 'recent' ? (
           <>
-            <ContinueWorkSection
-              item={continueWorkItem}
-              onBrowseLibrary={handleBrowseLibrary}
-              onOpenPaper={onOpenPaper}
-              onOpenResource={handleOpenResourcePreview}
-              paperResourcesById={paperResourcesById}
-            />
+            {!isGuest ? (
+              <>
+                <ContinueWorkSection
+                  item={continueWorkItem}
+                  onBrowseLibrary={handleBrowseLibrary}
+                  onOpenPaper={(paperId) => {
+                    if (requireLogin('继续阅读')) return
+                    onOpenPaper(paperId)
+                  }}
+                  onOpenResource={handleOpenResourcePreview}
+                  paperResourcesById={paperResourcesById}
+                />
 
-            <PendingTaskSection tasks={pendingTasks} onTaskClick={handlePendingTaskClick} />
+                <PendingTaskSection tasks={pendingTasks} onTaskClick={handlePendingTaskClick} />
+              </>
+            ) : null}
 
             <div className="home-heading">
               <div>
@@ -1693,7 +1724,13 @@ export function HomePage({
         ) : null}
 
         {activeSection === 'recent' ? (
-          <RecentSection groupedPapers={groupedReadings} onOpenPaper={onOpenPaper} />
+          <RecentSection
+            groupedPapers={groupedReadings}
+            onOpenPaper={(paperId) => {
+              if (requireLogin('打开阅读记录')) return
+              onOpenPaper(paperId)
+            }}
+          />
         ) : null}
 
         {activeSection === 'library' ? (
@@ -1718,8 +1755,14 @@ export function HomePage({
               onClearHighlight={handleClearHighlight}
               onDeletePaper={onDeletePaper}
               onMovePaper={onMovePaper}
-              onOpenPaper={onOpenPaper}
-              onOpenResource={handleOpenResource}
+              onOpenPaper={(paperId) => {
+                if (requireLogin('打开文献')) return
+                onOpenPaper(paperId)
+              }}
+              onOpenResource={(paper, resource, trigger) => {
+                if (requireLogin('查看资源')) return
+                handleOpenResource(paper, resource, trigger)
+              }}
               onSaveResourceLayout={onSaveResourceLayout}
               paperResourcesById={paperResourcesById}
               recentPapers={recentPapers}
@@ -1734,7 +1777,10 @@ export function HomePage({
         {activeSection === 'matrix' ? (
           <ResearchMatrixPage
             folders={folders}
-            onJumpToPaperEvidence={onJumpToPaperEvidence}
+            onJumpToPaperEvidence={(...args) => {
+              if (requireLogin('文献矩阵')) return
+              onJumpToPaperEvidence(...args)
+            }}
             recentPapers={recentPapers}
             uncategorizedFolderId={uncategorizedFolderId}
           />

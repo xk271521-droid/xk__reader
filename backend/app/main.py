@@ -4,14 +4,14 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError
-from sqlalchemy import inspect, select, text
 
 from app.api.router import api_router
 from app.api.routes.research_matrix import resume_stale_matrix_runs
 from app.core.config import settings
-from app.db.session import Base, SessionLocal, engine
-from app.models import Annotation, AiProvider, Folder, InkAnnotation, Notification, Paper, PaperFullTranslation, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, ResearchMatrixRun, ResearchMatrixRunPaper, User, UserAgreement, UserProfile, VerificationCode  # noqa: F401
+from app.db.session import Base, engine
+from app.models import Annotation, Folder, InkAnnotation, Notification, Paper, PaperFullTranslation, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, ResearchMatrixRun, ResearchMatrixRunPaper, User, UserAgreement, UserProfile, VerificationCode  # noqa: F401
 
 
 def _ensure_system_providers() -> None:
@@ -299,6 +299,13 @@ def _run_startup_schema_sync() -> None:
             time.sleep(delay_seconds)
 
 
+def _validate_runtime_configuration() -> None:
+    issues = settings.validate_runtime()
+    if issues:
+        formatted = "\n".join(f"- {issue}" for issue in issues)
+        raise RuntimeError(f"Invalid production configuration:\n{formatted}")
+
+
 def create_app() -> FastAPI:
     application = FastAPI(title=settings.app_name)
     application.add_middleware(
@@ -317,8 +324,9 @@ def create_app() -> FastAPI:
 
     @application.on_event("startup")
     def create_tables() -> None:
-        _run_startup_schema_sync()
-        _ensure_system_providers()
+        _validate_runtime_configuration()
+        if settings.startup_schema_sync_enabled:
+            _run_startup_schema_sync()
         resume_stale_matrix_runs()
 
     return application

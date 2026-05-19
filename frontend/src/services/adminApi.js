@@ -64,9 +64,35 @@ export async function updateAdminUser(userId, payload) {
   return parseJsonResponse(response)
 }
 
+export async function uploadAdminUserAvatar(userId, file) {
+  const formData = new FormData()
+  formData.append('avatar', file)
+
+  const response = await fetch(`/api/admin/users/${userId}/avatar`, {
+    method: 'POST',
+    headers: {
+      ...authHeaders(),
+    },
+    body: formData,
+  })
+  return parseJsonResponse(response)
+}
+
 export async function fetchAdminPapers() {
   const response = await fetch('/api/admin/papers', {
     headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function broadcastAdminNotification(payload) {
+  const response = await fetch('/api/notifications/broadcast', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(payload),
   })
   return parseJsonResponse(response)
 }

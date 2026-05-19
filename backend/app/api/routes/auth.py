@@ -26,7 +26,9 @@ from app.schemas.auth import (
     UserResponse,
 )
 from app.services.auth_guard import auth_guard
+from app.services.ai_provider_manager import ensure_user_default_providers
 from app.services.security import create_access_token, create_uid, hash_password, verify_password
+from app.services.upload_mirror import mirror_upload_file, remove_mirrored_upload
 from app.services.verification import (
     EMAIL_CHANNEL,
     REGISTER_PURPOSE,
@@ -103,7 +105,7 @@ def build_user_response(user: User) -> UserResponse:
     return UserResponse(
         uid=user.uid,
         nickname=profile.nickname,
-        avatar_url=profile.avatar_url,
+        avatar_url=normalize_avatar_url(profile.avatar_url),
         phone=user.phone,
         email=user.email,
         education=profile.education,
@@ -135,6 +137,19 @@ def resolve_old_avatar_path(avatar_url: str | None) -> Path | None:
         return None
 
     return resolved
+
+
+def build_avatar_public_url(file_name: str) -> str:
+    return f"/uploads/avatars/{file_name}"
+
+
+def normalize_avatar_url(avatar_url: str | None) -> str | None:
+    if not avatar_url:
+        return None
+    file_name = Path(avatar_url).name
+    if not file_name:
+        return avatar_url
+    return build_avatar_public_url(file_name)
 
 
 def find_user_by_account(db: Session, account: str) -> User | None:
@@ -315,6 +330,7 @@ def register(
     db.add(agreement)
     db.add(Folder(user_id=user.id, name="未分类"))
     db.commit()
+    ensure_user_default_providers(db, user.id, commit=True)
 
     created_user = db.scalar(
         select(User)
@@ -363,6 +379,7 @@ def login(
     user.last_login_at = datetime.now(timezone.utc)
     db.add(user)
     db.commit()
+    ensure_user_default_providers(db, user.id, commit=True)
     db.refresh(user, attribute_names=["profile"])
 
     auth_guard.record_success("login", account_keys=[normalized_account])
@@ -373,7 +390,11 @@ def login(
 
 
 @router.get("/me", response_model=UserResponse)
-def me(current_user: Annotated[User, Depends(get_current_user)]) -> UserResponse:
+def me(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> UserResponse:
+    ensure_user_default_providers(db, current_user.id, commit=True)
     return build_user_response(current_user)
 
 
@@ -441,9 +462,10 @@ async def upload_avatar(
     avatar_dir.mkdir(parents=True, exist_ok=True)
     new_avatar_path = avatar_dir / file_name
     new_avatar_path.write_bytes(content)
+    mirror_upload_file(new_avatar_path, f"avatars/{file_name}")
 
     old_avatar_path = resolve_old_avatar_path(profile.avatar_url)
-    profile.avatar_url = str(request.url_for("uploads", path=f"avatars/{file_name}"))
+    profile.avatar_url = build_avatar_public_url(file_name)
 
     db.add(profile)
     db.commit()
@@ -452,6 +474,7 @@ async def upload_avatar(
     if old_avatar_path and old_avatar_path.exists() and old_avatar_path != new_avatar_path:
         try:
             old_avatar_path.unlink()
+            remove_mirrored_upload(f"avatars/{old_avatar_path.name}")
         except OSError:
             pass
 

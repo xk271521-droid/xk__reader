@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.models import Notification
+from app.models import Notification, User
 
 
 def compact_notification_text(value: Any, limit: int = 120) -> str:
@@ -87,3 +87,46 @@ def mark_all_notifications_read(db: Session, user_id: int) -> int:
     )
     db.commit()
     return int(result.rowcount or 0)
+
+
+def delete_notification(db: Session, notification: Notification) -> None:
+    db.delete(notification)
+    db.commit()
+
+
+def clear_all_notifications(db: Session, user_id: int) -> int:
+    items = db.scalars(select(Notification).where(Notification.user_id == user_id)).all()
+    deleted_count = len(items)
+    for item in items:
+        db.delete(item)
+    db.commit()
+    return deleted_count
+
+
+def broadcast_admin_notification(
+    db: Session,
+    *,
+    title: str,
+    message: str,
+    actor_user_id: int,
+) -> int:
+    user_ids = db.scalars(select(User.id)).all()
+    delivered_count = 0
+
+    for user_id in user_ids:
+        db.add(
+            Notification(
+                user_id=int(user_id),
+                source_kind="admin_broadcast",
+                source_id=int(actor_user_id),
+                event_kind="broadcast",
+                title=compact_notification_text(title, 160),
+                message=compact_notification_text(message, 320),
+                action_kind="none",
+                action_payload={},
+            )
+        )
+        delivered_count += 1
+
+    db.commit()
+    return delivered_count
