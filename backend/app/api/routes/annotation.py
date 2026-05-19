@@ -11,6 +11,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models import Annotation, Paper, PaperSummary, User
 from app.schemas.annotation import (
+    AnnotationBatchEraseRequest,
     AnnotationCreate,
     AnnotationEraseRequest,
     AnnotationListResponse,
@@ -139,6 +140,61 @@ def _slice_quote_text(quote: str | None, old_start: int, old_end: int, new_start
     return text[left:right].strip()
 
 
+def _apply_erase_range(
+    paper_id: int,
+    page_number: int,
+    start_char: int,
+    end_char: int,
+    db: Session,
+) -> None:
+    annotations = db.scalars(
+        select(Annotation)
+        .where(
+            Annotation.paper_id == paper_id,
+            Annotation.page_number == page_number,
+            Annotation.end_char > start_char,
+            Annotation.start_char < end_char,
+        )
+        .order_by(Annotation.start_char, Annotation.id)
+    ).all()
+
+    for annotation in annotations:
+        old_start = annotation.start_char
+        old_end = annotation.end_char
+        old_quote = annotation.quote_text
+        if start_char <= annotation.start_char and end_char >= annotation.end_char:
+            db.delete(annotation)
+            continue
+
+        if start_char <= annotation.start_char:
+            annotation.quote_text = _slice_quote_text(old_quote, old_start, old_end, end_char, old_end)
+            annotation.start_char = end_char
+        elif end_char >= annotation.end_char:
+            annotation.quote_text = _slice_quote_text(old_quote, old_start, old_end, old_start, start_char)
+            annotation.end_char = start_char
+        else:
+            right_quote = _slice_quote_text(old_quote, old_start, old_end, end_char, old_end)
+            right_piece = Annotation(
+                user_id=annotation.user_id,
+                paper_id=annotation.paper_id,
+                page_number=annotation.page_number,
+                start_char=end_char,
+                end_char=annotation.end_char,
+                quote_text=right_quote,
+                rects_json=annotation.rects_json,
+                type=annotation.type,
+                color=annotation.color,
+                source=annotation.source,
+                geometry_version="v2",
+            )
+            annotation.quote_text = _slice_quote_text(old_quote, old_start, old_end, old_start, start_char)
+            annotation.end_char = start_char
+            db.add(right_piece)
+
+        annotation.geometry_version = "v2"
+        db.add(annotation)
+
+
 @router.get("", response_model=AnnotationListResponse)
 def list_annotations(
     paper_id: int,
@@ -198,52 +254,49 @@ def erase_annotations(
     if payload.end_char <= payload.start_char:
         raise HTTPException(status_code=400, detail="擦除范围无效")
 
-    annotations = db.scalars(
-        select(Annotation)
-        .where(
-            Annotation.paper_id == paper_id,
-            Annotation.page_number == payload.page_number,
-            Annotation.end_char > payload.start_char,
-            Annotation.start_char < payload.end_char,
+    _apply_erase_range(
+        paper_id,
+        payload.page_number,
+        payload.start_char,
+        payload.end_char,
+        db,
+    )
+
+    db.commit()
+    _dedupe_paper_annotations(paper_id, db)
+    _cleanup_fragmented_annotations(paper_id, db)
+    _invalidate_annotation_summary(paper_id, user.id, db)
+    db.commit()
+
+    updated = _list_paper_annotations(paper_id, db)
+    return AnnotationListResponse(annotations=[_build_response(annotation) for annotation in updated])
+
+
+@router.post("/erase-batch", response_model=AnnotationListResponse)
+def erase_annotations_batch(
+    paper_id: int,
+    payload: AnnotationBatchEraseRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AnnotationListResponse:
+    _ensure_owned_paper(paper_id, user, db)
+
+    normalized_ranges = sorted(
+        (item for item in payload.ranges if item.end_char > item.start_char),
+        key=lambda item: (item.page_number, item.start_char, item.end_char),
+    )
+    if not normalized_ranges:
+        updated = _list_paper_annotations(paper_id, db)
+        return AnnotationListResponse(annotations=[_build_response(annotation) for annotation in updated])
+
+    for item in normalized_ranges:
+        _apply_erase_range(
+            paper_id,
+            item.page_number,
+            item.start_char,
+            item.end_char,
+            db,
         )
-        .order_by(Annotation.start_char, Annotation.id)
-    ).all()
-
-    for annotation in annotations:
-        old_start = annotation.start_char
-        old_end = annotation.end_char
-        old_quote = annotation.quote_text
-        if payload.start_char <= annotation.start_char and payload.end_char >= annotation.end_char:
-            db.delete(annotation)
-            continue
-
-        if payload.start_char <= annotation.start_char:
-            annotation.quote_text = _slice_quote_text(old_quote, old_start, old_end, payload.end_char, old_end)
-            annotation.start_char = payload.end_char
-        elif payload.end_char >= annotation.end_char:
-            annotation.quote_text = _slice_quote_text(old_quote, old_start, old_end, old_start, payload.start_char)
-            annotation.end_char = payload.start_char
-        else:
-            right_quote = _slice_quote_text(old_quote, old_start, old_end, payload.end_char, old_end)
-            right_piece = Annotation(
-                user_id=annotation.user_id,
-                paper_id=annotation.paper_id,
-                page_number=annotation.page_number,
-                start_char=payload.end_char,
-                end_char=annotation.end_char,
-                quote_text=right_quote,
-                rects_json=annotation.rects_json,
-                type=annotation.type,
-                color=annotation.color,
-                source=annotation.source,
-                geometry_version="v2",
-            )
-            annotation.quote_text = _slice_quote_text(old_quote, old_start, old_end, old_start, payload.start_char)
-            annotation.end_char = payload.start_char
-            db.add(right_piece)
-
-        annotation.geometry_version = "v2"
-        db.add(annotation)
 
     db.commit()
     _dedupe_paper_annotations(paper_id, db)

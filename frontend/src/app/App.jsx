@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bell, Brain, Copy, LogIn, LogOut, Settings2, UserRound, X } from 'lucide-react'
+import { Bell, Brain, Copy, LogIn, LogOut, Settings2, Sparkles, Trash2, UserRound, X } from 'lucide-react'
 import { AdminPage } from '../components/account/AdminPage'
 import { AiConfigPage } from '../components/account/AiConfigPage'
 import { UserCenterPage } from '../components/account/UserCenterPage'
@@ -36,6 +36,8 @@ import {
   updateCurrentUser,
 } from '../services/authApi'
 import {
+  clearAllNotifications,
+  deleteNotification,
   fetchNotifications,
   fetchNotificationSummary,
   markAllNotificationsRead,
@@ -64,6 +66,7 @@ import {
   buildFullTranslationPages,
   hashTranslationPages,
 } from '../components/reader/fullTranslationLayout'
+import { resolveAssetUrl } from '../utils/assetUrl'
 import {
   Sheet,
   SheetContent,
@@ -170,6 +173,9 @@ function triggerBlobDownload(blob, fileName) {
   URL.revokeObjectURL(url)
 }
 
+void buildCitationText
+void triggerTextDownload
+
 function normalizeFullTranslationStatus(value) {
   return ['idle', 'running', 'completed', 'error', 'cancelled'].includes(value) ? value : 'idle'
 }
@@ -216,6 +222,18 @@ function formatNotificationTime(value) {
   }).format(parsed)
 }
 
+function getNotificationLabel(item) {
+  const actionKind = String(item?.action_kind || '').trim()
+  const eventKind = String(item?.event_kind || '').trim()
+  const sourceKind = String(item?.source_kind || '').trim()
+
+  if (actionKind.includes('summary') || eventKind.includes('summary')) return '摘要结果'
+  if (actionKind.includes('translation') || eventKind.includes('translation')) return '翻译完成'
+  if (actionKind.includes('matrix') || eventKind.includes('matrix')) return '矩阵更新'
+  if (sourceKind.includes('admin') || eventKind.includes('broadcast')) return '系统广播'
+  return '系统通知'
+}
+
 function normalizeNotificationSummary(summary) {
   return {
     unread_count: Number(summary?.unread_count || 0),
@@ -239,6 +257,19 @@ function normalizeNotificationItem(item) {
   }
 }
 
+const EMPTY_RESOURCE_OVERVIEW = { stats: {}, papers: [] }
+
+function getNow() {
+  return Date.now()
+}
+
+let transientIdCounter = 0
+
+function createTransientId(prefix = 'temp') {
+  transientIdCounter += 1
+  return `${prefix}-${getNow()}-${transientIdCounter}`
+}
+
 function App() {
   const readerRef = useRef(null)
   const readerLayoutRef = useRef(null)
@@ -252,6 +283,7 @@ function App() {
   const [isUtilityRailCollapsed, setIsUtilityRailCollapsed] = useState(false)
   const [authMode, setAuthMode] = useState('login')
   const [isAuthViewOpen, setIsAuthViewOpen] = useState(false)
+  const [isSessionRestoring, setIsSessionRestoring] = useState(() => Boolean(getStoredAuthToken()))
   const [currentUser, setCurrentUser] = useState(null)
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
   const [accountSection, setAccountSection] = useState('')
@@ -270,7 +302,8 @@ function App() {
   const [fullTranslationBusy, setFullTranslationBusy] = useState(false)
   const [fullTranslationParseMode, setFullTranslationParseMode] = useState('auto')
   const [isFullTranslationOpen, setIsFullTranslationOpen] = useState(false)
-  const [resourceOverview, setResourceOverview] = useState({ stats: {}, papers: [] })
+  const [fullTranslationOpenPaperId, setFullTranslationOpenPaperId] = useState(null)
+  const [resourceOverview, setResourceOverview] = useState(EMPTY_RESOURCE_OVERVIEW)
   const [readingDashboard, setReadingDashboard] = useState(null)
   const [insightTimeframe, setInsightTimeframe] = useState('month')
   const [resourcePreview, setResourcePreview] = useState(null)
@@ -293,6 +326,20 @@ function App() {
   const lastSeenNotificationIdRef = useRef(null)
   const didInitNotificationPollingRef = useRef(false)
   const toastedNotificationIdsRef = useRef(new Set())
+  const readingResourceRefreshTimerRef = useRef(null)
+  const readingResourceIdleRefreshRef = useRef(null)
+  const currentUserAvatarSrc = resolveAssetUrl(currentUser?.avatar_url)
+
+  function openFullTranslationReader(paperId = activePaperId) {
+    if (!paperId) return
+    setFullTranslationOpenPaperId(paperId)
+    setIsFullTranslationOpen(true)
+  }
+
+  function closeFullTranslationReader() {
+    setIsFullTranslationOpen(false)
+    setFullTranslationOpenPaperId(null)
+  }
 
   // Get active AI provider
   useEffect(function () {
@@ -364,7 +411,6 @@ function App() {
   const isAdminUser = Boolean(currentUser?.is_admin)
   const {
     annotations,
-    loading: annLoading,
     createAnnotation,
     deleteAnnotation,
     clearAnnotations,
@@ -404,6 +450,7 @@ function App() {
     minWidth: WORKSPACE_MIN_WIDTH,
     maxWidth: WORKSPACE_MAX_WIDTH,
   })
+  const setWorkspacePanelWidth = workspacePanel.setWidth
   const railWidth = isUtilityRailCollapsed ? WORKSPACE_RAIL_COLLAPSED_WIDTH : WORKSPACE_RAIL_EXPANDED_WIDTH
   const readerShellWidth = readerLayoutWidth || (typeof window !== 'undefined' ? window.innerWidth : 1440)
   const workspaceWidth = activeWorkspacePanel ? workspacePanel.width : 0
@@ -449,21 +496,32 @@ function App() {
   }, [isReaderView])
 
   useEffect(() => {
-    workspacePanel.setWidth((current) => Math.min(current, workspaceSafeMaxWidth))
-  }, [workspacePanel.setWidth, workspaceSafeMaxWidth])
+    window.setTimeout(() => {
+      setWorkspacePanelWidth((current) => Math.min(current, workspaceSafeMaxWidth))
+    }, 0)
+  }, [setWorkspacePanelWidth, workspaceSafeMaxWidth])
 
-  const { selectionCard, handleSelection, dismissSelectionCard, aiEnabled, toggleAI } = useSelectionInsight({
+  const { selectionCard, handleSelection, aiEnabled, toggleAI } = useSelectionInsight({
     readerRef,
     paperTitle: metadata.title || fileName,
     paperSummary: activePaperSummary,
     activePaperFullText,
   })
+  const latestRecentOpenedAt = recentReadings?.[0]?.openedAt ?? null
+  const weeklyOpens = readingStats?.weekly_opens ?? 0
+  const weeklyDistinctPapers = readingStats?.weekly_distinct_papers ?? 0
+  const dominantReadingPeriod = readingStats?.dominant_period ?? ''
+  const annotationCount = resourceOverview?.stats?.annotation_count ?? 0
+  const noteCount = resourceOverview?.stats?.note_count ?? 0
+  const summaryCount = resourceOverview?.stats?.summary_count ?? 0
+  const translationCount = resourceOverview?.stats?.translation_count ?? 0
+  const visibleResourceOverview = currentUser ? resourceOverview : EMPTY_RESOURCE_OVERVIEW
+  const visibleReadingDashboard = currentUser ? readingDashboard : null
 
   useEffect(() => {
     let cancelled = false
 
     if (!currentUser) {
-      setResourceOverview({ stats: {}, papers: [] })
       return undefined
     }
 
@@ -478,7 +536,7 @@ function App() {
         }
       } catch {
         if (!cancelled) {
-          setResourceOverview({ stats: {}, papers: [] })
+          setResourceOverview(EMPTY_RESOURCE_OVERVIEW)
         }
       }
     }
@@ -493,7 +551,6 @@ function App() {
     let cancelled = false
 
     if (!currentUser) {
-      setReadingDashboard(null)
       return undefined
     }
 
@@ -517,15 +574,15 @@ function App() {
   }, [
     currentUser,
     recentPapers.length,
-    recentReadings?.[0]?.openedAt ?? null,
-    readingStats?.weekly_opens ?? 0,
-    readingStats?.weekly_distinct_papers ?? 0,
-    readingStats?.dominant_period ?? '',
+    latestRecentOpenedAt,
+    weeklyOpens,
+    weeklyDistinctPapers,
+    dominantReadingPeriod,
     readingDurationVersion,
-    resourceOverview?.stats?.annotation_count ?? 0,
-    resourceOverview?.stats?.note_count ?? 0,
-    resourceOverview?.stats?.summary_count ?? 0,
-    resourceOverview?.stats?.translation_count ?? 0,
+    annotationCount,
+    noteCount,
+    summaryCount,
+    translationCount,
     insightTimeframe,
   ])
 
@@ -550,6 +607,45 @@ function App() {
     } catch {
       // 资源图只是增强入口，刷新失败不影响阅读主流程。
     }
+  }
+
+  function clearReadingResourceRefreshTimer() {
+    if (readingResourceRefreshTimerRef.current) {
+      window.clearTimeout(readingResourceRefreshTimerRef.current)
+      readingResourceRefreshTimerRef.current = null
+    }
+    if (readingResourceIdleRefreshRef.current != null) {
+      if (typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(readingResourceIdleRefreshRef.current)
+      } else {
+        window.clearTimeout(readingResourceIdleRefreshRef.current)
+      }
+      readingResourceIdleRefreshRef.current = null
+    }
+  }
+
+  function scheduleReadingResourceRefresh(delay = 900) {
+    if (!currentUser) return
+    clearReadingResourceRefreshTimer()
+    readingResourceRefreshTimerRef.current = window.setTimeout(() => {
+      readingResourceRefreshTimerRef.current = null
+      const runRefresh = () => {
+        readingResourceIdleRefreshRef.current = null
+        void Promise.all([
+          refreshResourceOverview(),
+          refreshReadingDashboard(),
+        ])
+      }
+
+      if (typeof window.requestIdleCallback === 'function') {
+        readingResourceIdleRefreshRef.current = window.requestIdleCallback(runRefresh, {
+          timeout: 1800,
+        })
+        return
+      }
+
+      readingResourceIdleRefreshRef.current = window.setTimeout(runRefresh, 0)
+    }, delay)
   }
 
   async function handleSaveResourceLayout(paperId, layout) {
@@ -593,7 +689,7 @@ function App() {
     setAccountSection('')
     setHomeInitialSection('recent')
     setSummaryInitialType('')
-    setIsFullTranslationOpen(false)
+    closeFullTranslationReader()
 
     const resourceType = resource?.type || ''
     if (resourceType === 'notes') {
@@ -625,11 +721,17 @@ function App() {
         const user = await fetchCurrentUser(token)
         if (!cancelled) {
           setCurrentUser(user)
+          setIsAuthViewOpen(false)
         }
       } catch {
         clearStoredAuthToken()
         if (!cancelled) {
           setCurrentUser(null)
+          setIsAuthViewOpen(false)
+        }
+      } finally {
+        if (!cancelled) {
+          setIsSessionRestoring(false)
         }
       }
     }
@@ -644,7 +746,12 @@ function App() {
   useEffect(() => {
     const nextPreferences = getStoredUiPreferences(currentUser?.uid)
     const nextFontSize = normalizeUiFontSize(nextPreferences.fontSize)
-    setUiFontSize((current) => (current === nextFontSize ? current : nextFontSize))
+    const frameId = window.requestAnimationFrame(() => {
+      setUiFontSize((current) => (current === nextFontSize ? current : nextFontSize))
+    })
+    return () => {
+      window.cancelAnimationFrame(frameId)
+    }
   }, [currentUser?.uid])
 
   // Toolbar button ripple effect
@@ -807,13 +914,13 @@ function App() {
       const paperId = Number(payload.paper_id || 0)
       const summaryType = String(payload.summary_type || '').trim()
       if (!paperId) {
-        showNotificationToast({ id: `missing-${Date.now()}`, title: '提示', message: '目标内容已不存在或无权限访问' })
+        showNotificationToast({ id: createTransientId('missing'), title: '提示', message: '目标内容已不存在或无权限访问' })
         return
       }
       setAccountSection('')
       setHomeInitialSection('recent')
       setSummaryInitialType(summaryType)
-      setIsFullTranslationOpen(false)
+      closeFullTranslationReader()
       switchToPaper(paperId)
       setActiveWorkspacePanel('summary')
       return
@@ -822,7 +929,7 @@ function App() {
     if (actionKind === 'open-full-translation') {
       const paperId = Number(payload.paper_id || 0)
       if (!paperId) {
-        showNotificationToast({ id: `missing-${Date.now()}`, title: '提示', message: '目标内容已不存在或无权限访问' })
+        showNotificationToast({ id: createTransientId('missing'), title: '提示', message: '目标内容已不存在或无权限访问' })
         return
       }
       setAccountSection('')
@@ -830,14 +937,14 @@ function App() {
       setSummaryInitialType('')
       setActiveWorkspacePanel('')
       switchToPaper(paperId)
-      setIsFullTranslationOpen(true)
+      openFullTranslationReader(paperId)
       return
     }
 
     if (actionKind === 'open-matrix') {
       setSummaryInitialType('')
       setAccountSection('')
-      setIsFullTranslationOpen(false)
+      closeFullTranslationReader()
       setHomeInitialSection('matrix')
       goHome()
       return
@@ -861,7 +968,6 @@ function App() {
       // Read failure should not block navigation.
     }
     setIsNotificationOpen(false)
-    setNotificationToast(null)
     await navigateFromNotification(item)
   }
 
@@ -878,29 +984,66 @@ function App() {
     }
   }
 
+  async function handleDeleteNotification(notificationId) {
+    if (!notificationId) return
+    try {
+      await deleteNotification(notificationId)
+      setNotificationItems((previous) => previous.filter((item) => item.id !== notificationId))
+      setNotificationSummary((current) => {
+        const removedItem = notificationItems.find((item) => item.id === notificationId)
+        const unreadDelta = removedItem && !removedItem.read_at ? 1 : 0
+        const nextItems = notificationItems.filter((item) => item.id !== notificationId)
+        return {
+          ...current,
+          unread_count: Math.max(0, Number(current.unread_count || 0) - unreadDelta),
+          latest_notification_id: nextItems[0]?.id ?? null,
+          latest_created_at: nextItems[0]?.created_at ?? null,
+        }
+      })
+    } catch {
+      // Ignore delete failures in the UI.
+    }
+  }
+
+  async function handleClearAllNotifications() {
+    try {
+      await clearAllNotifications()
+      setNotificationItems([])
+      setNotificationSummary((current) => ({
+        ...current,
+        unread_count: 0,
+        latest_notification_id: null,
+        latest_created_at: null,
+      }))
+    } catch {
+      // Ignore clear failures in the UI.
+    }
+  }
+
   useEffect(() => {
     clearNotificationSummaryPolling()
     clearNotificationDrawerPolling()
     clearNotificationToastTimer()
-    setNotificationToast(null)
 
     if (!currentUser) {
       didInitNotificationPollingRef.current = false
       lastSeenNotificationIdRef.current = null
       toastedNotificationIdsRef.current = new Set()
-      setNotificationItems([])
-      setNotificationSummary(normalizeNotificationSummary())
       return undefined
     }
 
-    loadNotificationSummary({ silentInit: true, resetOnError: true })
-    beginNotificationSummaryPolling()
+    const initTimerId = window.setTimeout(() => {
+      loadNotificationSummary({ silentInit: true, resetOnError: true })
+      beginNotificationSummaryPolling()
+    }, 0)
 
     return () => {
+      window.clearTimeout(initTimerId)
       clearNotificationSummaryPolling()
       clearNotificationDrawerPolling()
       clearNotificationToastTimer()
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.uid])
 
   useEffect(() => {
@@ -913,6 +1056,7 @@ function App() {
     return () => {
       clearNotificationDrawerPolling()
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.uid, isNotificationOpen])
 
   const userInitials = (currentUser?.nickname || 'xk').slice(0, 2).toLowerCase()
@@ -922,6 +1066,12 @@ function App() {
   const activeInitialSuggestions = chatInitialSuggestions[activeView] || []
   const activeInitialSuggestionsLoading = chatInitialSuggestionsLoading[activeView] || false
   const activeFollowupLoadingMessageId = chatFollowupLoadingMessageId[activeView] || ''
+  const isCurrentPaperFullTranslationOpen = Boolean(
+    isFullTranslationOpen
+    && activePaperId
+    && fullTranslationOpenPaperId === activePaperId,
+  )
+  const visibleNotificationToast = currentUser ? notificationToast : null
   const paperReaderState = {
     error,
     fileName,
@@ -966,7 +1116,7 @@ function App() {
         if (payload?.status !== 'running') {
           clearFullTranslationPolling()
         }
-      } catch (err) {
+      } catch {
         clearFullTranslationPolling()
         setFullTranslationStatus('error')
       }
@@ -978,12 +1128,8 @@ function App() {
   useEffect(() => {
     let cancelled = false
     clearFullTranslationPolling()
-    setIsFullTranslationOpen(false)
 
     if (!activePaperId) {
-      setFullTranslation(null)
-      setFullTranslationStatus('idle')
-      setFullTranslationProgress(0)
       return undefined
     }
 
@@ -1007,6 +1153,7 @@ function App() {
     return () => {
       cancelled = true
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePaperId])
 
   function snapshotAnnotations(items) {
@@ -1055,8 +1202,12 @@ function App() {
 
   function createChatMessageId(prefix) {
     chatMessageCounterRef.current += 1
-    return `${prefix}-${Date.now()}-${chatMessageCounterRef.current}`
+    return `${prefix}-${getNow()}-${chatMessageCounterRef.current}`
   }
+
+  useEffect(() => () => {
+    clearReadingResourceRefreshTimer()
+  }, [])
 
   function nextChatRequestToken() {
     chatRequestCounterRef.current += 1
@@ -1276,7 +1427,7 @@ function App() {
     if (!activePaperId) return
 
     if (!force && hasCompleteFullTranslationCache(fullTranslation)) {
-      setIsFullTranslationOpen(true)
+      openFullTranslationReader(activePaperId)
       return
     }
 
@@ -1323,7 +1474,7 @@ function App() {
       const result = await request(activePaperId, payload)
       applyFullTranslationState(result)
       if (result?.status === 'completed') {
-        setIsFullTranslationOpen(true)
+        openFullTranslationReader(activePaperId)
       } else {
         beginFullTranslationPolling(activePaperId)
       }
@@ -1393,7 +1544,7 @@ function App() {
           [viewKey]: questions,
         }
       })
-    } catch (_) {
+    } catch {
       if (initialSuggestionRequestRef.current[viewKey] !== requestToken) {
         return
       }
@@ -1486,7 +1637,7 @@ function App() {
           return message
         })
       })
-    } catch (_) {
+    } catch {
       if (followupSuggestionRequestRef.current[viewKey] !== requestToken) {
         return
       }
@@ -1618,7 +1769,7 @@ function App() {
           await new Promise(function (resolve) { setTimeout(resolve, 0) })
         }
       }
-    } catch (_) {
+    } catch {
       streamFailed = true
     }
 
@@ -1664,7 +1815,13 @@ function App() {
     if (activeWorkspacePanel !== 'ask' || activeView === 'home') return
     if (activeChatMessages.length > 0) return
     if (activeInitialSuggestions.length > 0 || activeInitialSuggestionsLoading) return
-    fetchInitialSuggestions(false)
+    const timerId = window.setTimeout(() => {
+      fetchInitialSuggestions(false)
+    }, 0)
+    return () => {
+      window.clearTimeout(timerId)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeWorkspacePanel,
     activeView,
@@ -1714,8 +1871,7 @@ function App() {
       if (saved) {
         const prepared = ensureInsertTarget(saved, activeNoteTarget)
         setActiveNoteTarget(prepared.target)
-        refreshResourceOverview()
-        refreshReadingDashboard()
+        scheduleReadingResourceRefresh(1200)
       }
       return saved
     }
@@ -1727,7 +1883,7 @@ function App() {
       pageNumber: note.page_number,
       startChar: note.start_char,
       endChar: note.end_char,
-      nonce: Date.now(),
+      nonce: createTransientId('note-focus'),
     })
   }
 
@@ -1741,7 +1897,7 @@ function App() {
       startChar: source.start_char ?? source.startChar ?? null,
       endChar: source.end_char ?? source.endChar ?? null,
       quote: source.quote || source.quote_text || '',
-      nonce: Date.now(),
+      nonce: createTransientId('summary-focus'),
     })
   }
 
@@ -1776,10 +1932,7 @@ function App() {
     const before = snapshotAnnotations(annotations)
     const result = await createAnnotation(payload)
     if (result) pushAnnotationUndo(activePaperId, before)
-    if (result) {
-      refreshResourceOverview()
-      refreshReadingDashboard()
-    }
+    if (result) scheduleReadingResourceRefresh(1200)
     return result
   }
 
@@ -1788,10 +1941,7 @@ function App() {
     const before = snapshotAnnotations(annotations)
     const result = await deleteAnnotation(annotationId)
     if (result) pushAnnotationUndo(activePaperId, before)
-    if (result) {
-      refreshResourceOverview()
-      refreshReadingDashboard()
-    }
+    if (result) scheduleReadingResourceRefresh(1200)
     return result
   }
 
@@ -1801,10 +1951,7 @@ function App() {
     const before = snapshotAnnotations(annotations)
     const result = await clearAnnotations()
     if (result) pushAnnotationUndo(activePaperId, before)
-    if (result) {
-      refreshResourceOverview()
-      refreshReadingDashboard()
-    }
+    if (result) scheduleReadingResourceRefresh(1200)
     return result
   }
 
@@ -1821,8 +1968,7 @@ function App() {
       pushAnnotationUndo(activePaperId, before)
       if (sessionKey) eraseUndoSessionsRef.current.add(sessionKey)
     }
-    refreshResourceOverview()
-    refreshReadingDashboard()
+    scheduleReadingResourceRefresh()
     return result
   }
 
@@ -1839,16 +1985,14 @@ function App() {
       ...prev,
       [activePaperId]: (prev[activePaperId] || []).slice(0, -1),
     }))
-    refreshResourceOverview()
-    refreshReadingDashboard()
+    scheduleReadingResourceRefresh(1200)
   }
 
   async function handleCreateInkAnnotation(payload) {
     if (!activePaperId) return null
     const result = await createInkAnnotation(payload)
     if (result) {
-      refreshResourceOverview()
-      refreshReadingDashboard()
+      scheduleReadingResourceRefresh()
     }
     return result
   }
@@ -1857,8 +2001,7 @@ function App() {
     if (!activePaperId) return null
     const result = await deleteInkAnnotation(inkId)
     if (result) {
-      refreshResourceOverview()
-      refreshReadingDashboard()
+      scheduleReadingResourceRefresh()
     }
     return result
   }
@@ -1867,8 +2010,7 @@ function App() {
     if (!activePaperId) return null
     const result = await createShapeAnnotation(payload)
     if (result) {
-      refreshResourceOverview()
-      refreshReadingDashboard()
+      scheduleReadingResourceRefresh()
     }
     return result
   }
@@ -1877,8 +2019,7 @@ function App() {
     if (!activePaperId) return null
     const result = await updateShapeAnnotation(shapeId, payload)
     if (result) {
-      refreshResourceOverview()
-      refreshReadingDashboard()
+      scheduleReadingResourceRefresh()
     }
     return result
   }
@@ -1887,8 +2028,7 @@ function App() {
     if (!activePaperId) return null
     const result = await deleteShapeAnnotation(shapeId)
     if (result) {
-      refreshResourceOverview()
-      refreshReadingDashboard()
+      scheduleReadingResourceRefresh()
     }
     return result
   }
@@ -1924,6 +2064,8 @@ function App() {
     setHomeInitialSection('recent')
     setSummaryInitialType('')
     setAccountSection('')
+    setAuthMode('login')
+    setIsAuthViewOpen(false)
     goHome()
   }
 
@@ -1964,8 +2106,9 @@ function App() {
     '--ui-font-scale': uiFontScale,
     '--ui-topbar-scale': uiTopbarScale,
   }
+  const shouldShowAuthView = !isSessionRestoring && isAuthViewOpen
 
-  if (!isAuthViewOpen && currentUser?.is_admin) {
+  if (!shouldShowAuthView && currentUser?.is_admin) {
     return (
       <div className="app-shell app-shell--account" style={appShellStyle}>
         <main className="workspace">
@@ -1979,8 +2122,8 @@ function App() {
 
   return (
     <div
-      className={`app-shell${isAuthViewOpen ? ' app-shell--auth' : ''}${
-        !isAuthViewOpen && isAccountView ? ' app-shell--account' : ''
+      className={`app-shell${shouldShowAuthView ? ' app-shell--auth' : ''}${
+        !shouldShowAuthView && isAccountView ? ' app-shell--account' : ''
       }`}
       style={appShellStyle}
     >
@@ -1993,7 +2136,7 @@ function App() {
         type="file"
       />
 
-      {!isAuthViewOpen && !isAccountView ? (
+      {!shouldShowAuthView && !isAccountView ? (
         <header className="topbar">
           <div className="brand-tabs">
             <div className="brand-mark">xk</div>
@@ -2075,8 +2218,8 @@ function App() {
                   onClick={() => setIsUserMenuOpen((value) => !value)}
                 >
                   <span className="topbar-user__avatar">
-                    {currentUser.avatar_url ? (
-                      <img src={currentUser.avatar_url} alt={currentUser.nickname} />
+                    {currentUserAvatarSrc ? (
+                      <img src={currentUserAvatarSrc} alt={currentUser.nickname} />
                     ) : (
                       userInitials
                     )}
@@ -2088,8 +2231,8 @@ function App() {
                   <div className="user-menu">
                     <div className="user-menu__header">
                       <div className="user-menu__avatar">
-                        {currentUser.avatar_url ? (
-                          <img src={currentUser.avatar_url} alt={currentUser.nickname} />
+                        {currentUserAvatarSrc ? (
+                          <img src={currentUserAvatarSrc} alt={currentUser.nickname} />
                         ) : (
                           userInitials
                         )}
@@ -2150,7 +2293,7 @@ function App() {
       ) : null}
 
       <main className="workspace">
-        {isAuthViewOpen ? (
+        {shouldShowAuthView ? (
           <div className="workspace-view workspace-view--auth is-active">
             <Login
               key={authMode}
@@ -2166,10 +2309,11 @@ function App() {
 
         <div
           className={`workspace-view workspace-view--home${
-            !isAuthViewOpen && !isAccountView && isHomeView ? ' is-active' : ' is-hidden'
+            !shouldShowAuthView && !isAccountView && isHomeView ? ' is-active' : ' is-hidden'
           }`}
         >
           <HomePage
+            currentUser={currentUser}
             folders={folders}
             importConflict={importConflict}
             isImporting={isImporting}
@@ -2191,26 +2335,30 @@ function App() {
             onRenameFolder={renameFolder}
             onResolveImportConflict={resolveImportConflict}
             recentPapers={recentPapers}
-            readingDashboard={readingDashboard}
+            readingDashboard={visibleReadingDashboard}
             insightTimeframe={insightTimeframe}
             onInsightTimeframeChange={setInsightTimeframe}
             recentReadings={recentReadings}
             readingStats={readingStats}
-            resourceOverview={resourceOverview}
+            resourceOverview={visibleResourceOverview}
             trashPapers={trashPapers}
             uiFontScale={uiFontScale}
             uncategorizedFolderId={uncategorizedFolderId}
             initialSection={homeInitialSection}
+            onRequestLogin={() => {
+              setAuthMode('login')
+              setIsAuthViewOpen(true)
+            }}
           />
         </div>
 
         <div
           className={`workspace-view workspace-view--reader${
-            !isAuthViewOpen && !isAccountView && isReaderView ? ' is-active' : ' is-hidden'
+            !shouldShowAuthView && !isAccountView && isReaderView ? ' is-active' : ' is-hidden'
           }`}
           ref={readerLayoutRef}
         >
-          {isFullTranslationOpen ? (
+          {isCurrentPaperFullTranslationOpen ? (
             <FullTranslationReader
               paperId={activePaperId}
               fileName={fileName}
@@ -2223,7 +2371,7 @@ function App() {
               uiFontScale={uiFontScale}
               onParseModeChange={setFullTranslationParseMode}
               onRegenerate={() => handleFullTranslate({ force: true })}
-              onBack={() => setIsFullTranslationOpen(false)}
+              onBack={closeFullTranslationReader}
             />
           ) : (
             <>
@@ -2365,7 +2513,7 @@ function App() {
 
         <div
           className={`workspace-view workspace-view--account${
-            !isAuthViewOpen && isAccountView ? ' is-active' : ' is-hidden'
+            !shouldShowAuthView && isAccountView ? ' is-active' : ' is-hidden'
           }`}
         >
           {accountSection === 'admin' ? (
@@ -2409,51 +2557,93 @@ function App() {
       <Sheet open={isNotificationOpen} onOpenChange={setIsNotificationOpen}>
         <SheetContent className="notification-sheet" side="right">
           <SheetHeader className="notification-sheet__header">
-            <SheetTitle>通知</SheetTitle>
-            <SheetDescription>最近任务完成和失败提醒。</SheetDescription>
+            <div className="notification-sheet__hero">
+              <div className="notification-sheet__hero-copy">
+                <span className="notification-sheet__eyebrow">消息中心</span>
+                <SheetTitle>通知中心</SheetTitle>
+                <SheetDescription>这里会保存系统消息、管理员广播和任务结果通知。</SheetDescription>
+              </div>
+              <div className="notification-sheet__hero-icon" aria-hidden="true">
+                <Bell size={18} />
+              </div>
+            </div>
             <div className="notification-sheet__meta">
-              <span>{notificationSummary.unread_count} 条未读</span>
-              <button type="button" className="notification-sheet__read-all" onClick={handleReadAllNotifications}>
-                全部已读
-              </button>
+              <div className="notification-sheet__meta-card">
+                <span className="notification-sheet__meta-label">未读通知</span>
+                <strong>{notificationSummary.unread_count}</strong>
+              </div>
+              <div className="notification-sheet__actions">
+                <button type="button" className="notification-sheet__read-all" onClick={handleReadAllNotifications}>
+                  全部已读
+                </button>
+                <button type="button" className="notification-sheet__clear-all" onClick={handleClearAllNotifications}>
+                  清空全部
+                </button>
+              </div>
             </div>
           </SheetHeader>
 
           <div className="notification-sheet__body">
             {notificationLoading ? (
-              <div className="notification-sheet__empty">正在加载通知...</div>
+              <div className="notification-sheet__empty">
+                <div className="notification-sheet__empty-icon" aria-hidden="true">
+                  <Sparkles size={18} />
+                </div>
+                <strong>通知加载中</strong>
+                <span>正在整理你最近的系统消息和任务动态。</span>
+              </div>
             ) : notificationItems.length ? (
               <div className="notification-list">
                 {notificationItems.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={`notification-item${item.read_at ? '' : ' is-unread'}`}
-                    onClick={() => handleNotificationOpen(item)}
-                  >
-                    <div className="notification-item__head">
-                      <strong>{item.title || '通知'}</strong>
-                      <span>{formatNotificationTime(item.created_at)}</span>
-                    </div>
-                    <p>{item.message || '点击查看详情'}</p>
-                  </button>
+                  <div key={item.id} className={`notification-item${item.read_at ? '' : ' is-unread'}`}>
+                    <button
+                      type="button"
+                      className="notification-item__open"
+                      onClick={() => handleNotificationOpen(item)}
+                    >
+                      <div className="notification-item__badge-row">
+                        <span className="notification-item__badge">{getNotificationLabel(item)}</span>
+                        {!item.read_at ? <span className="notification-item__dot" aria-hidden="true" /> : null}
+                      </div>
+                      <div className="notification-item__head">
+                        <strong>{item.title || '通知'}</strong>
+                        <span>{formatNotificationTime(item.created_at)}</span>
+                      </div>
+                      <p>{item.message || '点击查看通知详情'}</p>
+                    </button>
+                    <button
+                      type="button"
+                      className="notification-item__delete"
+                      onClick={() => void handleDeleteNotification(item.id)}
+                      aria-label="删除通知"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
                 ))}
               </div>
             ) : (
-              <div className="notification-sheet__empty">最近还没有通知。</div>
+              <div className="notification-sheet__empty">
+                <div className="notification-sheet__empty-icon" aria-hidden="true">
+                  <Bell size={18} />
+                </div>
+                <strong>当前没有通知</strong>
+                <span>新的系统消息、广播和任务结果会优先出现在这里。</span>
+              </div>
             )}
           </div>
         </SheetContent>
       </Sheet>
 
-      {notificationToast ? (
-        <button type="button" className="notification-toast" onClick={() => handleNotificationOpen(notificationToast)}>
+      {visibleNotificationToast ? (
+        <button type="button" className="notification-toast" onClick={() => handleNotificationOpen(visibleNotificationToast)}>
           <div className="notification-toast__icon">
             <Bell size={16} />
           </div>
           <div className="notification-toast__content">
-            <strong>{notificationToast.title || '通知'}</strong>
-            <p>{notificationToast.message || '点击查看详情'}</p>
+            <span className="notification-toast__eyebrow">{getNotificationLabel(visibleNotificationToast)}</span>
+            <strong>{visibleNotificationToast.title || '通知'}</strong>
+            <p>{visibleNotificationToast.message || '点击查看详情'}</p>
           </div>
           <span
             className="notification-toast__close"

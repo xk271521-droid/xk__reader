@@ -85,6 +85,22 @@ export function useShapeAnnotations(paperId) {
   const updateShapeAnnotation = useCallback(async (annotationId, payload = {}) => {
     if (!paperId || annotationId == null) return null
 
+    let previousAnnotation = null
+    setShapeAnnotations((prev) => prev.map((item) => {
+      if (item.id !== annotationId) return item
+      previousAnnotation = item
+      return {
+        ...item,
+        ...payload,
+        extra: payload.extra != null
+          ? payload.extra
+          : item.extra,
+        style: payload.style != null
+          ? payload.style
+          : item.style,
+      }
+    }))
+
     try {
       const data = await apiFetch(`${SHAPE_BASE}/${paperId}/shape-annotations/${annotationId}`, {
         method: 'PATCH',
@@ -96,6 +112,11 @@ export function useShapeAnnotations(paperId) {
       }
       return data
     } catch {
+      if (previousAnnotation) {
+        setShapeAnnotations((prev) => prev.map((item) =>
+          item.id === annotationId ? previousAnnotation : item,
+        ))
+      }
       return null
     }
   }, [paperId])

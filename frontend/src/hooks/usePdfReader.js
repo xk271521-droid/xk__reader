@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getStoredAuthToken } from '../services/authApi'
-import { createPdfLoadingTask, loadPdfJs } from '../services/pdfjsClient'
+import { createPdfLoadingTask } from '../services/pdfjsClient'
 import {
   createFolder as apiCreateFolder,
   deleteFolder as apiDeleteFolder,
@@ -288,6 +288,10 @@ function destroyPaperResources(resource) {
   }
 }
 
+function getNow() {
+  return Date.now()
+}
+
 export function usePdfReader({ currentUser } = {}) {
   const fileInputRef = useRef(null)
   const importFolderIdRef = useRef('')
@@ -303,13 +307,13 @@ export function usePdfReader({ currentUser } = {}) {
   const [folders, setFolders] = useState([])
   const [trashPapers, setTrashPapers] = useState([])
   const [openTabIds, setOpenTabIds] = useState([])
-  const openTabIdsRef = useRef(openTabIds)
-  openTabIdsRef.current = openTabIds
   const [uncategorizedFolderId, setUncategorizedFolderId] = useState('')
   const [recentReadings, setRecentReadings] = useState(getStoredRecentReadings())
   const [importConflict, setImportConflict] = useState(null)
   const [readingStats, setReadingStats] = useState(null)
   const [readingDurationVersion, setReadingDurationVersion] = useState(0)
+  const [paperSummaries, setPaperSummaries] = useState({})
+  const [paperFullTexts, setPaperFullTexts] = useState({})
 
   // ── Cleanup on unmount ──────────────────────────────────
 
@@ -323,20 +327,9 @@ export function usePdfReader({ currentUser } = {}) {
     [],
   )
 
-  useEffect(() => {
-    function handleBeforeUnload() {
-      if (activeView !== 'home') {
-        flushReadingDuration(activeView, { finalize: true })
-      }
-    }
-
-    window.addEventListener('beforeunload', handleBeforeUnload)
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
-  }, [activeView])
-
   // ── Sync with backend ──────────────────────────────────
 
-  async function syncFromBackend() {
+  const syncFromBackend = useCallback(async () => {
     const token = getStoredAuthToken()
     if (!token) return
 
@@ -369,6 +362,10 @@ export function usePdfReader({ currentUser } = {}) {
       setFolders(userFolders)
       setPapers(localPapers)
       setTrashPapers(serverTrash.map(normalizeTrashPaper))
+      summaryMapRef.current.clear()
+      fullTextMapRef.current.clear()
+      setPaperSummaries({})
+      setPaperFullTexts({})
       // Close tabs that came from previous session
       setOpenTabIds([])
       setActiveView('home')
@@ -435,7 +432,7 @@ export function usePdfReader({ currentUser } = {}) {
     } catch (error) {
       console.error('syncFromBackend failed:', error)
     }
-  }
+  }, [])
 
   // Sync when user logs in or changes
   useEffect(() => {
@@ -448,6 +445,10 @@ export function usePdfReader({ currentUser } = {}) {
         setOpenTabIds([])
         setActiveView('home')
         setUncategorizedFolderId('')
+        summaryMapRef.current.clear()
+        fullTextMapRef.current.clear()
+        setPaperSummaries({})
+        setPaperFullTexts({})
         uncategorizedFolderIdRef.current = ''
         paperResourcesRef.current.forEach((resource) => {
           destroyPaperResources(resource)
@@ -461,7 +462,7 @@ export function usePdfReader({ currentUser } = {}) {
     if (lastSyncUserRef.current === currentUser.uid) return
     lastSyncUserRef.current = currentUser.uid
     syncFromBackend()
-  }, [currentUser])
+  }, [currentUser, syncFromBackend])
 
   // ── Derived state ──────────────────────────────────────
 
@@ -505,6 +506,14 @@ export function usePdfReader({ currentUser } = {}) {
     [folderMap, openTabIds, papers],
   )
 
+  const pageNumbers = useMemo(
+    () => Array.from(
+      { length: activePaper?.totalPages ?? 0 },
+      (_, index) => index + 1,
+    ),
+    [activePaper?.totalPages],
+  )
+
   // ── Helpers ────────────────────────────────────────────
 
   function updatePaper(paperId, updater) {
@@ -515,12 +524,53 @@ export function usePdfReader({ currentUser } = {}) {
     )
   }
 
+  function setPaperSummary(paperId, summary) {
+    summaryMapRef.current.set(paperId, summary)
+    setPaperSummaries((current) => (
+      current[paperId] === summary
+        ? current
+        : {
+            ...current,
+            [paperId]: summary,
+          }
+    ))
+  }
+
+  function setPaperFullText(paperId, fullText) {
+    fullTextMapRef.current.set(paperId, fullText)
+    setPaperFullTexts((current) => (
+      current[paperId] === fullText
+        ? current
+        : {
+            ...current,
+            [paperId]: fullText,
+          }
+    ))
+  }
+
+  function clearPaperDerivedContent(paperId) {
+    summaryMapRef.current.delete(paperId)
+    fullTextMapRef.current.delete(paperId)
+    setPaperSummaries((current) => {
+      if (!(paperId in current)) return current
+      const next = { ...current }
+      delete next[paperId]
+      return next
+    })
+    setPaperFullTexts((current) => {
+      if (!(paperId in current)) return current
+      const next = { ...current }
+      delete next[paperId]
+      return next
+    })
+  }
+
   function flushReadingDuration(paperId, options = {}) {
     const { finalize = true } = options
     if (!getStoredAuthToken()) return
     const session = readingSessionsRef.current.get(paperId)
     if (!session) return
-    const totalMs = session.accumulatedMs + (session.running ? Math.max(0, Date.now() - session.lastResumedAt) : 0)
+    const totalMs = session.accumulatedMs + (session.running ? Math.max(0, getNow() - session.lastResumedAt) : 0)
     const durationSeconds = Math.floor(totalMs / 1000)
     if (durationSeconds < 15) {
       if (finalize) {
@@ -550,7 +600,7 @@ export function usePdfReader({ currentUser } = {}) {
   function pauseReadingSession(paperId) {
     const session = readingSessionsRef.current.get(paperId)
     if (!session || !session.running) return
-    session.accumulatedMs += Math.max(0, Date.now() - session.lastResumedAt)
+    session.accumulatedMs += Math.max(0, getNow() - session.lastResumedAt)
     session.running = false
     flushReadingDuration(paperId, { finalize: false })
   }
@@ -559,13 +609,24 @@ export function usePdfReader({ currentUser } = {}) {
     const existing = readingSessionsRef.current.get(paperId)
     if (existing) {
       if (!existing.running) {
-        existing.lastResumedAt = Date.now()
+        existing.lastResumedAt = getNow()
         existing.running = true
       }
       return
     }
     readingSessionsRef.current.set(paperId, createReadingSession())
   }
+
+  useEffect(() => {
+    function handleBeforeUnload() {
+      if (activeView !== 'home') {
+        flushReadingDuration(activeView, { finalize: true })
+      }
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [activeView])
 
   function replacePaperId(oldId, newId) {
     setPapers((currentPapers) =>
@@ -592,6 +653,28 @@ export function usePdfReader({ currentUser } = {}) {
     if (resource) {
       paperResourcesRef.current.delete(oldId)
       paperResourcesRef.current.set(newId, resource)
+    }
+    if (summaryMapRef.current.has(oldId)) {
+      const summary = summaryMapRef.current.get(oldId) ?? ''
+      summaryMapRef.current.delete(oldId)
+      setPaperSummaries((current) => {
+        if (!(oldId in current)) return current
+        const next = { ...current }
+        delete next[oldId]
+        return next
+      })
+      setPaperSummary(newId, summary)
+    }
+    if (fullTextMapRef.current.has(oldId)) {
+      const fullText = fullTextMapRef.current.get(oldId) ?? ''
+      fullTextMapRef.current.delete(oldId)
+      setPaperFullTexts((current) => {
+        if (!(oldId in current)) return current
+        const next = { ...current }
+        delete next[oldId]
+        return next
+      })
+      setPaperFullText(newId, fullText)
     }
   }
 
@@ -630,7 +713,7 @@ export function usePdfReader({ currentUser } = {}) {
 
     // Only record reading event if this is a fresh open (not switching tabs)
     // Uses ref (not state) to avoid stale closure — ref is synced to latest openTabIds every render
-    const isAlreadyOpen = openTabIdsRef.current.includes(paperId)
+    const isAlreadyOpen = openTabIds.includes(paperId)
 
     // Write to localStorage recent readings
     const folderName = folderMap.get(paper.folderId)?.name || '未分类'
@@ -644,11 +727,12 @@ export function usePdfReader({ currentUser } = {}) {
         apiUpdatePaper(serverId, { last_viewed_at: true }).catch(() => {})
         // Only record a new reading event if not already open in tabs
         if (!isAlreadyOpen) {
-          recordReadingEvent(serverId, Date.now())
+          const openedAt = getNow()
+          recordReadingEvent(serverId, openedAt)
             .then((record) => {
               const session = readingSessionsRef.current.get(paperId) || createReadingSession()
               session.recordId = record?.id ?? null
-              session.lastResumedAt = Date.now()
+              session.lastResumedAt = openedAt
               session.running = true
               readingSessionsRef.current.set(paperId, session)
               return fetchReadingStats()
@@ -676,18 +760,14 @@ export function usePdfReader({ currentUser } = {}) {
     try {
       const fullText = await extractFullText(documentProxy)
       if (!fullText || fullText.length < 100) return
-      fullTextMapRef.current.set(paperId, fullText)
+      setPaperFullText(paperId, fullText)
       const truncated = fullText.slice(0, 40000)
-      const activeId = activeView
       const { providers } = await fetchAiProviders()
       const provider = providers?.find(p => p.is_active)
       if (!provider) return
       const data = await fetchPaperSummary(truncated, provider.id)
       if (data?.summary) {
-        summaryMapRef.current.set(paperId, data.summary)
-        if (activeView === activeId) {
-          setPapers(p => p.map(pp => pp.id === paperId ? { ...pp } : pp))
-        }
+        setPaperSummary(paperId, data.summary)
       }
     } catch { /* silent */ }
   }
@@ -762,8 +842,7 @@ export function usePdfReader({ currentUser } = {}) {
 
   function closePaper(paperId) {
     flushReadingDuration(paperId, { finalize: true })
-    summaryMapRef.current.delete(paperId)
-    fullTextMapRef.current.delete(paperId)
+    clearPaperDerivedContent(paperId)
     setOpenTabIds((currentIds) => {
       const closingIndex = currentIds.indexOf(paperId)
       const nextIds = currentIds.filter((id) => id !== paperId)
@@ -787,11 +866,10 @@ export function usePdfReader({ currentUser } = {}) {
 
   function deletePaper(paperId) {
     flushReadingDuration(paperId, { finalize: true })
-    summaryMapRef.current.delete(paperId)
-    fullTextMapRef.current.delete(paperId)
+    clearPaperDerivedContent(paperId)
     const paper = paperMap.get(paperId)
     if (paper) {
-      const deletedAt = Date.now()
+      const deletedAt = getNow()
       setTrashPapers((current) => [
         {
           id: paper.id,
@@ -1269,13 +1347,10 @@ export function usePdfReader({ currentUser } = {}) {
     openTabs,
     pageMetrics: activePaper?.pageMetrics ?? [],
     pageNumber: activePaper?.pageNumber ?? 1,
-    pageNumbers: Array.from(
-      { length: activePaper?.totalPages ?? 0 },
-      (_, index) => index + 1,
-    ),
+    pageNumbers,
     pdfDocument: activePaper?.pdfDocument ?? null,
-    activePaperSummary: activePaper ? summaryMapRef.current.get(activePaper.id) ?? '' : '',
-    activePaperFullText: activePaper ? fullTextMapRef.current.get(activePaper.id) ?? '' : '',
+    activePaperSummary: activePaper ? paperSummaries[activePaper.id] ?? '' : '',
+    activePaperFullText: activePaper ? paperFullTexts[activePaper.id] ?? '' : '',
     recentPapers,
     readingStats,
     recentReadings,

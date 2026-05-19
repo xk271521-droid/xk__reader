@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Download, ZoomIn, ZoomOut, X } from 'lucide-react'
+import { Download, X } from 'lucide-react'
 import { PdfPage } from './PdfPage'
 import { ScreenshotFloatingMenu } from './ScreenshotFloatingMenu'
 import { SelectionFloatingMenu } from './SelectionFloatingMenu'
@@ -25,10 +25,19 @@ import {
   isPointInsideRect,
 } from './pdfSelectionModel'
 
-const PAGE_OVERSCAN = 2
+const PAGE_OVERSCAN = 1
 const DRAG_START_DISTANCE = 2
 const DEFAULT_ANNOTATION_COLOR = '#F3B300'
 const DEFAULT_INK_OPTIONS = { color: '#15803D', opacity: 0.85, strokeWidth: 6 }
+const EMPTY_ITEMS = []
+
+function buildDownloadFilename(pageNumber) {
+  return `paper-screenshot-p${pageNumber}-${Date.now()}.png`
+}
+
+function buildEraserSessionId() {
+  return `${Date.now()}:${Math.random().toString(36).slice(2)}`
+}
 
 function getPageFrameFromElement(element) {
   return element && typeof element.closest === 'function'
@@ -249,30 +258,6 @@ function inkStrokeIntersectsRect(stroke, rect) {
   return false
 }
 
-function buildEraserPreview(pageIndex, pageNumber, startChar, endChar) {
-  const orderedStart = Math.min(startChar, endChar)
-  const orderedEnd = Math.max(startChar, endChar)
-  if (orderedEnd <= orderedStart) {
-    return createEmptyEraserPreview()
-  }
-
-  const geometry = getTextRangeGeometry(pageIndex, orderedStart, orderedEnd, {
-    visualMode: 'eraser-preview',
-  })
-  const rects = geometry.rects
-  if (rects.length === 0) {
-    return createEmptyEraserPreview()
-  }
-
-  return {
-    visible: true,
-    pageNumber,
-    startChar: orderedStart,
-    endChar: orderedEnd,
-    rects,
-  }
-}
-
 function buildSelectionFromWords(pageIndex, pageNumber, startWordIndex, endWordIndex) {
   const selection = buildSelectionFromWordRange(pageIndex, startWordIndex, endWordIndex)
   if (!selection) {
@@ -389,7 +374,6 @@ export function PdfViewport({
   inkOptions = DEFAULT_INK_OPTIONS,
   shapeAnnotations = [],
   shapeOptions = DEFAULT_SHAPE_OPTIONS,
-  currentPaperId,
   onCreateAnnotation,
   onDeleteAnnotation,
   onEraseAnnotationRange,
@@ -407,9 +391,11 @@ export function PdfViewport({
   const pageListRef = useRef(null)
   const fittedDocumentRef = useRef(null)
   const pageIndexesRef = useRef(new Map())
+  const visiblePageEntriesRef = useRef(new Map())
   const lastScrolledNoteFocusRef = useRef(null)
   const lastScrolledSearchRef = useRef(null)
   const onVisiblePageChangeRef = useRef(onVisiblePageChange)
+  const currentPageRef = useRef(pageNumber)
   const pointerSelectionRef = useRef(null)
   const eraserStrokeRef = useRef(null)
   const inkStrokeRef = useRef(null)
@@ -425,6 +411,9 @@ export function PdfViewport({
   const screenshotDragRef = useRef(null)
   const pinnedDragRef = useRef(null)
   const currentSelectionRef = useRef(createEmptySelection())
+  const transientFrameRef = useRef(0)
+  const pendingTransientStateRef = useRef({})
+  const progressBarRef = useRef(null)
   const [selectedAnnotationColor, setSelectedAnnotationColor] = useState(DEFAULT_ANNOTATION_COLOR)
   const [floatingMenu, setFloatingMenu] = useState({ visible: false, x: 0, y: 0 })
   const [screenshotMenu, setScreenshotMenu] = useState({ visible: false, x: 0, y: 0 })
@@ -439,10 +428,92 @@ export function PdfViewport({
   const [selectionState, setSelectionState] = useState(createEmptySelection())
   const [selectionDebugEnabled] = useState(isSelectionDebugEnabled)
   const [searchFlashNonce, setSearchFlashNonce] = useState(0)
+  const [pageIndexesByPage, setPageIndexesByPage] = useState(() => new Map())
   const activeSearchMatch = matchIndex >= 0 ? matches[matchIndex] : null
   const activeSearchKey = activeSearchMatch
     ? `${matchIndex}:${activeSearchMatch.pageNumber}:${activeSearchMatch.startChar}:${activeSearchMatch.endChar}`
     : ''
+
+  function applyTransientStateUpdate(key, value) {
+    switch (key) {
+      case 'drawingInkStroke':
+        setDrawingInkStroke(value)
+        break
+      case 'shapePreview':
+        setShapePreview(value)
+        break
+      case 'screenshotSelection':
+        setScreenshotSelection(value)
+        break
+      case 'eraserPreview':
+        setEraserPreview(value)
+        break
+      case 'selectionState':
+        setSelectionState(value)
+        break
+      case 'shapeDrafts':
+        setShapeDrafts(value)
+        break
+      default:
+        break
+    }
+  }
+
+  function cancelTransientFrameIfIdle() {
+    if (
+      transientFrameRef.current &&
+      typeof window !== 'undefined' &&
+      Object.keys(pendingTransientStateRef.current).length === 0
+    ) {
+      window.cancelAnimationFrame(transientFrameRef.current)
+      transientFrameRef.current = 0
+    }
+  }
+
+  function flushPendingTransientStates() {
+    const pendingUpdates = pendingTransientStateRef.current
+    pendingTransientStateRef.current = {}
+    transientFrameRef.current = 0
+
+    if ('drawingInkStroke' in pendingUpdates) {
+      setDrawingInkStroke(pendingUpdates.drawingInkStroke)
+    }
+    if ('shapePreview' in pendingUpdates) {
+      setShapePreview(pendingUpdates.shapePreview)
+    }
+    if ('screenshotSelection' in pendingUpdates) {
+      setScreenshotSelection(pendingUpdates.screenshotSelection)
+    }
+    if ('eraserPreview' in pendingUpdates) {
+      setEraserPreview(pendingUpdates.eraserPreview)
+    }
+    if ('selectionState' in pendingUpdates) {
+      setSelectionState(pendingUpdates.selectionState)
+    }
+    if ('shapeDrafts' in pendingUpdates) {
+      setShapeDrafts(pendingUpdates.shapeDrafts)
+    }
+  }
+
+  function scheduleTransientStateUpdate(key, value) {
+    pendingTransientStateRef.current[key] = value
+
+    if (typeof window === 'undefined') {
+      flushPendingTransientStates()
+      return
+    }
+
+    if (transientFrameRef.current) return
+    transientFrameRef.current = window.requestAnimationFrame(() => {
+      flushPendingTransientStates()
+    })
+  }
+
+  function setTransientStateImmediately(key, value) {
+    delete pendingTransientStateRef.current[key]
+    cancelTransientFrameIfIdle()
+    applyTransientStateUpdate(key, value)
+  }
 
   const annotationsByPage = useMemo(() => {
     const map = new Map()
@@ -466,10 +537,10 @@ export function PdfViewport({
   }, [inkAnnotations])
 
   const mergedShapeAnnotations = useMemo(() => (
-    (shapeAnnotations || []).map((annotation) => ({
-      ...annotation,
-      ...(shapeDrafts[annotation.id] || {}),
-    }))
+    (shapeAnnotations || []).map((annotation) => {
+      const draft = shapeDrafts[annotation.id]
+      return draft ? { ...annotation, ...draft } : annotation
+    })
   ), [shapeAnnotations, shapeDrafts])
 
   const shapeAnnotationsByPage = useMemo(() => {
@@ -525,75 +596,122 @@ export function PdfViewport({
     onVisiblePageChangeRef.current = onVisiblePageChange
   }, [onVisiblePageChange])
 
-  function getRenderableAnnotations(pageNum) {
-    const pageIndex = pageIndexesRef.current.get(pageNum)
-    const pageAnnotations = annotationsByPage.get(pageNum) || []
-    const renderSourceAnnotations = mergeRenderableAnnotationRanges(pageAnnotations)
-    const renderedAnnotations = renderSourceAnnotations.map((annotation) => {
-      const canUseTextGeometry =
-        pageIndex && ['v2', 'v3'].includes(annotation.geometry_version || 'v1')
-      const visualMode = annotation.type === 'highlight' ? 'highlight' : 'eraser-preview'
-      const textGeometry = canUseTextGeometry
-        ? getTextRangeGeometry(pageIndex, annotation.start_char, annotation.end_char, {
-          visualMode,
-        })
+  useEffect(() => {
+    currentPageRef.current = pageNumber
+  }, [pageNumber])
+
+  useEffect(() => () => {
+    if (transientFrameRef.current && typeof window !== 'undefined') {
+      window.cancelAnimationFrame(transientFrameRef.current)
+    }
+  }, [])
+
+  const renderableAnnotationsByPage = useMemo(() => {
+    function buildRenderableAnnotationsForPage(pageNum) {
+      const pageIndex = pageIndexesByPage.get(pageNum)
+      const pageAnnotations = annotationsByPage.get(pageNum) || []
+      const renderSourceAnnotations = mergeRenderableAnnotationRanges(pageAnnotations)
+      const renderedAnnotations = renderSourceAnnotations.map((annotation) => {
+        const canUseTextGeometry =
+          pageIndex && ['v2', 'v3'].includes(annotation.geometry_version || 'v1')
+        const visualMode = annotation.type === 'highlight' ? 'highlight' : 'eraser-preview'
+        const textGeometry = canUseTextGeometry
+          ? getTextRangeGeometry(pageIndex, annotation.start_char, annotation.end_char, {
+            visualMode,
+          })
+          : null
+
+        return {
+          ...annotation,
+          rects: textGeometry?.rects || (annotation.rects || []),
+          decorationRects:
+            canUseTextGeometry &&
+            (annotation.type === 'underline' || annotation.type === 'wavy_underline')
+              ? getTextRangeGeometry(pageIndex, annotation.start_char, annotation.end_char, {
+                visualMode: annotation.type === 'wavy_underline' ? 'wavy-underline' : 'underline',
+              }).rects
+              : [],
+        }
+      })
+
+      const renderedSearchMatches = (searchMatchesByPage.get(pageNum) || []).map((match, index) => {
+        const isCurrent =
+          activeSearchMatch?.pageNumber === pageNum &&
+          activeSearchMatch?.startChar === match.startChar &&
+          activeSearchMatch?.endChar === match.endChar
+
+        return {
+          id: isCurrent
+            ? `search-current:${searchFlashNonce}:${pageNum}:${match.startChar}:${match.endChar}`
+            : `search:${pageNum}:${index}:${match.startChar}:${match.endChar}`,
+          page_number: pageNum,
+          start_char: match.startChar,
+          end_char: match.endChar,
+          quote_text: '',
+          rects: getTextRangeGeometry(pageIndex, match.startChar, match.endChar, {
+            visualMode: 'search',
+          }).rects,
+          type: isCurrent ? 'search_current' : 'search',
+          color: null,
+        }
+      })
+
+      const noteFocusRange = pageIndex && noteFocus?.pageNumber === pageNum
+        ? resolveFocusRange(pageIndex, noteFocus)
         : null
+      const renderedNoteFocus = pageIndex && noteFocusRange
+        ? [{
+          id: `note-focus:${noteFocus.nonce}`,
+          page_number: pageNum,
+          start_char: noteFocusRange.startChar,
+          end_char: noteFocusRange.endChar,
+          quote_text: '',
+          rects: getTextRangeGeometry(pageIndex, noteFocusRange.startChar, noteFocusRange.endChar, {
+            visualMode: 'highlight',
+          }).rects,
+          type: 'note_focus',
+          color: null,
+        }]
+        : []
 
-      return {
-        ...annotation,
-        rects: textGeometry?.rects || (annotation.rects || []),
-        decorationRects:
-          canUseTextGeometry &&
-          (annotation.type === 'underline' || annotation.type === 'wavy_underline')
-            ? getTextRangeGeometry(pageIndex, annotation.start_char, annotation.end_char, {
-              visualMode: annotation.type === 'wavy_underline' ? 'wavy-underline' : 'underline',
-            }).rects
-            : [],
-      }
-    })
+      return [...renderedAnnotations, ...renderedSearchMatches, ...renderedNoteFocus]
+    }
 
-    const renderedSearchMatches = (searchMatchesByPage.get(pageNum) || []).map((match, index) => {
-      const isCurrent =
-        activeSearchMatch?.pageNumber === pageNum &&
-        activeSearchMatch?.startChar === match.startChar &&
-        activeSearchMatch?.endChar === match.endChar
+    const map = new Map()
+    const touchedPages = new Set([
+      ...annotationsByPage.keys(),
+      ...searchMatchesByPage.keys(),
+    ])
 
-      return {
-        id: isCurrent
-          ? `search-current:${searchFlashNonce}:${pageNum}:${match.startChar}:${match.endChar}`
-          : `search:${pageNum}:${index}:${match.startChar}:${match.endChar}`,
-        page_number: pageNum,
-        start_char: match.startChar,
-        end_char: match.endChar,
-        quote_text: '',
-        rects: getTextRangeGeometry(pageIndex, match.startChar, match.endChar, {
-          visualMode: 'search',
-        }).rects,
-        type: isCurrent ? 'search_current' : 'search',
-        color: null,
-      }
-    })
+    if (noteFocus?.pageNumber) {
+      touchedPages.add(noteFocus.pageNumber)
+    }
 
-    const noteFocusRange = pageIndex && noteFocus?.pageNumber === pageNum
-      ? resolveFocusRange(pageIndex, noteFocus)
-      : null
-    const renderedNoteFocus = pageIndex && noteFocusRange
-      ? [{
-        id: `note-focus:${noteFocus.nonce}`,
-        page_number: pageNum,
-        start_char: noteFocusRange.startChar,
-        end_char: noteFocusRange.endChar,
-        quote_text: '',
-        rects: getTextRangeGeometry(pageIndex, noteFocusRange.startChar, noteFocusRange.endChar, {
-          visualMode: 'highlight',
-        }).rects,
-        type: 'note_focus',
-        color: null,
-      }]
-      : []
+    for (const pageNum of touchedPages) {
+      map.set(pageNum, buildRenderableAnnotationsForPage(pageNum))
+    }
 
-    return [...renderedAnnotations, ...renderedSearchMatches, ...renderedNoteFocus]
-  }
+    return map
+  }, [
+    annotationsByPage,
+    searchMatchesByPage,
+    activeSearchMatch,
+    noteFocus,
+    searchFlashNonce,
+    pageIndexesByPage,
+  ])
+
+  const activeSelectionDebugGeometry = useMemo(() => {
+    if (!selectionDebugEnabled || !selectionState.visible) {
+      return null
+    }
+
+    return getTextRangeDebugGeometry(
+      pageIndexesByPage.get(selectionState.pageNumber),
+      selectionState.startChar,
+      selectionState.endChar,
+    )
+  }, [pageIndexesByPage, selectionDebugEnabled, selectionState])
 
   function mergeRenderableAnnotationRanges(pageAnnotations = []) {
     const groups = new Map()
@@ -724,13 +842,12 @@ export function PdfViewport({
   }
 
   function clearShapeDraft(annotationId) {
-    setShapeDrafts((current) => {
-      if (!(annotationId in current)) return current
-      const next = { ...current }
-      delete next[annotationId]
-      shapeDraftsRef.current = next
-      return next
-    })
+    const current = shapeDraftsRef.current
+    if (!(annotationId in current)) return
+    const next = { ...current }
+    delete next[annotationId]
+    shapeDraftsRef.current = next
+    setTransientStateImmediately('shapeDrafts', next)
   }
 
   const visiblePages = useMemo(() => {
@@ -744,6 +861,8 @@ export function PdfViewport({
 
   function setSelection(selection, shouldNotify = false) {
     currentSelectionRef.current = selection
+    delete pendingTransientStateRef.current.selectionState
+    cancelTransientFrameIfIdle()
     setSelectionState(selection)
     if (shouldNotify && selection.visible) {
       onSelect?.({
@@ -759,6 +878,11 @@ export function PdfViewport({
     }
   }
 
+  function setSelectionPreview(selection) {
+    currentSelectionRef.current = selection
+    scheduleTransientStateUpdate('selectionState', selection)
+  }
+
   function clearSelection() {
     window.getSelection()?.removeAllRanges()
     setSelection(createEmptySelection())
@@ -767,22 +891,14 @@ export function PdfViewport({
 
   function clearScreenshotSelection() {
     screenshotDragRef.current = null
-    setScreenshotSelection(null)
+    setTransientStateImmediately('screenshotSelection', null)
     setScreenshotMenu({ visible: false, x: 0, y: 0 })
   }
 
   function clearShapePreview() {
     shapeCreationRef.current = null
     shapePreviewRef.current = null
-    setShapePreview(null)
-  }
-
-  function clearShapeInteractionState() {
-    shapeTransformRef.current = null
-    shapePointerDownRef.current = null
-    clearShapePreview()
-    setShapeDrafts({})
-    shapeDraftsRef.current = {}
+    setTransientStateImmediately('shapePreview', null)
   }
 
   function clearTextEditor() {
@@ -856,7 +972,7 @@ export function PdfViewport({
 
   function getPageCanvas(pageNumberToFind) {
     const pageFrame = readerRef.current?.querySelector(`[data-page-number="${pageNumberToFind}"]`)
-    const canvas = pageFrame?.querySelector('canvas')
+    const canvas = pageFrame?.querySelector('.pdf-page-canvas')
     return pageFrame && canvas ? { pageFrame, canvas } : null
   }
 
@@ -923,7 +1039,7 @@ export function PdfViewport({
     if (!capture) return
     const link = document.createElement('a')
     link.href = capture.dataUrl
-    link.download = `paper-screenshot-p${selection.pageNumber}-${Date.now()}.png`
+    link.download = buildDownloadFilename(selection.pageNumber)
     link.click()
   }
 
@@ -1010,7 +1126,7 @@ export function PdfViewport({
   }
 
   function clearEraserPreview() {
-    setEraserPreview(createEmptyEraserPreview())
+    setTransientStateImmediately('eraserPreview', createEmptyEraserPreview())
   }
 
   function openScreenshotMenu(selection) {
@@ -1027,6 +1143,14 @@ export function PdfViewport({
 
   function handlePageIndexReady(pageNum, pageIndex) {
     pageIndexesRef.current.set(pageNum, pageIndex)
+    setPageIndexesByPage((current) => {
+      if (current.get(pageNum) === pageIndex) {
+        return current
+      }
+      const next = new Map(current)
+      next.set(pageNum, pageIndex)
+      return next
+    })
     if (
       noteFocus?.pageNumber === pageNum &&
       noteFocus?.nonce &&
@@ -1275,7 +1399,7 @@ export function PdfViewport({
     const dy = toPoint.y - (fromPoint?.y ?? toPoint.y)
     const distance = Math.hypot(dx, dy)
     const steps = fromPoint
-      ? Math.max(1, Math.min(28, Math.ceil(distance / 0.004)))
+      ? Math.max(1, Math.min(18, Math.ceil(distance / 0.006)))
       : 1
     const ranges = []
 
@@ -1373,7 +1497,7 @@ export function PdfViewport({
         visualMode: 'eraser-preview',
       }).rects,
     )
-    setEraserPreview({
+    scheduleTransientStateUpdate('eraserPreview', {
       visible: previewRects.length > 0,
       pageNumber: resolved.pageNum,
       startChar: previewRanges[0]?.startChar ?? currentPageRanges[0].startChar,
@@ -1394,14 +1518,23 @@ export function PdfViewport({
     const mergedRanges = mergeRanges(stroke.ranges)
     clearEraserPreview()
 
-    for (const range of mergedRanges) {
-      await onEraseAnnotationRange?.({
-        pageNumber: range.pageNumber,
-        startChar: range.startChar,
-        endChar: range.endChar,
-        eraseSessionId: stroke.sessionId || null,
-      })
-    }
+    const expandedRanges = Array.from(
+      mergedRanges.reduce((map, range) => {
+        if (!map.has(range.pageNumber)) {
+          map.set(range.pageNumber, [])
+        }
+        map.get(range.pageNumber).push(range)
+        return map
+      }, new Map()),
+    ).flatMap(([pageNumber, ranges]) => {
+      const pageIndex = pageIndexesRef.current.get(pageNumber)
+      return pageIndex ? expandRangesForPreview(pageIndex, ranges) : ranges
+    })
+
+    await onEraseAnnotationRange?.({
+      ranges: expandedRanges,
+      eraseSessionId: stroke.sessionId || null,
+    })
   }
 
   async function commitBoxEraserSelection(selection) {
@@ -1435,7 +1568,7 @@ export function PdfViewport({
   async function commitInkStroke() {
     const stroke = inkStrokeRef.current
     inkStrokeRef.current = null
-    setDrawingInkStroke(null)
+    setTransientStateImmediately('drawingInkStroke', null)
 
     if (!stroke?.points?.length || stroke.points.length < 2) {
       return
@@ -1481,7 +1614,7 @@ export function PdfViewport({
       pageFrame,
       pointerId: event.pointerId,
     }
-    setDrawingInkStroke(nextStroke)
+    setTransientStateImmediately('drawingInkStroke', nextStroke)
   }
 
   function handleInkErase(stroke) {
@@ -1691,17 +1824,16 @@ export function PdfViewport({
 
     transform.hasMoved = true
     shapeTransformRef.current = transform
-    setShapeDrafts((current) => {
-      const next = {
-        ...current,
-        [transform.annotationId]: {
-          ...(current[transform.annotationId] || {}),
-          ...nextDraft,
-        },
-      }
-      shapeDraftsRef.current = next
-      return next
-    })
+    const currentDrafts = shapeDraftsRef.current
+    const next = {
+      ...currentDrafts,
+      [transform.annotationId]: {
+        ...(currentDrafts[transform.annotationId] || {}),
+        ...nextDraft,
+      },
+    }
+    shapeDraftsRef.current = next
+    scheduleTransientStateUpdate('shapeDrafts', next)
   }
 
   async function commitShapeTransform() {
@@ -1774,7 +1906,7 @@ export function PdfViewport({
           startPoint: resolved.point,
         }
         shapePreviewRef.current = preview
-        setShapePreview(preview)
+        setTransientStateImmediately('shapePreview', preview)
         return
       } else if (activeTool === 'pin') {
         const style = buildShapeStyle('pin')
@@ -1808,7 +1940,7 @@ export function PdfViewport({
         startPoint: resolved.point,
       }
       shapePreviewRef.current = preview
-      setShapePreview(preview)
+      setTransientStateImmediately('shapePreview', preview)
       return
     }
 
@@ -1822,7 +1954,7 @@ export function PdfViewport({
       clearSelection()
       eraserStrokeRef.current = {
         active: true,
-        sessionId: `${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        sessionId: buildEraserSessionId(),
         ranges: [],
       }
       updateEraserPreviewAtPointer(event)
@@ -1851,7 +1983,7 @@ export function PdfViewport({
         hasDragged: false,
         lastSelection: selection,
       }
-      setScreenshotSelection(selection)
+      setTransientStateImmediately('screenshotSelection', selection)
       setScreenshotMenu({ visible: false, x: 0, y: 0 })
       return
     }
@@ -1899,7 +2031,7 @@ export function PdfViewport({
       }
       stroke.points = [...stroke.points, point]
       inkStrokeRef.current = stroke
-      setDrawingInkStroke({
+      scheduleTransientStateUpdate('drawingInkStroke', {
         pageNumber: stroke.pageNumber,
         color: stroke.color,
         opacity: stroke.opacity,
@@ -1915,7 +2047,7 @@ export function PdfViewport({
       const point = normalizePointer(event, current.pageFrame)
       const preview = buildShapePreviewFromDrag(current.type, current.pageNum, current.startPoint, point)
       shapePreviewRef.current = preview
-      setShapePreview(preview)
+      scheduleTransientStateUpdate('shapePreview', preview)
       return
     }
 
@@ -1937,7 +2069,7 @@ export function PdfViewport({
       current.hasDragged = rect.width > 0.006 && rect.height > 0.006
       current.lastSelection = nextSelection
       screenshotDragRef.current = current
-      setScreenshotSelection(nextSelection)
+      scheduleTransientStateUpdate('screenshotSelection', nextSelection)
       if (activeTool === 'erase_box') {
         const pageAnnotations = (annotationsByPage.get(current.pageNum) || [])
           .filter((annotation) => annotation.type === 'highlight' || annotation.type === 'underline' || annotation.type === 'wavy_underline')
@@ -1950,7 +2082,7 @@ export function PdfViewport({
             }).rects,
           )
           : []
-        setEraserPreview({
+        scheduleTransientStateUpdate('eraserPreview', {
           visible: previewRects.length > 0,
           pageNumber: current.pageNum,
           startChar: ranges?.[0]?.startChar || 0,
@@ -1998,7 +2130,7 @@ export function PdfViewport({
     )
     if (nextSelection.visible) {
       current.lastSelection = nextSelection
-      setSelection(nextSelection)
+      setSelectionPreview(nextSelection)
     }
   }
 
@@ -2089,8 +2221,11 @@ export function PdfViewport({
 
     if (activeTool === 'screenshot' || activeTool === 'erase_box') {
       const current = screenshotDragRef.current
+      if (!current) {
+        return
+      }
       screenshotDragRef.current = null
-      if (!current?.hasDragged || !current.lastSelection?.rect) {
+      if (!current.hasDragged || !current.lastSelection?.rect) {
         clearScreenshotSelection()
         clearEraserPreview()
         return
@@ -2100,7 +2235,7 @@ export function PdfViewport({
         clearEraserPreview()
         return
       }
-      setScreenshotSelection(current.lastSelection)
+      setTransientStateImmediately('screenshotSelection', current.lastSelection)
       openScreenshotMenu(current.lastSelection)
       return
     }
@@ -2243,6 +2378,7 @@ export function PdfViewport({
   useEffect(() => {
     fittedDocumentRef.current = null
     pageIndexesRef.current.clear()
+    setPageIndexesByPage(new Map())
     clearSelection()
     clearScreenshotSelection()
     clearEraserPreview()
@@ -2250,7 +2386,7 @@ export function PdfViewport({
     clearTextEditor()
     setSelectedShapeId(null)
     shapeDraftsRef.current = {}
-    setShapeDrafts({})
+    setTransientStateImmediately('shapeDrafts', {})
     setPinnedScreenshots([])
   }, [pdfDocument])
 
@@ -2270,7 +2406,7 @@ export function PdfViewport({
   useEffect(() => {
     if (activeTool !== 'ink') {
       inkStrokeRef.current = null
-      setDrawingInkStroke(null)
+      setTransientStateImmediately('drawingInkStroke', null)
     }
   }, [activeTool])
 
@@ -2369,30 +2505,55 @@ export function PdfViewport({
       return undefined
     }
 
-    function syncCurrentPage() {
-      const pageElements = Array.from(container.querySelectorAll('[data-page-number]'))
-      if (pageElements.length === 0) return
+    function pickVisiblePage() {
+      const entries = Array.from(visiblePageEntriesRef.current.values())
+        .filter((entry) => entry.isIntersecting)
+      if (entries.length === 0) return
 
-      const viewportAnchor = container.scrollTop + container.clientHeight * 0.18
-      let visiblePage = 1
-      for (const element of pageElements) {
-        if (element.offsetTop <= viewportAnchor) {
-          visiblePage = Number(element.dataset.pageNumber)
-        } else {
-          break
+      const rootTop = container.getBoundingClientRect().top
+      const viewportAnchor = container.clientHeight * 0.18
+      let bestPage = null
+      let bestScore = Number.POSITIVE_INFINITY
+
+      for (const entry of entries) {
+        const pageNum = Number(entry.target.dataset.pageNumber || '0')
+        if (!pageNum) continue
+        const distanceToAnchor = Math.abs((entry.boundingClientRect.top - rootTop) - viewportAnchor)
+        const score = distanceToAnchor - entry.intersectionRatio * 120
+        if (score < bestScore) {
+          bestScore = score
+          bestPage = pageNum
         }
       }
 
-      if (visiblePage !== pageNumber) {
-        onVisiblePageChange(visiblePage)
+      if (bestPage && bestPage !== currentPageRef.current) {
+        currentPageRef.current = bestPage
+        onVisiblePageChangeRef.current?.(bestPage)
       }
     }
 
-    syncCurrentPage()
-    container.addEventListener('scroll', syncCurrentPage, { passive: true })
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const pageNum = Number(entry.target.dataset.pageNumber || '0')
+        if (!pageNum) continue
+        visiblePageEntriesRef.current.set(pageNum, entry)
+      }
+      pickVisiblePage()
+    }, {
+      root: container,
+      threshold: [0, 0.1, 0.25, 0.5, 0.75, 1],
+      rootMargin: '-12% 0px -55% 0px',
+    })
 
-    return () => container.removeEventListener('scroll', syncCurrentPage)
-  }, [onVisiblePageChange, pageNumber, pdfDocument, readerRef, scale])
+    visiblePageEntriesRef.current.clear()
+    const pageElements = Array.from(container.querySelectorAll('[data-page-number]'))
+    pageElements.forEach((element) => observer.observe(element))
+
+    return () => {
+      observer.disconnect()
+      visiblePageEntriesRef.current.clear()
+    }
+  }, [pdfDocument, pageNumbers, readerRef, scale])
 
   useEffect(() => {
     if (!floatingMenu.visible) return
@@ -2642,9 +2803,9 @@ export function PdfViewport({
       shapePreviewRef.current = null
       shapeDraftsRef.current = {}
       screenshotDragRef.current = null
-      setDrawingInkStroke(null)
-      setShapePreview(null)
-      setShapeDrafts({})
+      setTransientStateImmediately('drawingInkStroke', null)
+      setTransientStateImmediately('shapePreview', null)
+      setTransientStateImmediately('shapeDrafts', {})
       clearEraserPreview()
     }
 
@@ -2659,6 +2820,39 @@ export function PdfViewport({
       window.removeEventListener('blur', handleWindowBlur)
     }
   }, [activeTool])
+
+  useEffect(() => {
+    const container = readerRef.current
+    const progressBar = progressBarRef.current
+    if (!container || !progressBar) return undefined
+
+    let frameId = 0
+
+    function updateProgress() {
+      frameId = 0
+      const max = container.scrollHeight - container.clientHeight
+      if (max <= 0) {
+        progressBar.style.width = '0%'
+        return
+      }
+      progressBar.style.width = `${(container.scrollTop / max) * 100}%`
+    }
+
+    function scheduleProgressUpdate() {
+      if (frameId) return
+      frameId = window.requestAnimationFrame(updateProgress)
+    }
+
+    scheduleProgressUpdate()
+    container.addEventListener('scroll', scheduleProgressUpdate, { passive: true })
+
+    return () => {
+      container.removeEventListener('scroll', scheduleProgressUpdate)
+      if (frameId) {
+        window.cancelAnimationFrame(frameId)
+      }
+    }
+  }, [pdfDocument, readerRef, scale])
 
   if (error) {
     return <div className="reader-empty--error">{error}</div>
@@ -2699,20 +2893,7 @@ export function PdfViewport({
       <div
         className="reader-progress"
         style={{ width: '0%' }}
-        ref={(el) => {
-          if (!el || !readerRef.current) return
-          const container = readerRef.current
-          const update = () => {
-            const max = container.scrollHeight - container.clientHeight
-            if (max <= 0) {
-              el.style.width = '0%'
-              return
-            }
-            el.style.width = `${(container.scrollTop / max) * 100}%`
-          }
-          container.addEventListener('scroll', update, { passive: true })
-          update()
-        }}
+        ref={progressBarRef}
       />
       {isLoading ? <div className="pdf-loading">正在重新渲染页面...</div> : null}
 
@@ -2720,9 +2901,9 @@ export function PdfViewport({
         {pageNumbers.map((item, index) => (
           <PdfPage
             key={item}
-            annotations={getRenderableAnnotations(item)}
-            inkAnnotations={inkAnnotationsByPage.get(item) || []}
-            shapeAnnotations={shapeAnnotationsByPage.get(item) || []}
+            annotations={renderableAnnotationsByPage.get(item) || EMPTY_ITEMS}
+            inkAnnotations={inkAnnotationsByPage.get(item) || EMPTY_ITEMS}
+            shapeAnnotations={shapeAnnotationsByPage.get(item) || EMPTY_ITEMS}
             selectedShapeId={selectedShapeId}
             shapePreview={shapePreview?.page_number === item ? shapePreview : null}
             textEditor={textEditor?.pageNumber === item ? textEditor : null}
@@ -2730,11 +2911,7 @@ export function PdfViewport({
             currentSelection={selectionState.visible && selectionState.pageNumber === item ? selectionState : null}
             selectionDebugGeometry={
               selectionDebugEnabled && selectionState.visible && selectionState.pageNumber === item
-                ? getTextRangeDebugGeometry(
-                  pageIndexesRef.current.get(item),
-                  selectionState.startChar,
-                  selectionState.endChar,
-                )
+                ? activeSelectionDebugGeometry
                 : null
             }
             eraserPreview={eraserPreview.visible && eraserPreview.pageNumber === item ? eraserPreview : null}

@@ -80,22 +80,44 @@ export function useAnnotations(paperId) {
     }
   }, [paperId])
 
-  const eraseAnnotationRange = useCallback(async ({ pageNumber, startChar, endChar }) => {
+  const eraseAnnotationRange = useCallback(async ({ pageNumber, startChar, endChar, ranges = null }) => {
     if (!paperId) return null
 
     try {
-      const data = await apiFetch(`${ANNOTATIONS_BASE}/${paperId}/annotations/erase`, {
+      const hasBatchRanges = Array.isArray(ranges) && ranges.length > 0
+      const data = await apiFetch(
+        `${ANNOTATIONS_BASE}/${paperId}/annotations/${hasBatchRanges ? 'erase-batch' : 'erase'}`,
+        {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          page_number: pageNumber,
-          start_char: startChar,
-          end_char: endChar,
-        }),
-      })
+          body: JSON.stringify(
+            hasBatchRanges
+              ? {
+                  ranges: ranges.map((item) => ({
+                    page_number: item.pageNumber,
+                    start_char: item.startChar,
+                    end_char: item.endChar,
+                  })),
+                }
+              : {
+                  page_number: pageNumber,
+                  start_char: startChar,
+                  end_char: endChar,
+                },
+          ),
+        },
+      )
       if (data?.annotations) setAnnotations(data.annotations)
       return data
-    } catch {
+    } catch (error) {
+      console.error('Failed to erase annotations', {
+        paperId,
+        pageNumber,
+        startChar,
+        endChar,
+        ranges,
+        error,
+      })
       return null
     }
   }, [paperId])

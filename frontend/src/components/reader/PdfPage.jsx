@@ -5,7 +5,7 @@ import { ShapeAnnotationLayer } from './ShapeAnnotationLayer'
 import { PDF_TEXT_GEOMETRY_VERSION, buildRenderedPageIndex } from './pdfSelectionModel'
 
 function getRenderScale() {
-  return Math.min(window.devicePixelRatio || 1, 1.5)
+  return Math.min(window.devicePixelRatio || 1, 1.2)
 }
 
 function toRgba(color, alpha) {
@@ -51,134 +51,6 @@ function drawHighlightCanvas(canvas, annotations, width, height) {
 }
 
 // Cache textContent per page — text parsing is expensive and text doesn't change with scale
-function isTextInkPixel(data, index) {
-  const red = data[index]
-  const green = data[index + 1]
-  const blue = data[index + 2]
-  const alpha = data[index + 3]
-  if (alpha < 36) return false
-
-  const max = Math.max(red, green, blue)
-  const min = Math.min(red, green, blue)
-  const average = (red + green + blue) / 3
-  return average < 210 && max - min < 56
-}
-
-function refineSelectionRectWithCanvas(canvas, rect) {
-  if (!canvas || !rect || rect.width <= 0 || rect.height <= 0) return rect
-
-  const context = canvas.getContext('2d', { willReadFrequently: true })
-  if (!context) return rect
-
-  const originalLeft = Math.max(0, Math.floor(rect.left * canvas.width))
-  const originalRight = Math.min(canvas.width, Math.ceil((rect.left + rect.width) * canvas.width))
-  const originalTop = Math.max(0, Math.floor(rect.top * canvas.height))
-  const originalBottom = Math.min(canvas.height, Math.ceil((rect.top + rect.height) * canvas.height))
-  const bounds = rect.refinementBounds || {}
-  const hardLeft = Math.max(0, Math.floor((bounds.hardLeft ?? rect.left) * canvas.width))
-  const hardRight = Math.min(
-    canvas.width,
-    Math.ceil((bounds.hardRight ?? (rect.left + rect.width)) * canvas.width),
-  )
-  const softLeft = Math.max(0, Math.floor((bounds.softLeft ?? rect.left) * canvas.width))
-  const softRight = Math.min(
-    canvas.width,
-    Math.ceil((bounds.softRight ?? (rect.left + rect.width)) * canvas.width),
-  )
-  const leftScanMargin = Math.max(5, Math.round(rect.height * canvas.height * 0.22))
-  const marginY = Math.max(3, Math.round(rect.height * canvas.height * 0.18))
-  const x = Math.max(0, Math.min(softLeft, originalLeft - leftScanMargin))
-  const y = Math.max(0, originalTop - marginY)
-  const right = Math.max(originalRight, softRight)
-  const bottom = Math.min(canvas.height, originalBottom + marginY)
-  const width = Math.max(1, right - x)
-  const height = Math.max(1, bottom - y)
-
-  let imageData
-  try {
-    imageData = context.getImageData(x, y, width, height)
-  } catch {
-    return rect
-  }
-
-  let minX = width
-  let maxX = -1
-  const columnInkCounts = new Array(width).fill(0)
-  const coreTop = Math.max(0, originalTop - y)
-  const coreBottom = Math.min(height, Math.max(coreTop + 1, originalBottom - y))
-
-  for (let row = coreTop; row < coreBottom; row += 1) {
-    for (let col = 0; col < width; col += 1) {
-      const index = (row * width + col) * 4
-      if (!isTextInkPixel(imageData.data, index)) continue
-      columnInkCounts[col] += 1
-    }
-  }
-
-  const minInkPixelsInColumn = Math.max(1, Math.round((coreBottom - coreTop) * 0.08))
-  const hasInkAtColumn = (column) => columnInkCounts[column] >= minInkPixelsInColumn
-  const originalStartColumn = Math.max(0, originalLeft - x)
-  const originalEndColumn = Math.min(width - 1, Math.max(originalStartColumn, originalRight - x - 1))
-
-  for (let col = originalStartColumn; col <= originalEndColumn; col += 1) {
-    if (!hasInkAtColumn(col)) continue
-    minX = Math.min(minX, col)
-    maxX = Math.max(maxX, col)
-  }
-
-  if (maxX < minX) return rect
-
-  const hasPreviousChar = bounds.hasPreviousChar === true
-  const maxBridgeGap = Math.max(1, Math.round((coreBottom - coreTop) * 0.06))
-  const leftBridgeGap = hasPreviousChar ? 0 : maxBridgeGap
-  let blankRun = 0
-  for (let col = minX - 1; col >= 0; col -= 1) {
-    if (hasInkAtColumn(col)) {
-      minX = col
-      blankRun = 0
-      continue
-    }
-    blankRun += 1
-    if (blankRun > leftBridgeGap) break
-  }
-
-  blankRun = 0
-  for (let col = maxX + 1; col < width; col += 1) {
-    if (hasInkAtColumn(col)) {
-      maxX = col
-      blankRun = 0
-      continue
-    }
-    blankRun += 1
-    if (blankRun > maxBridgeGap) break
-  }
-
-  const inkWidth = maxX - minX + 1
-  const inkHeight = coreBottom - coreTop
-  const leftSafetyPad = hasPreviousChar
-    ? 0
-    : Math.max(5, Math.round(inkHeight * 0.22), Math.round(inkWidth * 0.08))
-  const maxLeftExpansion = hasPreviousChar
-    ? 0
-    : Math.max(7, Math.round(inkHeight * 0.34))
-  const leftLimit = Math.max(hardLeft, originalLeft - maxLeftExpansion)
-  const refinedLeft = Math.max(leftLimit, x + minX - leftSafetyPad)
-  const refinedRight = Math.min(
-    hardRight,
-    Math.max(originalRight, x + maxX + 1 + Math.max(2, Math.round(inkWidth * 0.035))),
-  )
-
-  const refined = {
-    left: refinedLeft / canvas.width,
-    top: originalTop / canvas.height,
-    width: Math.max(1, refinedRight - refinedLeft) / canvas.width,
-    height: Math.max(1, originalBottom - originalTop) / canvas.height,
-  }
-
-  const areaRatio = (refined.width * refined.height) / Math.max(0.000001, rect.width * rect.height)
-  return areaRatio >= 0.18 && areaRatio <= 1.35 ? refined : rect
-}
-
 const MAX_CACHE_SIZE = 200
 const textContentCache = new Map()
 
@@ -262,6 +134,176 @@ function cacheKey(pdfDocument, pageNumber) {
   return `${fp}:${pageNumber}:${PDF_TEXT_GEOMETRY_VERSION}`
 }
 
+function areNumberFieldsEqual(left, right, fields) {
+  for (const field of fields) {
+    if ((left?.[field] ?? null) !== (right?.[field] ?? null)) {
+      return false
+    }
+  }
+  return true
+}
+
+function areRectListsEqual(left = [], right = []) {
+  if (left === right) return true
+  if (!left || !right || left.length !== right.length) return false
+
+  for (let index = 0; index < left.length; index += 1) {
+    const leftRect = left[index]
+    const rightRect = right[index]
+    if (
+      leftRect?.left !== rightRect?.left ||
+      leftRect?.top !== rightRect?.top ||
+      leftRect?.width !== rightRect?.width ||
+      leftRect?.height !== rightRect?.height
+    ) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function arePointListsEqual(left = [], right = []) {
+  if (left === right) return true
+  if (!left || !right || left.length !== right.length) return false
+
+  for (let index = 0; index < left.length; index += 1) {
+    const leftPoint = left[index]
+    const rightPoint = right[index]
+    if (leftPoint?.x !== rightPoint?.x || leftPoint?.y !== rightPoint?.y) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function areArraysShallowEqual(left = [], right = []) {
+  if (left === right) return true
+  if (!left || !right || left.length !== right.length) return false
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function areSelectionOverlaysEqual(left, right) {
+  if (left === right) return true
+  if (!left || !right) return left === right
+
+  return (
+    left.visible === right.visible &&
+    left.pageNumber === right.pageNumber &&
+    left.startChar === right.startChar &&
+    left.endChar === right.endChar &&
+    left.text === right.text &&
+    left.copyText === right.copyText &&
+    areRectListsEqual(left.rects, right.rects)
+  )
+}
+
+function areDrawingStrokesEqual(left, right) {
+  if (left === right) return true
+  if (!left || !right) return left === right
+
+  return (
+    left.pageNumber === right.pageNumber &&
+    left.color === right.color &&
+    left.opacity === right.opacity &&
+    left.strokeWidth === right.strokeWidth &&
+    arePointListsEqual(left.points, right.points)
+  )
+}
+
+function areShapePreviewsEqual(left, right) {
+  if (left === right) return true
+  if (!left || !right) return left === right
+
+  return (
+    left.id === right.id &&
+    left.type === right.type &&
+    left.page_number === right.page_number &&
+    left.content === right.content &&
+    left.isPreview === right.isPreview &&
+    areNumberFieldsEqual(left, right, ['x', 'y', 'width', 'height']) &&
+    areNumberFieldsEqual(left?.extra, right?.extra, ['startX', 'startY', 'endX', 'endY']) &&
+    left?.style?.color === right?.style?.color &&
+    left?.style?.fontSize === right?.style?.fontSize &&
+    left?.style?.strokeWidth === right?.style?.strokeWidth
+  )
+}
+
+function areScreenshotSelectionsEqual(left, right) {
+  if (left === right) return true
+  if (!left || !right) return left === right
+
+  return (
+    left.pageNumber === right.pageNumber &&
+    areNumberFieldsEqual(left.rect, right.rect, ['left', 'top', 'width', 'height'])
+  )
+}
+
+function areDebugGeometriesEqual(left, right) {
+  if (left === right) return true
+  if (!left || !right) return left === right
+
+  return (
+    areRectListsEqual(left.advanceRects, right.advanceRects) &&
+    areRectListsEqual(left.visualRects, right.visualRects) &&
+    areRectListsEqual(left.finalRects, right.finalRects)
+  )
+}
+
+function isSelectedShapeOnPage(shapeAnnotations, selectedShapeId) {
+  if (!selectedShapeId) return false
+  return shapeAnnotations.some((annotation) => annotation.id === selectedShapeId)
+}
+
+function arePageMetricsEqual(left, right) {
+  if (left === right) return true
+  if (!left || !right) return left === right
+
+  return left.width === right.width && left.height === right.height
+}
+
+function arePdfPagePropsEqual(previousProps, nextProps) {
+  if (previousProps.pageNumber !== nextProps.pageNumber) return false
+  if (previousProps.pdfDocument !== nextProps.pdfDocument) return false
+  if (previousProps.scale !== nextProps.scale) return false
+  if (previousProps.shouldRender !== nextProps.shouldRender) return false
+  if (previousProps.selectionTool !== nextProps.selectionTool) return false
+  if (!arePageMetricsEqual(previousProps.pageMetric, nextProps.pageMetric)) return false
+  if (!areArraysShallowEqual(previousProps.annotations, nextProps.annotations)) return false
+  if (!areArraysShallowEqual(previousProps.inkAnnotations, nextProps.inkAnnotations)) return false
+  if (!areArraysShallowEqual(previousProps.shapeAnnotations, nextProps.shapeAnnotations)) return false
+  if (!areShapePreviewsEqual(previousProps.shapePreview, nextProps.shapePreview)) return false
+  if (!areDrawingStrokesEqual(previousProps.drawingStroke, nextProps.drawingStroke)) return false
+  if (!areSelectionOverlaysEqual(previousProps.currentSelection, nextProps.currentSelection)) return false
+  if (!areDebugGeometriesEqual(previousProps.selectionDebugGeometry, nextProps.selectionDebugGeometry)) return false
+  if (!areSelectionOverlaysEqual(previousProps.eraserPreview, nextProps.eraserPreview)) return false
+  if (!areScreenshotSelectionsEqual(previousProps.screenshotSelection, nextProps.screenshotSelection)) return false
+  if (previousProps.textEditor !== nextProps.textEditor) return false
+
+  const previousSelectedOnPage = isSelectedShapeOnPage(
+    previousProps.shapeAnnotations,
+    previousProps.selectedShapeId,
+  )
+  const nextSelectedOnPage = isSelectedShapeOnPage(
+    nextProps.shapeAnnotations,
+    nextProps.selectedShapeId,
+  )
+  if (previousSelectedOnPage !== nextSelectedOnPage) return false
+  if (previousSelectedOnPage && previousProps.selectedShapeId !== nextProps.selectedShapeId) {
+    return false
+  }
+
+  return true
+}
+
 function PdfPageComponent({
   annotations = [],
   inkAnnotations = [],
@@ -334,6 +376,7 @@ function PdfPageComponent({
     let isCancelled = false
     let renderTask = null
     let textLayer = null
+    const currentPageFrame = pageFrameRef.current
 
     async function renderPage() {
       const page = await pdfDocument.getPage(pageNumber)
@@ -408,11 +451,11 @@ function PdfPageComponent({
 
       await textLayer.render()
 
-      if (isCancelled || !pageFrameRef.current || !textLayerRef.current) {
+      if (isCancelled || !currentPageFrame || !textLayerRef.current) {
         return
       }
 
-      pageFrameRef.current.__lineRects = collectLineRects(textLayerRef.current)
+      currentPageFrame.__lineRects = collectLineRects(textLayerRef.current)
       onPageIndexReady?.(
         pageNumber,
         buildRenderedPageIndex({
@@ -436,11 +479,11 @@ function PdfPageComponent({
       isCancelled = true
       renderTask?.cancel()
       textLayer?.cancel()
-      if (pageFrameRef.current) {
-        pageFrameRef.current.__lineRects = []
+      if (currentPageFrame) {
+        currentPageFrame.__lineRects = []
       }
     }
-  }, [pageMetric, pageNumber, pdfDocument, scale, shouldRender, PDF_TEXT_GEOMETRY_VERSION])
+  }, [onPageIndexReady, pageMetric, pageNumber, pdfDocument, scale, shouldRender])
 
   const selectionRects = currentSelection?.rects
 
@@ -600,8 +643,4 @@ function PdfPageComponent({
   )
 }
 
-export function clearTextContentCache() {
-  textContentCache.clear()
-}
-
-export const PdfPage = memo(PdfPageComponent)
+export const PdfPage = memo(PdfPageComponent, arePdfPagePropsEqual)

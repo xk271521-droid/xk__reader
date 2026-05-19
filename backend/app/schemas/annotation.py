@@ -28,6 +28,16 @@ class AnnotationEraseRequest(BaseModel):
     end_char: int = Field(ge=0)
 
 
+class AnnotationEraseRange(BaseModel):
+    page_number: int = Field(ge=1)
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=0)
+
+
+class AnnotationBatchEraseRequest(BaseModel):
+    ranges: list[AnnotationEraseRange] = Field(default_factory=list, max_length=5000)
+
+
 class AnnotationRestoreItem(BaseModel):
     page_number: int = Field(ge=1)
     start_char: int = Field(ge=0)
