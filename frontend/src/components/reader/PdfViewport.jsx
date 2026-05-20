@@ -353,6 +353,7 @@ function normalizeInkPoint(event, pageFrame) {
 
 export function PdfViewport({
   activeTool,
+  currentPaperId = null,
   error,
   isLoading,
   matches = [],
@@ -2854,7 +2855,7 @@ export function PdfViewport({
     }
   }, [pdfDocument, readerRef, scale])
 
-  if (error) {
+  if (error && !pdfDocument) {
     return <div className="reader-empty--error">{error}</div>
   }
 
@@ -2900,7 +2901,7 @@ export function PdfViewport({
       <div className="pdf-page-list" ref={pageListRef}>
         {pageNumbers.map((item, index) => (
           <PdfPage
-            key={item}
+            key={`${currentPaperId || 'none'}:${item}`}
             annotations={renderableAnnotationsByPage.get(item) || EMPTY_ITEMS}
             inkAnnotations={inkAnnotationsByPage.get(item) || EMPTY_ITEMS}
             shapeAnnotations={shapeAnnotationsByPage.get(item) || EMPTY_ITEMS}

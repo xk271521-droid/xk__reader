@@ -170,6 +170,7 @@ function createEmptyPaperState(file, paperId, folderId, extra = {}) {
 
 function createEmptyPaperFromServer(serverPaper) {
   const now = Date.now()
+  const serverFileUrl = getPaperFileUrl(serverPaper.id)
 
   return {
     id: String(serverPaper.id),
@@ -201,7 +202,7 @@ function createEmptyPaperFromServer(serverPaper) {
       fileSize: serverPaper.file_size,
       pageCount: serverPaper.page_count,
     },
-    _serverFileUrl: getPaperFileUrl(serverPaper.id),
+    _serverFileUrl: serverFileUrl,
   }
 }
 
@@ -290,6 +291,16 @@ function destroyPaperResources(resource) {
 
 function getNow() {
   return Date.now()
+}
+
+function getErrorMessage(error) {
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+  if (typeof error === 'string' && error) {
+    return error
+  }
+  return '未知错误'
 }
 
 export function usePdfReader({ currentUser } = {}) {
@@ -776,10 +787,13 @@ export function usePdfReader({ currentUser } = {}) {
 
     try {
       const token = getStoredAuthToken()
-      const loadingTask = await createPdfLoadingTask({
-        url,
-        httpHeaders: token ? { Authorization: `Bearer ${token}` } : {},
-      })
+      const authHeaders = token ? { Authorization: `Bearer ${token}` } : {}
+      const response = await fetch(url, { headers: authHeaders })
+      if (!response.ok) {
+        throw new Error(`PDF request failed with ${response.status}`)
+      }
+      const pdfData = await response.arrayBuffer()
+      let loadingTask = await createPdfLoadingTask({ data: pdfData.slice(0) })
 
       const resource = paperResourcesRef.current.get(paperId)
       if (!resource) {
@@ -792,7 +806,27 @@ export function usePdfReader({ currentUser } = {}) {
         resource.loadingTask = loadingTask
       }
 
-      const documentProxy = await loadingTask.promise
+      let documentProxy
+      try {
+        documentProxy = await loadingTask.promise
+      } catch (dataError) {
+        console.error('Failed to parse server PDF bytes, retrying with URL', {
+          paperId,
+          url,
+          error: dataError,
+        })
+        loadingTask.destroy?.()
+        loadingTask = await createPdfLoadingTask({
+          url,
+          httpHeaders: authHeaders,
+          withCredentials: false,
+        })
+        const retryResource = paperResourcesRef.current.get(paperId)
+        if (retryResource) {
+          retryResource.loadingTask = loadingTask
+        }
+        documentProxy = await loadingTask.promise
+      }
       const currentResource = paperResourcesRef.current.get(paperId)
       if (currentResource) {
         currentResource.documentProxy = documentProxy
@@ -825,12 +859,55 @@ export function usePdfReader({ currentUser } = {}) {
       }))
 
       triggerSummarization(paperId, documentProxy)
-    } catch {
+    } catch (error) {
+      console.error('Failed to load server PDF', { paperId, url, error })
       updatePaper(paperId, () => ({
         isLoading: false,
-        error: '论文加载失败，请确认文件仍然可用。',
+        error: `论文加载失败：${getErrorMessage(error)}`,
       }))
     }
+  }
+
+  async function persistPaperToServer(paperId, file, targetFolderId, metadata = {}) {
+    if (!getStoredAuthToken()) {
+      return { paperId, fileUrl: null, serverPaper: null }
+    }
+
+    const serverFolderId = Number(targetFolderId) || undefined
+    const serverPaper = await uploadPaper(
+      file,
+      {
+        title: metadata.title,
+        author: metadata.author || null,
+        subject: metadata.subject || null,
+        keywords: metadata.keywords || null,
+        doi: metadata.doi || null,
+        page_count: metadata.pageCount,
+      },
+      serverFolderId,
+    )
+
+    const newId = String(serverPaper.id)
+    const fileUrl = getPaperFileUrl(serverPaper.id)
+    replacePaperId(paperId, newId)
+    setPapers((currentPapers) =>
+      currentPapers.map((paper) =>
+        paper.id === newId
+          ? {
+              ...paper,
+              fingerprint: createFileFingerprint(file),
+              _serverFileUrl: fileUrl,
+              metadata: {
+                ...paper.metadata,
+                translatedTitle:
+                  serverPaper.translated_title || paper.metadata.translatedTitle || '',
+              },
+            }
+          : paper,
+      ),
+    )
+
+    return { paperId: newId, fileUrl, serverPaper }
   }
 
   function goHome() {
@@ -1205,6 +1282,11 @@ export function usePdfReader({ currentUser } = {}) {
 
         triggerSummarization(paperId, documentProxy)
 
+      persistPaperToServer(paperId, file, targetFolderId, metadata).catch(() => {
+        // Upload failed but keep the locally opened paper available.
+      })
+      return
+
       // ── Step 4: Upload to backend with COMPLETE metadata ──
       if (getStoredAuthToken()) {
         const serverFolderId = Number(targetFolderId) || undefined
@@ -1242,6 +1324,24 @@ export function usePdfReader({ currentUser } = {}) {
       }
     } catch (loadError) {
       console.error('Failed to load PDF', loadError)
+      try {
+        const { paperId: serverPaperId, fileUrl } = await persistPaperToServer(
+          paperId,
+          file,
+          targetFolderId,
+          {
+            title: file.name.replace(/\.pdf$/i, ''),
+            pageCount: 0,
+          },
+        )
+
+        if (fileUrl) {
+          await loadPdfFromUrl(serverPaperId, fileUrl)
+          return
+        }
+      } catch (uploadError) {
+        console.error('Failed to upload PDF after local parse error', uploadError)
+      }
       updatePaper(paperId, () => ({
         isLoading: false,
         error: 'PDF 加载失败，请确认文件没有损坏。',

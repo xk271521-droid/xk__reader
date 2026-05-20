@@ -8,6 +8,7 @@ auth-preview/node_modules/
 auth-preview/dist/
 
 # Python cache and local runtime files
+**/__pycache__/
 backend/__pycache__/
 backend/app/**/__pycache__/
 backend/*.pyc
@@ -26,6 +27,10 @@ venv/
 
 # Generated backend logs
 backend/*.log
+
+# Deployment artifacts and server snapshots
+deploy-*.tar.gz
+server-backups/
 
 # Local Claude worktrees
 .claude/worktrees/

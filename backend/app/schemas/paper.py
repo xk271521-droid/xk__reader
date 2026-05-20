@@ -37,6 +37,7 @@ class PaperResponse(BaseModel):
     id: int
     folder_id: int
     file_name: str
+    file_path: str
     file_size: str
     title: str
     translated_title: str | None = None

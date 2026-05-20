@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { loadPdfJs } from '../../services/pdfjsClient'
 import { InkOverlay } from './InkOverlay'
 import { ShapeAnnotationLayer } from './ShapeAnnotationLayer'
@@ -6,6 +6,12 @@ import { PDF_TEXT_GEOMETRY_VERSION, buildRenderedPageIndex } from './pdfSelectio
 
 function getRenderScale() {
   return Math.min(window.devicePixelRatio || 1, 1.2)
+}
+
+function getErrorMessage(error) {
+  if (!error) return '未知错误'
+  if (typeof error === 'string') return error
+  return error.message || error.name || '未知错误'
 }
 
 function toRgba(color, alpha) {
@@ -341,6 +347,7 @@ function PdfPageComponent({
   const highlightCanvasRef = useRef(null)
   const pageFrameRef = useRef(null)
   const textLayerRef = useRef(null)
+  const [renderError, setRenderError] = useState('')
 
   useEffect(() => {
     if (!pageFrameRef.current || !pageMetric) {
@@ -379,6 +386,7 @@ function PdfPageComponent({
     const currentPageFrame = pageFrameRef.current
 
     async function renderPage() {
+      setRenderError('')
       const page = await pdfDocument.getPage(pageNumber)
 
       if (isCancelled) {
@@ -472,6 +480,7 @@ function PdfPageComponent({
     renderPage().catch((renderError) => {
       if (!isCancelled) {
         console.error(`PDF page ${pageNumber} render failed`, renderError)
+        setRenderError(getErrorMessage(renderError))
       }
     })
 
@@ -493,6 +502,11 @@ function PdfPageComponent({
         <>
           <canvas className="pdf-highlight-canvas" ref={highlightCanvasRef} aria-hidden="true" />
           <canvas className="pdf-page-canvas" ref={canvasRef} />
+          {renderError ? (
+            <div className="pdf-page-render-error">
+              第 {pageNumber} 页渲染失败：{renderError}
+            </div>
+          ) : null}
           <div className="textLayer" ref={textLayerRef} />
           <InkOverlay
             drawingStroke={drawingStroke}

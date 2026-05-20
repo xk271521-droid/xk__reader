@@ -129,6 +129,7 @@ class Settings:
     avatar_upload_dir: str = os.getenv("AVATAR_UPLOAD_DIR", str(BASE_DIR / "uploads" / "avatars"))
     avatar_max_size_bytes: int = int(os.getenv("AVATAR_MAX_SIZE_BYTES", str(2 * 1024 * 1024)))
     papers_upload_dir: str = os.getenv("PAPERS_UPLOAD_DIR", str(BASE_DIR / "uploads" / "papers"))
+    upload_public_base_url: str = os.getenv("UPLOAD_PUBLIC_BASE_URL", "").rstrip("/")
     papers_max_size_bytes: int = int(os.getenv("PAPERS_MAX_SIZE_BYTES", str(25 * 1024 * 1024)))
     translation_debug_log_enabled: bool = _env_flag("TRANSLATION_DEBUG_LOG_ENABLED", "false")
     startup_schema_sync_enabled: bool = _env_flag("STARTUP_SCHEMA_SYNC_ENABLED", "true")

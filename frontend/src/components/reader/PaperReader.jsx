@@ -95,7 +95,9 @@ export function PaperReader({
       <div className={`reader-body${isThumbnailsOpen ? ' has-thumbnails' : ''}`}>
         <div className="thumbnails-slide" style={{ width: isThumbnailsOpen ? thumbnailWidth : 0 }}>
           <PageThumbnails
+            key={`thumbs:${currentPaperId || 'none'}`}
             currentPage={pdfReader.pageNumber}
+            currentPaperId={currentPaperId}
             pageMetrics={pdfReader.pageMetrics}
             pageNumbers={pdfReader.pageNumbers}
             pdfDocument={pdfReader.pdfDocument}
@@ -113,6 +115,7 @@ export function PaperReader({
         </div>
 
         <PdfViewport
+          key={`viewport:${currentPaperId || 'none'}`}
           activeTool={activeTool}
           error={pdfReader.error}
           isLoading={pdfReader.isLoading}

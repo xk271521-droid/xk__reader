@@ -40,7 +40,15 @@ function PageThumbnailRow({ pageNumber, pageMetric, scale, pdfDocument }) {
 
 const MemoThumbnail = memo(PageThumbnailRow)
 
-export function PageThumbnails({ currentPage, pageMetrics, pageNumbers, pdfDocument, width, onPageClick }) {
+export function PageThumbnails({
+  currentPage,
+  currentPaperId,
+  pageMetrics,
+  pageNumbers,
+  pdfDocument,
+  width,
+  onPageClick,
+}) {
   const containerRef = useRef(null)
   const [thumbScale, setThumbScale] = useState(DEFAULT_THUMB_SCALE)
 
@@ -77,7 +85,7 @@ export function PageThumbnails({ currentPage, pageMetrics, pageNumbers, pdfDocum
           const isActive = pageNum === currentPage
           return (
             <button
-              key={pageNum}
+              key={`${currentPaperId || 'none'}:${pageNum}`}
               type="button"
               className={`thumbnail-panel__item${isActive ? ' is-active' : ''}`}
               data-thumb-page={pageNum}

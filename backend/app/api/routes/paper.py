@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import fitz
 from copy import deepcopy
 from hashlib import sha256
 from io import BytesIO
@@ -53,11 +54,23 @@ def build_folder_response(folder: Folder) -> FolderResponse:
     )
 
 
+def _build_public_file_path(file_path: str) -> str:
+    if not file_path:
+        return file_path
+    if file_path.startswith(("http://", "https://")):
+        return file_path
+    base_url = settings.upload_public_base_url
+    if base_url and file_path.startswith("/"):
+        return f"{base_url}{file_path}"
+    return file_path
+
+
 def build_paper_response(paper: Paper) -> PaperResponse:
     return PaperResponse(
         id=paper.id,
         folder_id=paper.folder_id,
         file_name=paper.file_name,
+        file_path=_build_public_file_path(paper.file_path),
         file_size=paper.file_size,
         title=paper.title or "",
         translated_title=paper.translated_title,
@@ -1410,6 +1423,14 @@ async def upload_paper(
 
     file_url = f"/uploads/papers/{file_name_on_disk}"
 
+    page_count = meta.page_count
+    if not page_count:
+        try:
+            with fitz.open(file_path) as document:
+                page_count = document.page_count
+        except Exception:
+            page_count = 0
+
     paper = Paper(
         user_id=current_user.id,
         folder_id=target_folder_id,
@@ -1425,7 +1446,7 @@ async def upload_paper(
         creation_date=meta.creation_date,
         modification_date=meta.modification_date,
         doi=meta.doi,
-        page_count=meta.page_count,
+        page_count=page_count,
         last_viewed_at=datetime.now(timezone.utc),
     )
     try:

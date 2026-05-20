@@ -2376,6 +2376,7 @@ function App() {
           ) : (
             <>
               <PaperReader
+                key={`paper-reader:${activePaperId || 'none'}`}
                 pdfReader={paperReaderState}
                 readerRef={readerRef}
                 activeTool={activeTool}
