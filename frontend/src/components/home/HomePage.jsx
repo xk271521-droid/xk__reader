@@ -634,6 +634,73 @@ function RecentSection({ groupedPapers, onOpenPaper }) {
   )
 }
 
+function RecentWorkspaceEmptyState({
+  isGuest,
+  hasHistory,
+  recoverableCount = 0,
+  onImportPaper,
+  onGoSearch,
+  onOpenTrash,
+}) {
+  const heading = hasHistory
+    ? '你的阅读工作台暂时空了，但这不一定意味着要从头开始'
+    : '先导入一篇文献，这里才会开始像工作台一样运转'
+  const description = hasHistory
+    ? '如果你之前读过文献，这里之所以空着，通常是因为当前库里已经没有可读文献了。你可以重新导入，也可以先去回收站看看有没有需要恢复的内容。'
+    : '你打开、标注、生成摘要之后，最近阅读、待处理事项和阅读节奏才会自动整理出来。没有文献时，这一页只保留最直接的下一步。'
+  const primaryLabel = isGuest ? '登录后导入文献' : '导入文献'
+  const secondaryLabel = recoverableCount > 0 ? `回收站里还有 ${recoverableCount} 篇` : '先去文献检索'
+  const tips = hasHistory
+    ? [
+        '恢复文献后，阅读轨迹会重新接上',
+        '导入新文献后，这里会继续记录进度',
+        '空页面不再误导成首次使用',
+      ]
+    : [
+        '最近打开过的文献',
+        '待整理的标注和笔记',
+        '本周阅读节奏',
+      ]
+
+  return (
+    <section className="home-empty-state home-empty-state--workspace">
+      <div className="home-empty-state__eyebrow">阅读记录</div>
+
+      <div className="home-empty-state__hero">
+        <div className="home-empty-state__icon home-empty-state__icon--workspace">
+          <FilePlus2 />
+        </div>
+
+        <div className="home-empty-state__copy">
+          <h3>{heading}</h3>
+          <p>{description}</p>
+        </div>
+      </div>
+
+      <div className="home-empty-state__actions">
+        <button type="button" className="home-primary-button" onClick={onImportPaper}>
+          <FilePlus2 />
+          <span>{primaryLabel}</span>
+        </button>
+        <button
+          type="button"
+          className="home-secondary-button"
+          onClick={recoverableCount > 0 ? onOpenTrash : onGoSearch}
+        >
+          {recoverableCount > 0 ? <RotateCcw /> : <SearchCheck />}
+          <span>{secondaryLabel}</span>
+        </button>
+      </div>
+
+      <div className="home-empty-state__tips" aria-label="导入后会出现的内容">
+        {tips.map((tip) => (
+          <span key={tip}>{tip}</span>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 function ContinueWorkSection({ item, onBrowseLibrary, onOpenPaper, onOpenResource, paperResourcesById }) {
   if (!item?.paper) {
     return (
@@ -1221,6 +1288,13 @@ export function HomePage({
     () => buildGroupedPapers(recentPapers, searchTerm),
     [recentPapers, searchTerm],
   )
+  const hasImportedPapers = recentPapers.length > 0
+  const showRecentWorkspaceEmpty = activeSection === 'recent' && !hasImportedPapers
+  const hasRecentReadingHistory = recentReadings.length > 0
+  const hasReadingStatsHistory = Number(readingStats?.weekly_opens || 0) > 0
+  const hasRecoverableTrash = trashPapers.length > 0
+  const showRecentWorkspaceHistoryState =
+    hasRecentReadingHistory || hasReadingStatsHistory || hasRecoverableTrash
 
   const groupedReadings = useMemo(() => {
     const deduped = [...recentReadings]
@@ -1604,43 +1678,45 @@ export function HomePage({
             ) : null}
           </div>
 
-          <div className="home-search-wrap">
-            <label className="home-search">
-              <Search />
-              <input
-                type="search"
-                placeholder={
-                  activeSection === 'library'
-                    ? '搜索当前文件夹标题、作者、关键词…'
-                    : '搜索当前工作区文献'
-                }
-                value={searchTerm}
-                onChange={(event) => setSearchTerm(event.target.value)}
-              />
-            </label>
+          {!showRecentWorkspaceEmpty ? (
+            <div className="home-search-wrap">
+              <label className="home-search">
+                <Search />
+                <input
+                  type="search"
+                  placeholder={
+                    activeSection === 'library'
+                      ? '搜索当前文件夹标题、作者、关键词…'
+                      : '搜索当前工作区文献'
+                  }
+                  value={searchTerm}
+                  onChange={(event) => setSearchTerm(event.target.value)}
+                />
+              </label>
 
-            {globalSearchResults.length > 0 ? (
-              <div className="home-search-results">
-                {globalSearchResults.map((paper) => (
-                  <button
-                    key={paper.id}
-                    type="button"
-                    className="home-search-results__item"
-                    onClick={() => handleGlobalSearchClick(paper)}
-                  >
-                    <span className="home-search-results__title">{paper.title}</span>
-                    <span className="home-search-results__folder">{paper._folderName}</span>
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
+              {globalSearchResults.length > 0 ? (
+                <div className="home-search-results">
+                  {globalSearchResults.map((paper) => (
+                    <button
+                      key={paper.id}
+                      type="button"
+                      className="home-search-results__item"
+                      onClick={() => handleGlobalSearchClick(paper)}
+                    >
+                      <span className="home-search-results__title">{paper.title}</span>
+                      <span className="home-search-results__folder">{paper._folderName}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         ) : null}
 
         {activeSection === 'recent' ? (
           <>
-            {!isGuest ? (
+            {!isGuest && !showRecentWorkspaceEmpty ? (
               <>
                 <ContinueWorkSection
                   item={continueWorkItem}
@@ -1657,38 +1733,57 @@ export function HomePage({
               </>
             ) : null}
 
-            <div className="home-heading">
-              <div>
-                <p className="panel-label">阅读轨迹</p>
-                <h2>最近打开过的文献</h2>
-              </div>
-              <div className="home-heading__meta">
-                <LibraryBig />
-                <span>{recentPapers.length} 篇阅读中的文献</span>
-              </div>
-            </div>
+            {showRecentWorkspaceEmpty ? (
+              <RecentWorkspaceEmptyState
+                isGuest={isGuest}
+                hasHistory={showRecentWorkspaceHistoryState}
+                recoverableCount={trashPapers.length}
+                onImportPaper={() => {
+                  if (requireLogin('导入文献')) return
+                  onOpenFilePicker(uncategorizedFolderId, { activate: false })
+                }}
+                onGoSearch={() => setActiveSection('literature-search')}
+                onOpenTrash={() => {
+                  setActiveSection('trash')
+                  onRefreshTrash?.()
+                }}
+              />
+            ) : (
+              <>
+                <div className="home-heading">
+                  <div>
+                    <p className="panel-label">阅读轨迹</p>
+                    <h2>最近打开过的文献</h2>
+                  </div>
+                  <div className="home-heading__meta">
+                    <LibraryBig />
+                    <span>{recentPapers.length} 篇阅读中的文献</span>
+                  </div>
+                </div>
 
-            <div className="home-stats-grid">
-              {weeklyStats.map((item) => {
-                const Icon = item.icon
-                const cardClass = [
-                  'home-stat-card',
-                  item.period ? `home-stat-card--${item.period}` : '',
-                ].filter(Boolean).join(' ')
-                const iconClass = item.period ? 'icon-animate-pulse' : ''
-                return (
-                  <article key={item.id} className={cardClass}>
-                    <div className="home-stat-card__icon">
-                      <Icon className={iconClass} />
-                    </div>
-                    <div>
-                      <p>{item.label}</p>
-                      <strong>{item.value}</strong>
-                    </div>
-                  </article>
-                )
-              })}
-            </div>
+                <div className="home-stats-grid">
+                  {weeklyStats.map((item) => {
+                    const Icon = item.icon
+                    const cardClass = [
+                      'home-stat-card',
+                      item.period ? `home-stat-card--${item.period}` : '',
+                    ].filter(Boolean).join(' ')
+                    const iconClass = item.period ? 'icon-animate-pulse' : ''
+                    return (
+                      <article key={item.id} className={cardClass}>
+                        <div className="home-stat-card__icon">
+                          <Icon className={iconClass} />
+                        </div>
+                        <div>
+                          <p>{item.label}</p>
+                          <strong>{item.value}</strong>
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+              </>
+            )}
           </>
         ) : null}
 
@@ -1705,7 +1800,7 @@ export function HomePage({
           <LiteratureSearchPage />
         ) : null}
 
-        {activeSection !== 'matrix' && activeSection !== 'insights' && activeSection !== 'literature-search' ? (
+        {activeSection !== 'matrix' && activeSection !== 'insights' && activeSection !== 'literature-search' && !showRecentWorkspaceEmpty ? (
         <div className={`home-section-head${activeSection === 'library' ? ' is-library' : ''}`}>
           <h3>
             {activeSection === 'recent' && '阅读记录'}
@@ -1723,7 +1818,7 @@ export function HomePage({
         </div>
         ) : null}
 
-        {activeSection === 'recent' ? (
+        {activeSection === 'recent' && !showRecentWorkspaceEmpty ? (
           <RecentSection
             groupedPapers={groupedReadings}
             onOpenPaper={(paperId) => {
