@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildFlowSelectionFromBoundaries } from './pdfSelectionModel.js'
+import {
+  buildFlowSelectionFromBoundaries,
+  getTextRangeGeometry,
+} from './pdfSelectionModel.js'
 
 function rect(left, top, width = 0.01, height = 0.02) {
   return {
@@ -153,4 +156,17 @@ test('keeps same-column visual flow stable when dragging upward', () => {
 
   assert.equal(selection.copyText, 'left top\nleft bottom')
   assert.equal(selection.copyText.includes('right'), false)
+})
+
+test('uses selection overlay geometry when rendering highlight annotations', () => {
+  const { page, leftTop } = buildInterleavedTwoColumnPage()
+
+  const selectionGeometry = getTextRangeGeometry(page, leftTop.startChar, leftTop.endChar, {
+    visualMode: 'selection-overlay',
+  })
+  const highlightGeometry = getTextRangeGeometry(page, leftTop.startChar, leftTop.endChar, {
+    visualMode: 'highlight',
+  })
+
+  assert.deepEqual(highlightGeometry.rects, selectionGeometry.rects)
 })

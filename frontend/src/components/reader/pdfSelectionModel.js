@@ -1648,7 +1648,7 @@ export function getLineRectsForRange(pageIndex, startChar, endChar) {
 }
 
 export function getHighlightRectsForRange(pageIndex, startChar, endChar) {
-  return getLineRectsForRange(pageIndex, startChar, endChar)
+  return getCalibratedSelectionOverlayRects(pageIndex, startChar, endChar)
 }
 
 export function getSearchRectsForRange(pageIndex, startChar, endChar) {

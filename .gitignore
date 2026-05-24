@@ -1,5 +1,6 @@
 .idea/
 .codex/
+.superpowers/
 
 # Frontend build artifacts
 frontend/node_modules/
