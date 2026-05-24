@@ -300,26 +300,36 @@ def _load_cached_results(db: Any, key: str) -> list[LiteratureResult] | None:
     if db is None:
         return None
 
-    cache = db.scalar(
-        select(PaperLiteratureCache).where(
-            PaperLiteratureCache.result_kind == "search",
-            PaperLiteratureCache.lookup_key == key,
+    try:
+        cache = db.scalar(
+            select(PaperLiteratureCache).where(
+                PaperLiteratureCache.result_kind == "search",
+                PaperLiteratureCache.lookup_key == key,
+            )
         )
-    )
-    if cache is None:
-        return None
+        if cache is None:
+            return None
 
-    payload = cache.payload_json
-    if isinstance(payload, str):
-        payload = json.loads(payload)
-    if not isinstance(payload, list):
-        return None
+        payload = cache.payload_json
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, list):
+            raise TypeError("cached literature payload must be a list")
 
-    results = []
-    for item in payload:
-        if isinstance(item, dict):
+        results = []
+        for item in payload:
+            if not isinstance(item, dict):
+                raise TypeError("cached literature result must be an object")
             results.append(LiteratureResult(**item))
-    return results
+        return results
+    except Exception:
+        rollback = getattr(db, "rollback", None)
+        if callable(rollback):
+            try:
+                rollback()
+            except Exception:
+                pass
+        return None
 
 
 def _store_cached_results(
