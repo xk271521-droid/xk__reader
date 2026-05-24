@@ -2,18 +2,33 @@ from __future__ import annotations
 
 import unittest
 
+from pydantic import ValidationError
+
+from app.schemas.literature import LiteratureSearchRequest, LiteratureSearchResponse
 from app.services.literature_search import (
+    DEFAULT_SOURCES,
     LiteratureResult,
+    cache_key,
+    compact_text,
     dedupe_literature_results,
     normalize_arxiv_entry,
+    normalize_arxiv_id,
     normalize_crossref_work,
     normalize_doi,
     normalize_openalex_work,
+    normalize_sources,
     normalize_semantic_scholar_paper,
 )
 
 
 class LiteratureSearchNormalizationTest(unittest.TestCase):
+    def test_compact_text_unescapes_html_strips_tags_and_collapses_whitespace(self) -> None:
+        self.assertEqual(
+            compact_text("  A&nbsp;<jats:p>nested <b>value</b></jats:p>\n\nwith\tspace  "),
+            "A nested value with space",
+        )
+        self.assertEqual(compact_text(None), "")
+
     def test_normalize_doi_strips_url_and_lowercases(self) -> None:
         self.assertEqual(
             normalize_doi(" DOI: https://doi.org/10.1234/ABC.Def "),
@@ -23,6 +38,17 @@ class LiteratureSearchNormalizationTest(unittest.TestCase):
             normalize_doi("https://dx.doi.org/10.5555/Test"),
             "10.5555/test",
         )
+
+    def test_normalize_arxiv_id_strips_urls_pdf_suffix_and_version(self) -> None:
+        self.assertEqual(
+            normalize_arxiv_id("https://arxiv.org/abs/2401.12345v3"),
+            "2401.12345",
+        )
+        self.assertEqual(
+            normalize_arxiv_id("https://arxiv.org/pdf/2401.12345v2.pdf"),
+            "2401.12345",
+        )
+        self.assertEqual(normalize_arxiv_id("arXiv:hep-th/9901001v1"), "hep-th/9901001")
 
     def test_normalize_openalex_work_reconstructs_abstract(self) -> None:
         result = normalize_openalex_work(
@@ -137,6 +163,70 @@ class LiteratureSearchNormalizationTest(unittest.TestCase):
         self.assertEqual(result.citation_count, 17)
         self.assertEqual(result.authors, ["Barbara Liskov"])
 
+    def test_normalize_sources_filters_invalid_sources_and_defaults(self) -> None:
+        self.assertEqual(
+            normalize_sources(["CrossRef", "unknown", "arxiv", "crossref", " "]),
+            ["crossref", "arxiv"],
+        )
+        self.assertEqual(normalize_sources([]), DEFAULT_SOURCES)
+        self.assertIsNot(normalize_sources([]), DEFAULT_SOURCES)
+
+    def test_cache_key_uses_compact_query_sorted_sources_and_limit(self) -> None:
+        self.assertEqual(
+            cache_key(" Graph\n Mining ", ["semantic_scholar", "openalex"], 5),
+            '{"limit":5,"q":"graph mining","sources":["openalex","semantic_scholar"]}',
+        )
+
+    def test_literature_result_to_schema_preserves_fields(self) -> None:
+        result = LiteratureResult(
+            source="openalex",
+            source_id="W1",
+            title="Schema Work",
+            authors=["Author One"],
+            year=2020,
+            venue="Venue",
+            doi="10.5000/schema",
+            arxiv_id="2001.00001",
+            abstract="Abstract",
+            url="https://example.test/work",
+            pdf_url="https://example.test/work.pdf",
+            citation_count=10,
+            imported_paper_id=7,
+        )
+
+        schema = result.to_schema()
+
+        self.assertEqual(schema.source, "openalex")
+        self.assertEqual(schema.source_id, "W1")
+        self.assertEqual(schema.title, "Schema Work")
+        self.assertEqual(schema.authors, ["Author One"])
+        self.assertEqual(schema.year, 2020)
+        self.assertEqual(schema.venue, "Venue")
+        self.assertEqual(schema.doi, "10.5000/schema")
+        self.assertEqual(schema.arxiv_id, "2001.00001")
+        self.assertEqual(schema.abstract, "Abstract")
+        self.assertEqual(schema.url, "https://example.test/work")
+        self.assertEqual(schema.pdf_url, "https://example.test/work.pdf")
+        self.assertEqual(schema.citation_count, 10)
+        self.assertEqual(schema.imported_paper_id, 7)
+
+    def test_literature_schemas_apply_defaults_and_validation(self) -> None:
+        request = LiteratureSearchRequest(query="paper")
+        response = LiteratureSearchResponse(query="paper", results=[], sources=["openalex"])
+
+        self.assertEqual(request.limit, 20)
+        self.assertEqual(request.sources, [])
+        self.assertFalse(response.cached)
+
+        with self.assertRaises(ValidationError):
+            LiteratureSearchRequest(query="")
+        with self.assertRaises(ValidationError):
+            LiteratureSearchRequest(query="x" * 301)
+        with self.assertRaises(ValidationError):
+            LiteratureSearchRequest(query="paper", limit=0)
+        with self.assertRaises(ValidationError):
+            LiteratureSearchRequest(query="paper", limit=51)
+
     def test_dedupe_literature_results_keeps_stronger_result(self) -> None:
         weak = LiteratureResult(
             source="crossref",
@@ -170,6 +260,77 @@ class LiteratureSearchNormalizationTest(unittest.TestCase):
         self.assertEqual(results[0].source_id, "strong")
         self.assertEqual(results[0].pdf_url, "https://example.test/same.pdf")
         self.assertEqual(results[0].citation_count, 99)
+
+    def test_dedupe_literature_results_matches_by_arxiv_id(self) -> None:
+        weak = LiteratureResult(
+            source="semantic_scholar",
+            source_id="weak-arxiv",
+            title="Arxiv Duplicate",
+            arxiv_id="2401.12345v1",
+            citation_count=4,
+        )
+        strong = LiteratureResult(
+            source="arxiv",
+            source_id="strong-arxiv",
+            title="Arxiv Duplicate Revised",
+            arxiv_id="https://arxiv.org/abs/2401.12345v2",
+            pdf_url="https://arxiv.org/pdf/2401.12345v2.pdf",
+            citation_count=3,
+        )
+
+        results = dedupe_literature_results([weak, strong])
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].source_id, "strong-arxiv")
+
+    def test_dedupe_literature_results_matches_by_title_year_fallback(self) -> None:
+        weak = LiteratureResult(
+            source="crossref",
+            source_id="weak-title",
+            title="Same: Title!",
+            year=2019,
+            citation_count=2,
+        )
+        strong = LiteratureResult(
+            source="openalex",
+            source_id="strong-title",
+            title="same title",
+            authors=["Author One", "Author Two"],
+            year=2019,
+            abstract="Abstract",
+            citation_count=2,
+        )
+
+        results = dedupe_literature_results([weak, strong])
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].source_id, "strong-title")
+
+    def test_dedupe_literature_results_sorts_by_citation_count_descending(self) -> None:
+        results = dedupe_literature_results(
+            [
+                LiteratureResult(
+                    source="crossref",
+                    source_id="middle",
+                    title="Middle Cited",
+                    citation_count=5,
+                ),
+                LiteratureResult(
+                    source="openalex",
+                    source_id="uncited",
+                    title="Uncited",
+                    citation_count=None,
+                ),
+                LiteratureResult(
+                    source="semantic_scholar",
+                    source_id="top",
+                    title="Top Cited",
+                    citation_count=50,
+                ),
+            ]
+        )
+
+        self.assertEqual([result.source_id for result in results], ["top", "middle", "uncited"])
 
 
 if __name__ == "__main__":
