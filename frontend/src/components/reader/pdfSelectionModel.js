@@ -1765,6 +1765,154 @@ export function buildSelectionFromWordRange(pageIndex, startWordIndex, endWordIn
   }
 }
 
+function buildContinuousSelectionFromBoundaries(pageIndex, anchorBoundary, focusBoundary) {
+  const ordered = getOrderedRange(anchorBoundary.charIndex, focusBoundary.charIndex)
+  if (ordered.startChar === ordered.endChar) return null
+
+  const geometry = getTextRangeGeometry(pageIndex, ordered.startChar, ordered.endChar, {
+    visualMode: 'selection-overlay',
+  })
+  if (!geometry.text.trim() || geometry.rects.length === 0) return null
+
+  const context = getContextAroundRange(pageIndex, ordered.startChar, ordered.endChar)
+  return {
+    startChar: ordered.startChar,
+    endChar: ordered.endChar,
+    text: geometry.text,
+    copyText: geometry.copyText,
+    rects: geometry.rects,
+    anchorRect: geometry.rects[0] || null,
+    contextBefore: context.before,
+    contextAfter: context.after,
+  }
+}
+
+function getLineForBoundary(pageIndex, boundary) {
+  if (!pageIndex || !boundary) return null
+  if (boundary.lineIndex != null) {
+    const direct = pageIndex.lines?.[boundary.lineIndex]
+    if (direct?.index === boundary.lineIndex) return direct
+    const matched = pageIndex.lines?.find((line) => line.index === boundary.lineIndex)
+    if (matched) return matched
+  }
+  return pageIndex.chars?.[boundary.charIndex]?.lineIndex != null
+    ? pageIndex.lines?.[pageIndex.chars[boundary.charIndex].lineIndex] || null
+    : null
+}
+
+function getColumnLinesInVisualOrder(pageIndex, columnId) {
+  return (pageIndex.lines || [])
+    .filter((line) => line?.columnId === columnId)
+    .sort((left, right) => {
+      const topDelta = (left.rect?.top ?? 0) - (right.rect?.top ?? 0)
+      if (Math.abs(topDelta) > LINE_MERGE_EPSILON) return topDelta
+      return (left.rect?.left ?? 0) - (right.rect?.left ?? 0)
+    })
+}
+
+function getLineCharsInVisualOrder(pageIndex, line) {
+  return (line?.charIndices || [])
+    .map((index) => pageIndex.chars?.[index])
+    .filter((char) => char?.rect)
+    .sort((left, right) => {
+      const leftRect = getCharRectForMode(left, 'selection-overlay') || left.rect
+      const rightRect = getCharRectForMode(right, 'selection-overlay') || right.rect
+      return (leftRect?.left ?? 0) - (rightRect?.left ?? 0)
+    })
+}
+
+function buildFlowSegment(pageIndex, line, startChar, endChar) {
+  const ordered = getOrderedRange(
+    clamp(startChar, line.startChar, line.endChar),
+    clamp(endChar, line.startChar, line.endChar),
+  )
+  if (ordered.startChar === ordered.endChar) return null
+
+  const chars = getLineCharsInVisualOrder(pageIndex, line)
+    .filter((char) => char.index >= ordered.startChar && char.index < ordered.endChar)
+  if (chars.length === 0) return null
+
+  const rect = unionRects(
+    chars
+      .map((char) => getCharRectForMode(char, 'selection-overlay') || char.rect)
+      .filter(Boolean),
+  )
+  if (!rect || rect.width <= 0 || rect.height <= 0) return null
+
+  const text = chars.map((char) => char.char).join('').trim()
+  if (!text) return null
+
+  return {
+    startChar: Math.min(...chars.map((char) => char.index)),
+    endChar: Math.max(...chars.map((char) => char.index)) + 1,
+    text,
+    rect,
+  }
+}
+
+export function buildFlowSelectionFromBoundaries(pageIndex, anchorBoundary, focusBoundary) {
+  if (!pageIndex || !anchorBoundary || !focusBoundary) return null
+  if (anchorBoundary.charIndex == null || focusBoundary.charIndex == null) return null
+
+  const anchorLine = getLineForBoundary(pageIndex, anchorBoundary)
+  const focusLine = getLineForBoundary(pageIndex, focusBoundary)
+  const columnId = anchorBoundary.columnId
+  const canUseColumnFlow =
+    anchorLine &&
+    focusLine &&
+    columnId != null &&
+    columnId >= 0 &&
+    columnId === focusBoundary.columnId &&
+    anchorLine.index !== focusLine.index &&
+    (pageIndex.columns?.length || 0) > 1
+
+  if (!canUseColumnFlow) {
+    return buildContinuousSelectionFromBoundaries(pageIndex, anchorBoundary, focusBoundary)
+  }
+
+  const columnLines = getColumnLinesInVisualOrder(pageIndex, columnId)
+  const anchorPosition = columnLines.findIndex((line) => line.index === anchorLine.index)
+  const focusPosition = columnLines.findIndex((line) => line.index === focusLine.index)
+  if (anchorPosition < 0 || focusPosition < 0) {
+    return buildContinuousSelectionFromBoundaries(pageIndex, anchorBoundary, focusBoundary)
+  }
+
+  const startPosition = Math.min(anchorPosition, focusPosition)
+  const endPosition = Math.max(anchorPosition, focusPosition)
+  const startBoundary = anchorPosition <= focusPosition ? anchorBoundary : focusBoundary
+  const endBoundary = anchorPosition <= focusPosition ? focusBoundary : anchorBoundary
+  const startLine = anchorPosition <= focusPosition ? anchorLine : focusLine
+  const endLine = anchorPosition <= focusPosition ? focusLine : anchorLine
+
+  const segments = []
+  for (const line of columnLines.slice(startPosition, endPosition + 1)) {
+    const segmentStart = line.index === startLine.index ? startBoundary.charIndex : line.startChar
+    const segmentEnd = line.index === endLine.index ? endBoundary.charIndex : line.endChar
+    const segment = buildFlowSegment(pageIndex, line, segmentStart, segmentEnd)
+    if (segment) segments.push(segment)
+  }
+
+  if (segments.length === 0) {
+    return buildContinuousSelectionFromBoundaries(pageIndex, anchorBoundary, focusBoundary)
+  }
+
+  const startChar = Math.min(...segments.map((segment) => segment.startChar))
+  const endChar = Math.max(...segments.map((segment) => segment.endChar))
+  const copyText = segments.map((segment) => segment.text).join('\n')
+  const context = getContextAroundRange(pageIndex, startChar, endChar)
+
+  return {
+    startChar,
+    endChar,
+    text: copyText,
+    copyText,
+    rects: segments.map((segment) => segment.rect),
+    anchorRect: segments[0]?.rect || null,
+    contextBefore: context.before,
+    contextAfter: context.after,
+  }
+}
+
 export function findWordAtPoint(pageIndex, normalizedX, normalizedY) {
   if (!pageIndex) return null
 

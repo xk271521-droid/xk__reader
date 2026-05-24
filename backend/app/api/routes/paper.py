@@ -45,6 +45,7 @@ from app.services.paper_metadata import (
     is_missing_metadata_value,
     is_weak_metadata_title,
 )
+from app.services.pdf_layout import extract_pdf_page_layout
 from app.services.oss_storage import (
     delete_object as delete_oss_object,
     delete_prefix as delete_oss_prefix,
@@ -2234,6 +2235,29 @@ def download_full_translation(
     filename = (paper.title or paper.file_name or "translation").replace("/", " ").replace("\\", " ").strip()
     headers = {"Content-Disposition": f'attachment; filename="{filename[:80]}-translation.md"'}
     return PlainTextResponse(content, media_type="text/markdown; charset=utf-8", headers=headers)
+
+
+@router.get("/{paper_id}/layout/{page_number}")
+def get_paper_page_layout(
+    paper_id: int,
+    page_number: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    actual_file = _resolve_paper_file(paper.file_path)
+    if not actual_file or not actual_file.exists():
+        raise HTTPException(status_code=404, detail="Paper file is missing")
+
+    try:
+        return extract_pdf_page_layout(actual_file, page_number)
+    except IndexError as exc:
+        raise HTTPException(status_code=404, detail="Paper page not found") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PDF layout parsing failed: {exc}") from exc
 
 
 @router.get("/{paper_id}", response_model=PaperResponse)

@@ -543,6 +543,16 @@ export async function saveResourceLayout(paperId, layout) {
   return parseJsonResponse(response)
 }
 
+export async function fetchPaperPageLayout(paperId, pageNumber) {
+  const response = await fetch(
+    `${PAPERS_BASE}/${encodeURIComponent(paperId)}/layout/${encodeURIComponent(pageNumber)}`,
+    {
+      headers: authHeaders(),
+    },
+  )
+  return parseJsonResponse(response)
+}
+
 export async function syncReadingRecords(records) {
   const response = await fetch('/api/reading-records/sync', {
     method: 'POST',

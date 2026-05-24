@@ -8,6 +8,7 @@ import {
   sendResetVerificationCode,
   sendRegisterVerificationCode,
 } from '../services/authApi'
+import { SOURCE_CODE_LABEL, SOURCE_CODE_TITLE, SOURCE_CODE_URL } from '../config/sourceCode'
 import xkLogoIcon from '../assets/brand/xk-logo-icon.svg'
 import './Login.css'
 
@@ -1110,6 +1111,9 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
           </div>
 
           <div className="scene-panel__footer">
+            <a href={SOURCE_CODE_URL} target="_blank" rel="noreferrer" title={SOURCE_CODE_TITLE}>
+              {SOURCE_CODE_LABEL}
+            </a>
             <button type="button">隐私政策</button>
             <button type="button">服务条款</button>
           </div>
@@ -1558,6 +1562,16 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
               />
             </div>
           </form>
+
+          <a
+            className="auth-card__source"
+            href={SOURCE_CODE_URL}
+            target="_blank"
+            rel="noreferrer"
+            title={SOURCE_CODE_TITLE}
+          >
+            {SOURCE_CODE_LABEL}
+          </a>
 
         </div>
       </div>

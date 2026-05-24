@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { Bell, Crown, ListChecks, LogIn, Sparkles, Trash2, X } from 'lucide-react'
+import { Bell, Code2, Crown, ListChecks, LogIn, Sparkles, Trash2, X } from 'lucide-react'
 import { TaskCenterSheet } from '../components/layout/TaskCenterSheet'
 import { UserHoverMenu } from '../components/layout/UserHoverMenu'
 import { UtilityRail } from '../components/layout/UtilityRail'
@@ -78,6 +78,7 @@ import { countLogicalAnnotations } from '../utils/annotationAggregation'
 import { toUserMessage } from '../utils/errorMessage'
 import { MembershipModal } from '../components/membership/MembershipModal'
 import { fetchMembershipPlans } from '../services/membershipApi'
+import { SOURCE_CODE_LABEL, SOURCE_CODE_TITLE, SOURCE_CODE_URL } from '../config/sourceCode'
 import {
   Sheet,
   SheetContent,
@@ -3205,6 +3206,18 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
                 </span>
               ) : null}
             </button>
+            <a
+              className="topbar-action topbar-action--source"
+              href={SOURCE_CODE_URL}
+              target="_blank"
+              rel="noreferrer"
+              title={SOURCE_CODE_TITLE}
+              aria-label={SOURCE_CODE_TITLE}
+            >
+              <Code2 size={14} />
+              <span className="topbar-action__label">{SOURCE_CODE_LABEL}</span>
+            </a>
+
             {currentUser ? (
               <button
                 type="button"

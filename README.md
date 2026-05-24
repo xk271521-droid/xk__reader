@@ -61,3 +61,15 @@ cd ..
 1. 先保证质量门禁可一键运行：测试、构建、路由 smoke check、敏感信息扫描。
 2. 再清理技术债：ESLint 错误、大组件、大 CSS、重复请求处理。
 3. 最后做深层优化：PDF 渲染、文献矩阵长任务、数据库迁移、接口限流和监控。
+
+## License and Source Code
+
+This project is distributed under the GNU Affero General Public License v3.0
+or later. See [LICENSE](./LICENSE).
+
+Source code for the network service is available at:
+
+https://github.com/xk271521-droid/xk__reader
+
+Third party dependency notes are documented in
+[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).

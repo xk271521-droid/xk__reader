@@ -14,6 +14,7 @@ import {
 } from './shapeAnnotationModel'
 import {
   buildSelectionFromWordRange,
+  buildFlowSelectionFromBoundaries,
   findCharBoundaryAtPoint,
   findCharInRangeAtPoint,
   findErasePreviewRangeAtPoint,
@@ -114,6 +115,19 @@ function buildSelectionFromChars(pageIndex, pageNumber, startChar, endChar) {
     anchorRect: geometry.rects[0] || null,
     contextBefore: pageIndex.fullText.slice(Math.max(0, orderedStart - 120), orderedStart),
     contextAfter: pageIndex.fullText.slice(orderedEnd, Math.min(pageIndex.length, orderedEnd + 120)),
+  }
+}
+
+function buildSelectionFromBoundaries(pageIndex, pageNumber, anchorBoundary, focusBoundary) {
+  const selection = buildFlowSelectionFromBoundaries(pageIndex, anchorBoundary, focusBoundary)
+  if (!selection || !selection.text.trim() || selection.rects.length === 0) {
+    return createEmptySelection()
+  }
+
+  return {
+    visible: true,
+    pageNumber,
+    ...selection,
   }
 }
 
@@ -327,6 +341,16 @@ function isSelectionFlowCompatible(current, boundary) {
     boundaryColumn < 0 ||
     currentColumn === boundaryColumn
   if (!sameColumn) return false
+
+  if (
+    currentColumn != null &&
+    boundaryColumn != null &&
+    currentColumn >= 0 &&
+    boundaryColumn >= 0 &&
+    currentColumn === boundaryColumn
+  ) {
+    return true
+  }
 
   if (boundary.blockIndex === current.blockIndex) return true
 
@@ -2393,11 +2417,11 @@ export function PdfViewport({
     current.hasDragged = true
     current.endChar = boundary.charIndex
     pointerSelectionRef.current = current
-    const nextSelection = buildSelectionFromChars(
+    const nextSelection = buildSelectionFromBoundaries(
       pageResolved.pageIndex,
       pageResolved.pageNum,
-      current.startChar,
-      current.endChar,
+      current.anchorBoundary,
+      boundary,
     )
     if (nextSelection.visible) {
       current.lastSelection = nextSelection
