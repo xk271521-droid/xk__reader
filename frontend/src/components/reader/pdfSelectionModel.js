@@ -2134,12 +2134,18 @@ export function findTextBoundaryAtPoint(pageIndex, normalizedX, normalizedY, sco
 
   let line = findLineAtPoint(pageIndex, normalizedX, normalizedY, scope)
   if (!line && scope?.blockIndex != null) {
-    line = findNearestLineInBlock(pageIndex, normalizedX, normalizedY, scope.blockIndex)
+    const nearestLine = findNearestLineInBlock(pageIndex, normalizedX, normalizedY, scope.blockIndex)
+    if (isSelectionSnapCloseToLine(nearestLine, normalizedX, normalizedY)) {
+      line = nearestLine
+    }
   }
   if (!line && scope?.columnId != null) {
-    line = findNearestLineInColumn(pageIndex, normalizedX, normalizedY, scope.columnId)
+    const nearestLine = findNearestLineInColumn(pageIndex, normalizedX, normalizedY, scope.columnId)
+    if (isSelectionSnapCloseToLine(nearestLine, normalizedX, normalizedY)) {
+      line = nearestLine
+    }
   }
-  if (!line) return scope
+  if (!line) return null
 
   const lineChars = getLineOrderedWordChars(line, pageIndex)
 
@@ -2244,6 +2250,30 @@ function findNearestLineInColumn(pageIndex, normalizedX, normalizedY, columnId) 
   }
 
   return best?.line || null
+}
+
+function isSelectionSnapCloseToLine(line, normalizedX, normalizedY) {
+  if (!line?.rect) return false
+
+  const band = getLineVisualBand(line)
+  const top = Math.min(line.rect.top, band.top)
+  const bottom = Math.max(getRectBottom(line.rect), band.bottom)
+  const right = getRectRight(line.rect)
+  const dx = normalizedX < line.rect.left
+    ? line.rect.left - normalizedX
+    : normalizedX > right
+      ? normalizedX - right
+      : 0
+  const dy = normalizedY < top
+    ? top - normalizedY
+    : normalizedY > bottom
+      ? normalizedY - bottom
+      : 0
+  const lineHeight = Math.max(line.rect.height || 0, band.height || 0, 0.01)
+  const horizontalLimit = Math.max(0.024, Math.min(0.048, lineHeight * 2.2))
+  const verticalLimit = Math.max(0.012, Math.min(0.034, lineHeight * 1.45))
+
+  return dx <= horizontalLimit && dy <= verticalLimit
 }
 
 function lineMatchesScope(line, scope) {

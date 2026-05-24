@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   buildFlowSelectionFromBoundaries,
+  findSelectionBoundaryAtPoint,
   getTextRangeGeometry,
 } from './pdfSelectionModel.js'
 
@@ -111,6 +112,40 @@ function buildInterleavedTwoColumnPage() {
   return { page, leftTop, leftBottom }
 }
 
+function buildSameBlockLeftColumnPage() {
+  const page = {
+    pageNumber: 1,
+    fullText: '',
+    chars: [],
+    lines: [],
+    words: [],
+    blocks: [],
+    columns: [
+      { id: 0, left: 0, right: 0.5 },
+      { id: 1, left: 0.5, right: 1 },
+    ],
+    length: 0,
+  }
+
+  const top = appendLine(page, 'left top', {
+    lineIndex: 0,
+    blockIndex: 0,
+    columnId: 0,
+    left: 0.1,
+    top: 0.1,
+  })
+  const bottom = appendLine(page, 'left bottom', {
+    lineIndex: 1,
+    blockIndex: 0,
+    columnId: 0,
+    left: 0.1,
+    top: 0.15,
+  })
+  page.length = page.chars.length
+
+  return { page, top, bottom }
+}
+
 test('builds a same-column visual flow selection without mixing the right column', () => {
   const { page, leftTop, leftBottom } = buildInterleavedTwoColumnPage()
 
@@ -169,4 +204,17 @@ test('uses selection overlay geometry when rendering highlight annotations', () 
   })
 
   assert.deepEqual(highlightGeometry.rects, selectionGeometry.rects)
+})
+
+test('does not snap a selection boundary to distant blank space', () => {
+  const { page, top } = buildSameBlockLeftColumnPage()
+
+  const boundary = findSelectionBoundaryAtPoint(page, 0.9, 0.15, {
+    charIndex: top.startChar,
+    lineIndex: 0,
+    blockIndex: 0,
+    columnId: 0,
+  })
+
+  assert.equal(boundary, null)
 })
