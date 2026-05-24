@@ -13,10 +13,7 @@ import xml.etree.ElementTree as ET
 
 from sqlalchemy import select
 
-try:
-    from app.models import PaperLiteratureCache
-except ImportError:
-    PaperLiteratureCache = None  # type: ignore[assignment]
+from app.models import PaperLiteratureCache
 from app.schemas.literature import LiteratureSearchResult
 
 
@@ -300,7 +297,7 @@ SOURCE_FETCHERS: dict[str, Callable[[str, int], list[LiteratureResult]]] = {
 
 
 def _load_cached_results(db: Any, key: str) -> list[LiteratureResult] | None:
-    if db is None or PaperLiteratureCache is None:
+    if db is None:
         return None
 
     cache = db.scalar(
@@ -331,29 +328,37 @@ def _store_cached_results(
     results: list[LiteratureResult],
     sources: list[str] | None = None,
 ) -> None:
-    if db is None or PaperLiteratureCache is None:
+    if db is None:
         return
 
-    source_value = ",".join(sources or DEFAULT_SOURCES)
-    payload = [asdict(result) for result in results]
-    cache = db.scalar(
-        select(PaperLiteratureCache).where(
-            PaperLiteratureCache.result_kind == "search",
-            PaperLiteratureCache.lookup_key == key,
+    try:
+        source_value = ",".join(sources or DEFAULT_SOURCES)
+        payload = [asdict(result) for result in results]
+        cache = db.scalar(
+            select(PaperLiteratureCache).where(
+                PaperLiteratureCache.result_kind == "search",
+                PaperLiteratureCache.lookup_key == key,
+            )
         )
-    )
-    if cache is None:
-        cache = PaperLiteratureCache(
-            result_kind="search",
-            lookup_key=key,
-            source=source_value,
-            payload_json=payload,
-        )
-        db.add(cache)
-    else:
-        cache.source = source_value
-        cache.payload_json = payload
-    db.commit()
+        if cache is None:
+            cache = PaperLiteratureCache(
+                result_kind="search",
+                lookup_key=key,
+                source=source_value,
+                payload_json=payload,
+            )
+            db.add(cache)
+        else:
+            cache.source = source_value
+            cache.payload_json = payload
+        db.commit()
+    except Exception:
+        rollback = getattr(db, "rollback", None)
+        if callable(rollback):
+            try:
+                rollback()
+            except Exception:
+                pass
 
 
 def search_literature(

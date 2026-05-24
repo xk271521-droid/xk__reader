@@ -20,6 +20,7 @@ from app.services.literature_search import (
     normalize_sources,
     normalize_semantic_scholar_paper,
     search_literature,
+    _store_cached_results,
 )
 
 
@@ -365,6 +366,70 @@ class LiteratureSearchNormalizationTest(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].source, "crossref")
         self.assertEqual(results[0].title, "Desktop Search")
+
+    def test_paper_literature_cache_imports_from_models(self) -> None:
+        from app.models import PaperLiteratureCache
+
+        self.assertEqual(PaperLiteratureCache.__tablename__, "paper_literature_caches")
+
+    def test_store_cached_results_rolls_back_when_commit_fails(self) -> None:
+        class FailingCommitDb:
+            def __init__(self) -> None:
+                self.added = []
+                self.rolled_back = False
+
+            def scalar(self, statement: object) -> None:
+                return None
+
+            def add(self, cache: object) -> None:
+                self.added.append(cache)
+
+            def commit(self) -> None:
+                raise RuntimeError("commit failed")
+
+            def rollback(self) -> None:
+                self.rolled_back = True
+
+        db = FailingCommitDb()
+
+        _store_cached_results(
+            db,
+            "cache-key",
+            [LiteratureResult(source="crossref", source_id="10.1/test", title="Cached Work")],
+            ["crossref"],
+        )
+
+        self.assertEqual(len(db.added), 1)
+        self.assertTrue(db.rolled_back)
+
+    def test_search_literature_returns_cached_results_from_db(self) -> None:
+        class CacheDb:
+            def scalar(self, statement: object) -> object:
+                return type(
+                    "CachedLiterature",
+                    (),
+                    {
+                        "payload_json": [
+                            {
+                                "source": "openalex",
+                                "source_id": "W1",
+                                "title": "Cached Work",
+                            }
+                        ]
+                    },
+                )()
+
+        results, selected_sources, cached = search_literature(
+            "cached work",
+            limit=5,
+            sources=["openalex"],
+            db=CacheDb(),
+        )
+
+        self.assertTrue(cached)
+        self.assertEqual(selected_sources, ["openalex"])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].title, "Cached Work")
 
 
 if __name__ == "__main__":
