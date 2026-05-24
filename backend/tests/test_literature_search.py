@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -18,6 +19,7 @@ from app.services.literature_search import (
     normalize_openalex_work,
     normalize_sources,
     normalize_semantic_scholar_paper,
+    search_literature,
 )
 
 
@@ -331,6 +333,38 @@ class LiteratureSearchNormalizationTest(unittest.TestCase):
         )
 
         self.assertEqual([result.source_id for result in results], ["top", "middle", "uncited"])
+
+    def test_search_literature_ignores_failed_source_without_cache_db(self) -> None:
+        def raise_fetcher(query: str, limit: int) -> list[LiteratureResult]:
+            raise RuntimeError("source unavailable")
+
+        def good_fetcher(query: str, limit: int) -> list[LiteratureResult]:
+            return [
+                LiteratureResult(
+                    source="crossref",
+                    source_id="10.1000/desktop",
+                    title="Desktop Search",
+                    doi="10.1000/desktop",
+                    citation_count=5,
+                )
+            ]
+
+        with patch(
+            "app.services.literature_search.SOURCE_FETCHERS",
+            {"openalex": raise_fetcher, "crossref": good_fetcher},
+        ):
+            results, selected_sources, cached = search_literature(
+                "desktop",
+                limit=5,
+                sources=["openalex", "crossref"],
+                db=None,
+            )
+
+        self.assertFalse(cached)
+        self.assertEqual(selected_sources, ["openalex", "crossref"])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].source, "crossref")
+        self.assertEqual(results[0].title, "Desktop Search")
 
 
 if __name__ == "__main__":

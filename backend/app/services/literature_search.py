@@ -1,15 +1,27 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from dataclasses import dataclass, field
 import html
 import json
 import re
+from typing import Callable
 from typing import Any
+from urllib.parse import quote_plus, urlencode
+from urllib.request import Request, urlopen
+import xml.etree.ElementTree as ET
 
+from sqlalchemy import select
+
+try:
+    from app.models import PaperLiteratureCache
+except ImportError:
+    PaperLiteratureCache = None  # type: ignore[assignment]
 from app.schemas.literature import LiteratureSearchResult
 
 
 DEFAULT_SOURCES = ["openalex", "crossref", "arxiv", "semantic_scholar"]
+USER_AGENT = "PaperReader/desktop-search"
 
 
 @dataclass
@@ -193,12 +205,198 @@ def cache_key(query: str, sources: list[str], limit: int) -> str:
     )
 
 
+def _read_json(url: str, headers: dict[str, str] | None = None) -> Any:
+    request_headers = {"User-Agent": USER_AGENT}
+    if headers:
+        request_headers.update(headers)
+    request = Request(url, headers=request_headers)
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _read_arxiv_entries(url: str) -> list[dict[str, Any]]:
+    request = Request(url, headers={"User-Agent": USER_AGENT})
+    with urlopen(request, timeout=20) as response:
+        root = ET.fromstring(response.read())
+
+    namespace = {"atom": "http://www.w3.org/2005/Atom"}
+    entries = []
+    for entry in root.findall("atom:entry", namespace):
+        entries.append(
+            {
+                "id": _atom_text(entry, "id", namespace),
+                "title": _atom_text(entry, "title", namespace),
+                "summary": _atom_text(entry, "summary", namespace),
+                "published": _atom_text(entry, "published", namespace),
+                "authors": [
+                    {"name": _atom_text(author, "name", namespace)}
+                    for author in entry.findall("atom:author", namespace)
+                ],
+                "links": [dict(link.attrib) for link in entry.findall("atom:link", namespace)],
+            }
+        )
+    return entries
+
+
+def fetch_openalex(query: str, limit: int) -> list[LiteratureResult]:
+    params = urlencode({"search": query, "per-page": min(limit, 25)})
+    data = _read_json(f"https://api.openalex.org/works?{params}")
+    return [
+        normalize_openalex_work(work)
+        for work in data.get("results", [])
+        if isinstance(work, dict)
+    ]
+
+
+def fetch_crossref(query: str, limit: int) -> list[LiteratureResult]:
+    params = urlencode({"query": query, "rows": min(limit, 25)})
+    data = _read_json(f"https://api.crossref.org/works?{params}")
+    items = ((data.get("message") or {}).get("items") or []) if isinstance(data, dict) else []
+    return [
+        normalize_crossref_work(item)
+        for item in items
+        if isinstance(item, dict)
+    ]
+
+
+def fetch_arxiv(query: str, limit: int) -> list[LiteratureResult]:
+    url = (
+        "https://export.arxiv.org/api/query?"
+        f"search_query=all:{quote_plus(query)}&start=0&max_results={min(limit, 25)}"
+    )
+    return [normalize_arxiv_entry(entry) for entry in _read_arxiv_entries(url)]
+
+
+def fetch_semantic_scholar(query: str, limit: int) -> list[LiteratureResult]:
+    fields = ",".join(
+        [
+            "title",
+            "abstract",
+            "year",
+            "citationCount",
+            "authors",
+            "externalIds",
+            "openAccessPdf",
+            "url",
+            "venue",
+        ]
+    )
+    params = urlencode({"query": query, "limit": min(limit, 20), "fields": fields})
+    data = _read_json(f"https://api.semanticscholar.org/graph/v1/paper/search?{params}")
+    papers = data.get("data", []) if isinstance(data, dict) else []
+    return [
+        normalize_semantic_scholar_paper(paper)
+        for paper in papers
+        if isinstance(paper, dict)
+    ]
+
+
+SOURCE_FETCHERS: dict[str, Callable[[str, int], list[LiteratureResult]]] = {
+    "openalex": fetch_openalex,
+    "crossref": fetch_crossref,
+    "arxiv": fetch_arxiv,
+    "semantic_scholar": fetch_semantic_scholar,
+}
+
+
+def _load_cached_results(db: Any, key: str) -> list[LiteratureResult] | None:
+    if db is None or PaperLiteratureCache is None:
+        return None
+
+    cache = db.scalar(
+        select(PaperLiteratureCache).where(
+            PaperLiteratureCache.result_kind == "search",
+            PaperLiteratureCache.lookup_key == key,
+        )
+    )
+    if cache is None:
+        return None
+
+    payload = cache.payload_json
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    if not isinstance(payload, list):
+        return None
+
+    results = []
+    for item in payload:
+        if isinstance(item, dict):
+            results.append(LiteratureResult(**item))
+    return results
+
+
+def _store_cached_results(
+    db: Any,
+    key: str,
+    results: list[LiteratureResult],
+    sources: list[str] | None = None,
+) -> None:
+    if db is None or PaperLiteratureCache is None:
+        return
+
+    source_value = ",".join(sources or DEFAULT_SOURCES)
+    payload = [asdict(result) for result in results]
+    cache = db.scalar(
+        select(PaperLiteratureCache).where(
+            PaperLiteratureCache.result_kind == "search",
+            PaperLiteratureCache.lookup_key == key,
+        )
+    )
+    if cache is None:
+        cache = PaperLiteratureCache(
+            result_kind="search",
+            lookup_key=key,
+            source=source_value,
+            payload_json=payload,
+        )
+        db.add(cache)
+    else:
+        cache.source = source_value
+        cache.payload_json = payload
+    db.commit()
+
+
+def search_literature(
+    query: str,
+    limit: int = 20,
+    sources: list[str] | None = None,
+    db: Any = None,
+) -> tuple[list[LiteratureResult], list[str], bool]:
+    selected_sources = normalize_sources(sources or [])
+    normalized_query = compact_text(query)
+    normalized_limit = max(1, min(int(limit), 50))
+    key = cache_key(normalized_query, selected_sources, normalized_limit)
+
+    cached_results = _load_cached_results(db, key)
+    if cached_results is not None:
+        return cached_results[:normalized_limit], selected_sources, True
+
+    fetched_results = []
+    for source in selected_sources:
+        fetcher = SOURCE_FETCHERS.get(source)
+        if fetcher is None:
+            continue
+        try:
+            fetched_results.extend(fetcher(normalized_query, normalized_limit))
+        except Exception:
+            continue
+
+    results = dedupe_literature_results(fetched_results)[:normalized_limit]
+    _store_cached_results(db, key, results, selected_sources)
+    return results, selected_sources, False
+
+
 def _abstract_from_openalex_index(index: dict[str, list[int]]) -> str:
     positioned_words: list[tuple[int, str]] = []
     for word, positions in index.items():
         for position in positions:
             positioned_words.append((position, word))
     return compact_text(" ".join(word for _, word in sorted(positioned_words)))
+
+
+def _atom_text(entry: ET.Element, name: str, namespace: dict[str, str]) -> str:
+    child = entry.find(f"atom:{name}", namespace)
+    return compact_text(child.text if child is not None else "")
 
 
 def _first(value: Any) -> Any:
