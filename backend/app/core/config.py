@@ -7,7 +7,9 @@ from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env", encoding="utf-8-sig")
+BASE_DIR = Path(__file__).resolve().parents[2]
+load_dotenv(BASE_DIR / ".env", encoding="utf-8-sig")
+load_dotenv(BASE_DIR / ".env.local", encoding="utf-8-sig", override=True)
 
 
 def _split_csv(value: str) -> tuple[str, ...]:
@@ -31,9 +33,6 @@ def _build_database_url() -> str:
     name = os.getenv("DB_NAME", "xk_reader").strip() or "xk_reader"
     charset = os.getenv("DB_CHARSET", "utf8mb4").strip() or "utf8mb4"
     return f"{driver}://{user}:{password}@{host}:{port}/{name}?charset={charset}"
-
-
-BASE_DIR = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)
@@ -128,9 +127,12 @@ class Settings:
     uploads_dir: str = os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads"))
     avatar_upload_dir: str = os.getenv("AVATAR_UPLOAD_DIR", str(BASE_DIR / "uploads" / "avatars"))
     avatar_max_size_bytes: int = int(os.getenv("AVATAR_MAX_SIZE_BYTES", str(2 * 1024 * 1024)))
+    feedback_image_upload_dir: str = os.getenv("FEEDBACK_IMAGE_UPLOAD_DIR", str(BASE_DIR / "uploads" / "feedback"))
+    feedback_image_max_size_bytes: int = int(os.getenv("FEEDBACK_IMAGE_MAX_SIZE_BYTES", str(4 * 1024 * 1024)))
     papers_upload_dir: str = os.getenv("PAPERS_UPLOAD_DIR", str(BASE_DIR / "uploads" / "papers"))
     upload_public_base_url: str = os.getenv("UPLOAD_PUBLIC_BASE_URL", "").rstrip("/")
     papers_max_size_bytes: int = int(os.getenv("PAPERS_MAX_SIZE_BYTES", str(25 * 1024 * 1024)))
+    full_translation_enabled: bool = _env_flag("FULL_TRANSLATION_ENABLED", "false")
     translation_debug_log_enabled: bool = _env_flag("TRANSLATION_DEBUG_LOG_ENABLED", "false")
     startup_schema_sync_enabled: bool = _env_flag("STARTUP_SCHEMA_SYNC_ENABLED", "true")
     upload_mirror_enabled: bool = _env_flag("UPLOAD_MIRROR_ENABLED", "false")
@@ -140,6 +142,18 @@ class Settings:
     upload_mirror_sftp_username: str = os.getenv("UPLOAD_MIRROR_SFTP_USERNAME", "")
     upload_mirror_sftp_password: str = os.getenv("UPLOAD_MIRROR_SFTP_PASSWORD", "")
     upload_mirror_timeout_seconds: int = int(os.getenv("UPLOAD_MIRROR_TIMEOUT_SECONDS", "15"))
+    oss_enabled: bool = _env_flag("OSS_ENABLED", "false")
+    oss_endpoint: str = os.getenv("OSS_ENDPOINT", "").strip()
+    oss_bucket_name: str = os.getenv("OSS_BUCKET_NAME", "").strip()
+    oss_access_key_id: str = os.getenv("OSS_ACCESS_KEY_ID", "").strip()
+    oss_access_key_secret: str = os.getenv("OSS_ACCESS_KEY_SECRET", "").strip()
+    oss_key_prefix: str = os.getenv("OSS_KEY_PREFIX", "xk-reader").strip().strip("/")
+    oss_signed_url_enabled: bool = _env_flag("OSS_SIGNED_URL_ENABLED", "true")
+    oss_signed_url_expire_seconds: int = int(os.getenv("OSS_SIGNED_URL_EXPIRE_SECONDS", "3600"))
+    oss_public_base_url: str = os.getenv("OSS_PUBLIC_BASE_URL", "").rstrip("/")
+    oss_direct_download_enabled: bool = _env_flag("OSS_DIRECT_DOWNLOAD_ENABLED", "true")
+    oss_page_image_cache_enabled: bool = _env_flag("OSS_PAGE_IMAGE_CACHE_ENABLED", "true")
+    oss_page_image_prefix: str = os.getenv("OSS_PAGE_IMAGE_PREFIX", "paper-pages").strip().strip("/")
     baidu_translate_appid: str = os.getenv("BAIDU_TRANSLATE_APPID", "")
     baidu_translate_secret: str = os.getenv("BAIDU_TRANSLATE_SECRET", "")
     aliyun_docmind_enabled: bool = os.getenv("ALIYUN_DOCMIND_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
@@ -172,6 +186,16 @@ class Settings:
             self.aliyun_docmind_enabled
             and self.aliyun_docmind_access_key_id
             and self.aliyun_docmind_access_key_secret
+        )
+
+    @property
+    def oss_available(self) -> bool:
+        return bool(
+            self.oss_enabled
+            and self.oss_endpoint
+            and self.oss_bucket_name
+            and self.oss_access_key_id
+            and self.oss_access_key_secret
         )
 
     @property

@@ -15,10 +15,7 @@ from app.services.security import decode_access_token
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
-def get_current_user(
-    token: Annotated[str, Depends(oauth2_scheme)],
-    db: Annotated[Session, Depends(get_db)],
-) -> User:
+def get_user_from_access_token(token: str, db: Session) -> User:
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="登录状态已失效，请重新登录。",
@@ -39,6 +36,13 @@ def get_current_user(
         raise unauthorized
 
     return user
+
+
+def get_current_user(
+    token: Annotated[str, Depends(oauth2_scheme)],
+    db: Annotated[Session, Depends(get_db)],
+) -> User:
+    return get_user_from_access_token(token, db)
 
 
 def get_current_admin(

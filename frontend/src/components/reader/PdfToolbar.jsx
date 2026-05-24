@@ -45,6 +45,8 @@ const eraserModeItems = [
 const downloadItems = [
   { id: 'pdf', label: 'PDF' },
   { id: 'word', label: 'Word' },
+  { id: 'citation-md', label: '引用 Markdown' },
+  { id: 'bibtex', label: 'BibTeX' },
 ]
 
 const parseModeItems = [
@@ -52,8 +54,6 @@ const parseModeItems = [
   { id: 'local', label: '本地' },
   { id: 'aliyun', label: '阿里云' },
 ]
-
-const SHOW_FULL_TRANSLATE_ENTRY = false
 
 function ToolbarIconButton({ children, label, onClick, active = false, disabled = false }) {
   return (
@@ -108,6 +108,7 @@ export function PdfToolbar({
   canUndo = false,
   onUndo,
   onDownload,
+  fullTranslateVisible = false,
   fullTranslateActive = false,
   fullTranslateStatus = 'idle',
   fullTranslateProgress = 0,
@@ -130,6 +131,20 @@ export function PdfToolbar({
   const [isInkOpen, setIsInkOpen] = useState(false)
   const [isShapeOpen, setIsShapeOpen] = useState(false)
   const isShapeToolActive = SHAPE_TOOL_IDS.includes(activeTool)
+  const fullTranslateLabel = fullTranslateStatus === 'running'
+    ? `翻译中 ${Math.round(fullTranslateProgress || 0)}%`
+    : fullTranslateStatus === 'completed' || fullTranslateActive
+      ? '看译文'
+      : fullTranslateStatus === 'partial_failed'
+        ? '看译文'
+      : fullTranslateStatus === 'error'
+        ? '重试翻译'
+        : fullTranslateStatus === 'cancelled'
+          ? '重新翻译'
+          : '全文翻译'
+  const fullTranslateTitle = fullTranslateActive
+    ? '打开全文翻译 Beta'
+    : '启动全文翻译 Beta'
 
   useEffect(() => {
     if (!isDownloadOpen && !isEraserOpen && !isInkOpen && !isShapeOpen) return undefined
@@ -390,15 +405,15 @@ export function PdfToolbar({
           ) : null}
         </div>
 
-        {SHOW_FULL_TRANSLATE_ENTRY ? (
+        {fullTranslateVisible ? (
           <>
             <button
               type="button"
               className={`toolbar-tool toolbar-tool--full-translate toolbar-tool--full-translate-${fullTranslateStatus}${
                 fullTranslateActive ? ' is-active' : ''
               }`}
-              title="全文翻译"
-              aria-label="全文翻译"
+              title={fullTranslateTitle}
+              aria-label={fullTranslateTitle}
               onClick={onFullTranslate}
             >
               {fullTranslateStatus === 'running' ? (
@@ -410,12 +425,9 @@ export function PdfToolbar({
                 <Languages />
               )}
               <span>
-                {fullTranslateStatus === 'running'
-                  ? `进行中 ${Math.round(fullTranslateProgress || 0)}%`
-                  : fullTranslateStatus === 'cancelled'
-                    ? '已取消'
-                    : '翻译'}
+                {fullTranslateLabel}
               </span>
+              <small>Beta</small>
             </button>
 
             <select

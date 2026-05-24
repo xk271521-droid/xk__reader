@@ -21,7 +21,7 @@ import { LiteratureEngineSidebar } from './LiteratureEngineSidebar'
 function getAccessLabel(accessType) {
   if (accessType === 'free') return '开放获取'
   if (accessType === 'mixed') return '混合访问'
-  if (accessType === 'subscription') return '订阅型'
+  if (accessType === 'subscription') return '订阅访问'
   return '受限入口'
 }
 
@@ -72,18 +72,21 @@ export function LiteratureSearchPage() {
     '--engine-color': activeEngine.color,
   }
 
-  const helperCards = useMemo(() => ([
-    {
-      label: '适合查什么',
-      value: activeEngine.bestFor,
-      icon: BookOpenText,
-    },
-    {
-      label: '覆盖范围',
-      value: activeEngine.coverage,
-      icon: Database,
-    },
-  ]), [activeEngine.bestFor, activeEngine.coverage])
+  const helperCards = useMemo(
+    () => [
+      {
+        label: '适合查什么',
+        value: activeEngine.bestFor,
+        icon: BookOpenText,
+      },
+      {
+        label: '覆盖范围',
+        value: activeEngine.coverage,
+        icon: Database,
+      },
+    ],
+    [activeEngine.bestFor, activeEngine.coverage],
+  )
 
   function handleSubmit(event) {
     event.preventDefault()
@@ -144,17 +147,6 @@ export function LiteratureSearchPage() {
                     <span>{supportsPrefill ? `去 ${activeEngine.name} 检索` : `打开 ${activeEngine.name}`}</span>
                   </Button>
                 </form>
-
-                <div className="literature-search-meta literature-search-meta--single">
-                  <div className="literature-search-tip">
-                    <Sparkles />
-                    <span>
-                      {supportsPrefill
-                        ? '当前站点支持把关键词直接带过去。'
-                        : '当前站点更适合先打开首页，再在站内继续细分筛选。'}
-                    </span>
-                  </div>
-                </div>
               </CardContent>
             </Card>
 
@@ -166,7 +158,9 @@ export function LiteratureSearchPage() {
                     <CardHeader>
                       <div className="literature-helper-card__label">
                         <Icon />
-                        <Badge variant="outline" className="literature-panel-badge">{item.label}</Badge>
+                        <Badge variant="outline" className="literature-panel-badge">
+                          {item.label}
+                        </Badge>
                       </div>
                       <CardTitle>{item.value}</CardTitle>
                     </CardHeader>
@@ -190,7 +184,6 @@ export function LiteratureSearchPage() {
           <aside className="literature-workbench__rail">
             <Card className="literature-info-card literature-info-card--compact">
               <CardHeader>
-                <Badge variant="outline" className="literature-panel-badge">当前站点</Badge>
                 <CardTitle>{activeEngine.name}</CardTitle>
                 <CardDescription>{activeEngine.description}</CardDescription>
               </CardHeader>

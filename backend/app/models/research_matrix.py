@@ -54,6 +54,7 @@ class ResearchMatrixRun(Base):
 
     __table_args__ = (
         Index("ix_research_matrix_runs_user_created", "user_id", "created_at"),
+        Index("ix_research_matrix_runs_user_status_updated", "user_id", "status", "updated_at"),
     )
 
 

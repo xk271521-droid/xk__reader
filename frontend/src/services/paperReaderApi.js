@@ -1,24 +1,28 @@
 import { getStoredAuthToken } from './authApi'
+import { resolveApiErrorMessage } from '../utils/errorMessage'
 
 const PAPERS_BASE = '/api/papers'
 
 async function parseJsonResponse(response) {
+  let payload = null
+
+  try {
+    payload = await response.json()
+  } catch {
+    payload = null
+  }
+
   if (!response.ok) {
-    let detail = '请求失败，请稍后再试。'
-    try {
-      const payload = await response.json()
-      if (typeof payload?.detail === 'string') {
-        detail = payload.detail
-      }
-    } catch {
-      // ignore parse error
-    }
-    const error = new Error(detail)
+    const detail = payload?.detail
+    const message = resolveApiErrorMessage(payload)
+    const error = new Error(message)
     error.status = response.status
+    error.detail = detail
+    error.code = detail?.code || null
     throw error
   }
 
-  return response.json()
+  return payload
 }
 
 function authHeaders() {
@@ -108,6 +112,14 @@ export async function updatePaper(id, data) {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(data),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function refreshPaperMetadata(id) {
+  const response = await fetch(`${PAPERS_BASE}/${id}/metadata/refresh`, {
+    method: 'POST',
+    headers: authHeaders(),
   })
   return parseJsonResponse(response)
 }
@@ -256,6 +268,72 @@ export function getFullTranslationDownloadUrl(paperId) {
   return `${PAPERS_BASE}/${paperId}/full-translation/download`
 }
 
+export async function fetchPaperFormatProfiles() {
+  const response = await fetch('/api/paper-format/profiles', {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function parsePaperFormatRequirements(text, providerId = null) {
+  const response = await fetch('/api/paper-format/parse-requirements', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({
+      text,
+      provider_id: providerId,
+    }),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function extractPaperFormatTemplate(file) {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  const response = await fetch('/api/paper-format/extract-template', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: formData,
+  })
+  return parseJsonResponse(response)
+}
+
+export async function normalizePaperFormat(file, profile = 'undergraduate_cn', requirements = {}) {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('profile', profile)
+  formData.append('requirements_json', JSON.stringify(requirements || {}))
+
+  const response = await fetch('/api/paper-format/normalize', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: formData,
+  })
+  if (!response.ok) {
+    let detail = '论文格式正规化失败，请稍后再试。'
+    try {
+      const payload = await response.json()
+      if (typeof payload?.detail === 'string') detail = payload.detail
+    } catch {
+      void 0
+    }
+    throw new Error(detail)
+  }
+
+  let stats = null
+  try {
+    stats = JSON.parse(response.headers.get('X-Format-Stats') || 'null')
+  } catch {
+    stats = null
+  }
+  return {
+    blob: await response.blob(),
+    fileName: parseDownloadFileName(response.headers.get('Content-Disposition'), 'normalized-paper.docx'),
+    stats,
+  }
+}
+
 // ── Reading Records ──────────────────────────────────────
 
 export async function recordReadingEvent(paperId, openedAt, durationSeconds = 0) {
@@ -316,6 +394,14 @@ export async function fetchResearchMatrixRuns() {
   return parseJsonResponse(response)
 }
 
+export async function fetchResearchMatrixRunStatuses() {
+  const response = await fetch('/api/research-matrix/runs/status', {
+    headers: authHeaders(),
+    cache: 'no-store',
+  })
+  return parseJsonResponse(response)
+}
+
 export async function createResearchMatrixRun(payload) {
   const response = await fetch('/api/research-matrix/runs', {
     method: 'POST',
@@ -363,6 +449,15 @@ export async function refreshResearchMatrixRun(runId, payload = {}) {
 export async function updateResearchMatrixRunPaper(runId, paperId, payload = {}) {
   const response = await fetch(`/api/research-matrix/runs/${runId}/papers/${paperId}`, {
     method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function retryResearchMatrixRunPaperReview(runId, paperId, payload = {}) {
+  const response = await fetch(`/api/research-matrix/runs/${runId}/papers/${paperId}/retry-review`, {
+    method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
   })
@@ -564,6 +659,14 @@ export async function fetchPaperAnnotations(paperId) {
 
 export async function fetchPaperNotebooks(paperId) {
   const response = await fetch(`${PAPERS_BASE}/${paperId}/notebooks`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function checkNotesExportAllowed(paperId) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/notebooks/export/check`, {
+    method: 'POST',
     headers: authHeaders(),
   })
   return parseJsonResponse(response)

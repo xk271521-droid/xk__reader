@@ -1,17 +1,64 @@
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$pythonExe = 'C:\Python314\python.exe'
 $tunnelScript = Join-Path $projectRoot 'scripts\db_ssh_tunnel.py'
 $backendOut = Join-Path $projectRoot 'backend-local-fixed.out.log'
 $backendErr = Join-Path $projectRoot 'backend-local-fixed.err.log'
-$databaseUrl = 'mysql+pymysql://xk_reader_user:fI8I9FH0oTQZTAJrvtp-5O7ctsp1kNE7@127.0.0.1:3307/xk_reader?charset=utf8mb4'
 
-$existingTunnel = Get-NetTCPConnection -LocalPort 3307 -ErrorAction SilentlyContinue
-if (-not $existingTunnel) {
-  Start-Process -FilePath $pythonExe `
-    -ArgumentList @($tunnelScript) `
-    -WorkingDirectory $projectRoot `
-    -WindowStyle Hidden
-  Start-Sleep -Seconds 2
+function Import-EnvFile {
+  param(
+    [string]$Path,
+    [switch]$Overwrite
+  )
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return
+  }
+
+  foreach ($rawLine in Get-Content -LiteralPath $Path -Encoding UTF8) {
+    $line = $rawLine.Trim()
+    if (-not $line -or $line.StartsWith('#') -or -not $line.Contains('=')) {
+      continue
+    }
+
+    $name, $value = $line -split '=', 2
+    $name = $name.Trim()
+    if (-not $name) {
+      continue
+    }
+
+    $value = $value.Trim()
+    if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+      $value = $value.Substring(1, $value.Length - 2)
+    }
+
+    if ($Overwrite -or -not ([Environment]::GetEnvironmentVariable($name, 'Process'))) {
+      [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+    }
+  }
+}
+
+Import-EnvFile -Path (Join-Path $projectRoot '.env')
+Import-EnvFile -Path (Join-Path $projectRoot '.env.local') -Overwrite
+
+$pythonExe = if ($env:PYTHON_EXE) { $env:PYTHON_EXE } else { 'C:\Python314\python.exe' }
+$databaseUrl = if ($env:XK_READER_LOCAL_DATABASE_URL) { $env:XK_READER_LOCAL_DATABASE_URL } else { $env:DATABASE_URL }
+$uploadPublicBaseUrl = $env:UPLOAD_PUBLIC_BASE_URL
+$localTunnelPort = if ($env:DB_TUNNEL_LOCAL_PORT) { [int]$env:DB_TUNNEL_LOCAL_PORT } else { 3307 }
+$usesLocalTunnel = -not [string]::IsNullOrWhiteSpace($databaseUrl) -and $databaseUrl -match "@(127\.0\.0\.1|localhost):$localTunnelPort\b"
+$enableReload = $env:XK_BACKEND_RELOAD -match '^(1|true|yes)$'
+
+if ($usesLocalTunnel) {
+  $existingTunnel = Get-NetTCPConnection -LocalPort $localTunnelPort -ErrorAction SilentlyContinue
+  if (-not $existingTunnel) {
+    if ([string]::IsNullOrWhiteSpace($env:DB_TUNNEL_SSH_HOST) -or [string]::IsNullOrWhiteSpace($env:DB_TUNNEL_SSH_USERNAME)) {
+      throw "Missing DB_TUNNEL_* settings. Put local-only tunnel values in backend\.env.local."
+    }
+
+    Start-Process -FilePath $pythonExe `
+      -ArgumentList @($tunnelScript) `
+      -WorkingDirectory $projectRoot `
+      -WindowStyle Hidden
+    Start-Sleep -Seconds 2
+  }
 }
 
 $backendProcesses = Get-CimInstance Win32_Process |
@@ -22,16 +69,24 @@ foreach ($process in $backendProcesses) {
 
 Start-Sleep -Seconds 1
 
-$bootstrap = @"
-`$env:DATABASE_URL = '$databaseUrl'
-`$env:UPLOAD_PUBLIC_BASE_URL = 'http://47.99.141.123'
-`$env:PYTHONUTF8 = '1'
-Set-Location '$projectRoot'
-& '$pythonExe' -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
-"@
+[Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'Process')
 
-Start-Process -FilePath 'powershell.exe' `
-  -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $bootstrap) `
+if (-not [string]::IsNullOrWhiteSpace($databaseUrl)) {
+  [Environment]::SetEnvironmentVariable('DATABASE_URL', $databaseUrl, 'Process')
+}
+
+if (-not [string]::IsNullOrWhiteSpace($uploadPublicBaseUrl)) {
+  [Environment]::SetEnvironmentVariable('UPLOAD_PUBLIC_BASE_URL', $uploadPublicBaseUrl, 'Process')
+}
+
+$uvicornArgs = @('-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8000')
+if ($enableReload) {
+  $uvicornArgs += '--reload'
+}
+
+Start-Process -FilePath $pythonExe `
+  -ArgumentList $uvicornArgs `
+  -WorkingDirectory $projectRoot `
   -RedirectStandardOutput $backendOut `
   -RedirectStandardError $backendErr `
   -WindowStyle Hidden

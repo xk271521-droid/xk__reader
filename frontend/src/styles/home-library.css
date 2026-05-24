@@ -1,0 +1,108 @@
+.home-content.is-library {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.home-content.is-library .home-category-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.home-content.is-library .home-category-table {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.home-content.is-library .home-pagination {
+  margin-top: auto;
+}
+
+.home-content.is-library .home-category-table__head,
+.home-content.is-library .home-category-table__row {
+  grid-template-columns: 34px minmax(220px, 1.55fr) minmax(220px, 1.35fr) minmax(120px, 0.55fr) 74px 124px;
+}
+
+.home-library-advanced-filter,
+.home-library-bulkbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.home-library-advanced-filter {
+  padding: 0 0 10px;
+}
+
+.home-library-advanced-filter label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.home-library-advanced-filter input,
+.home-library-advanced-filter select,
+.home-library-bulkbar select {
+  height: 30px;
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--heading);
+  padding: 0 9px;
+  font: inherit;
+}
+
+.home-library-advanced-filter button,
+.home-library-bulkbar button {
+  height: 30px;
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--heading);
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.home-library-bulkbar {
+  min-height: 40px;
+  padding: 7px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: #f8fafc;
+}
+
+.home-library-bulkbar strong {
+  color: var(--heading);
+  font-size: 13px;
+}
+
+.home-library-bulkbar .is-danger {
+  color: var(--accent-red);
+}
+
+.home-category-select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.home-category-table__row.is-selected {
+  background: rgba(37, 99, 235, 0.06);
+}
+
+@media (max-width: 760px) {
+  .home-content.is-library .home-category-table__head,
+  .home-content.is-library .home-category-table__row {
+    grid-template-columns: 1fr;
+  }
+
+  .home-category-select {
+    justify-content: flex-start;
+  }
+}

@@ -8,6 +8,7 @@ const MAX_SPLIT = 65
 const MIN_ZOOM = 0.8
 const MAX_ZOOM = 2.2
 const ZOOM_STEP = 0.1
+const PREFS_VERSION = 2
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value))
@@ -20,21 +21,22 @@ function prefsKey(paperId) {
 function readPrefs(paperId) {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(prefsKey(paperId)) || '{}')
+    const layoutMode = parsed.version === PREFS_VERSION && parsed.layoutMode === 'layout' ? 'layout' : 'flow'
     return {
       split: clamp(Number(parsed.split) || 50, MIN_SPLIT, MAX_SPLIT),
       leftZoom: clamp(Number(parsed.leftZoom) || 1, MIN_ZOOM, MAX_ZOOM),
       rightZoom: clamp(Number(parsed.rightZoom) || 1, MIN_ZOOM, MAX_ZOOM),
       linked: parsed.linked !== false,
-      layoutMode: parsed.layoutMode === 'flow' ? 'flow' : 'layout',
+      layoutMode,
     }
   } catch {
-    return { split: 50, leftZoom: 1, rightZoom: 1, linked: true, layoutMode: 'layout' }
+    return { split: 50, leftZoom: 1, rightZoom: 1, linked: true, layoutMode: 'flow' }
   }
 }
 
 function writePrefs(paperId, prefs) {
   try {
-    window.localStorage.setItem(prefsKey(paperId), JSON.stringify(prefs))
+    window.localStorage.setItem(prefsKey(paperId), JSON.stringify({ ...prefs, version: PREFS_VERSION }))
   } catch {}
 }
 
@@ -126,43 +128,111 @@ function getTranslationEngineLabel(translation) {
   return 'AI 翻译'
 }
 
+function getTranslationStatusLabel(translation) {
+  if (translation?.status === 'completed') return '已缓存全文翻译'
+  if (translation?.status === 'partial_failed') return '全文翻译部分完成'
+  if (translation?.status === 'running') return '全文翻译进行中'
+  if (translation?.status === 'error') return '全文翻译失败'
+  if (translation?.status === 'cancelled') return '全文翻译已取消'
+  return '全文翻译未完成'
+}
+
+function TranslationBlockButton({ block, scale, hoverId, activeId, onHover, onActivate }) {
+  const isTitle = block.kind === 'title'
+  const isHeading = block.kind === 'heading'
+  const display = getDisplayBlock(block)
+  const text = display.text
+  if (!text) return null
+  return (
+    <button
+      type="button"
+      className={`translation-block translation-block--${block.kind || 'paragraph'}${
+        display.pending ? ' is-pending' : ''
+      }${hoverId === block.id ? ' is-hovered' : ''}${activeId === block.id ? ' is-active' : ''}`}
+      data-segment-id={block.id}
+      onMouseEnter={() => onHover(block.id)}
+      onMouseLeave={() => onHover('')}
+      onClick={() => onActivate(block.id)}
+      style={{
+        fontSize: `${Math.max(13, Math.min(24, (block.font_size || 12) * 0.96 * scale * (isTitle ? 1.08 : 1)))}px`,
+        fontWeight: block.font_weight || (isTitle || isHeading ? 700 : 400),
+        textAlign: block.align || 'left',
+      }}
+    >
+      {text}
+      {display.pending ? <span className="translation-block__pending">待重试</span> : null}
+    </button>
+  )
+}
+
 function TranslationPage({ page, scale, hoverId, activeId, onHover, onActivate }) {
-  const width = Math.max(420, Math.min(820, page.width * 0.86 * scale))
+  const isTwoColumn = Number(page?.layout?.column_count || 1) >= 2
+  const width = Math.max(isTwoColumn ? 620 : 420, Math.min(isTwoColumn ? 980 : 820, page.width * 0.86 * scale))
+  const fullBlocks = (page.blocks || []).filter((block) => !isTwoColumn || !['left', 'right'].includes(block.column))
+  const leftBlocks = (page.blocks || []).filter((block) => block.column === 'left')
+  const rightBlocks = (page.blocks || []).filter((block) => block.column === 'right')
   return (
     <div
-      className="translation-page"
+      className={`translation-page${isTwoColumn ? ' translation-page--two-column' : ''}`}
       data-page-number={page.page_number}
       style={{ width, '--translation-scale': scale }}
     >
       <span className="translation-page__badge">{page.page_number}</span>
-      {(page.blocks || []).map((block) => {
-        const isTitle = block.kind === 'title'
-        const isHeading = block.kind === 'heading'
-        const display = getDisplayBlock(block)
-        const text = display.text
-        if (!text) return null
-        return (
-          <button
+      {isTwoColumn ? (
+        <>
+          {fullBlocks.map((block) => (
+            <TranslationBlockButton
+              key={block.id}
+              block={block}
+              scale={scale}
+              hoverId={hoverId}
+              activeId={activeId}
+              onHover={onHover}
+              onActivate={onActivate}
+            />
+          ))}
+          <div className="translation-page__columns">
+            <div className="translation-page__column">
+              {leftBlocks.map((block) => (
+                <TranslationBlockButton
+                  key={block.id}
+                  block={block}
+                  scale={scale}
+                  hoverId={hoverId}
+                  activeId={activeId}
+                  onHover={onHover}
+                  onActivate={onActivate}
+                />
+              ))}
+            </div>
+            <div className="translation-page__column">
+              {rightBlocks.map((block) => (
+                <TranslationBlockButton
+                  key={block.id}
+                  block={block}
+                  scale={scale}
+                  hoverId={hoverId}
+                  activeId={activeId}
+                  onHover={onHover}
+                  onActivate={onActivate}
+                />
+              ))}
+            </div>
+          </div>
+        </>
+      ) : (
+        (page.blocks || []).map((block) => (
+          <TranslationBlockButton
             key={block.id}
-            type="button"
-            className={`translation-block translation-block--${block.kind || 'paragraph'}${
-              display.pending ? ' is-pending' : ''
-            }${hoverId === block.id ? ' is-hovered' : ''}${activeId === block.id ? ' is-active' : ''}`}
-            data-segment-id={block.id}
-            onMouseEnter={() => onHover(block.id)}
-            onMouseLeave={() => onHover('')}
-            onClick={() => onActivate(block.id)}
-            style={{
-              fontSize: `${Math.max(13, Math.min(24, (block.font_size || 12) * 0.96 * scale * (isTitle ? 1.08 : 1)))}px`,
-              fontWeight: block.font_weight || (isTitle || isHeading ? 700 : 400),
-              textAlign: block.align || 'left',
-            }}
-          >
-            {text}
-            {display.pending ? <span className="translation-block__pending">待重试</span> : null}
-          </button>
-        )
-      })}
+            block={block}
+            scale={scale}
+            hoverId={hoverId}
+            activeId={activeId}
+            onHover={onHover}
+            onActivate={onActivate}
+          />
+        ))
+      )}
     </div>
   )
 }
@@ -365,8 +435,10 @@ export function FullTranslationReader({
   const scrollSyncFrameRef = useRef(0)
   const shellRef = useRef(null)
   const pages = translation?.pages || []
+  const diagnostics = translation?.parse_summary?.diagnostics || {}
   const translatedCoverage = useMemo(() => getTranslatedCoverage(pages), [pages])
-  const canUseLayoutMode = translatedCoverage >= 0.35
+  const canUseLayoutMode = translatedCoverage >= 0.72
+  const isLayoutMode = prefs.layoutMode === 'layout' && canUseLayoutMode
 
   useEffect(() => {
     setPrefs(readPrefs(paperId))
@@ -462,11 +534,10 @@ export function FullTranslationReader({
         <div className="full-translation-title">
           <strong title={title}>{title}</strong>
           <span>
-            {translation?.status === 'completed'
-              ? `已缓存全文翻译 · ${getParseLabel(translation)} · ${getTranslationEngineLabel(translation)}`
-              : `全文翻译未完成 · ${getTranslationEngineLabel(translation)}`}
+            {`${getTranslationStatusLabel(translation)} · ${getParseLabel(translation)} · ${getTranslationEngineLabel(translation)}`}
             {translation?.termbase_version ? ` · 系统术语库已启用` : ''}
             {translation?.failed_blocks_count ? ` · ${translation.failed_blocks_count} 段待重试` : ''}
+            {Number.isFinite(Number(diagnostics.coverage_percent)) ? ` · 覆盖率 ${Number(diagnostics.coverage_percent)}%` : ''}
           </span>
         </div>
         <div className="full-translation-controls">
@@ -481,7 +552,7 @@ export function FullTranslationReader({
             <option value="aliyun">阿里云增强</option>
           </select>
           <button type="button" className="full-translation-action" onClick={onRegenerate}>
-            <span>重新生成</span>
+            <span>{translation?.status === 'partial_failed' ? '重试失败段' : '重新生成'}</span>
           </button>
           <button
             type="button"
@@ -493,15 +564,15 @@ export function FullTranslationReader({
           </button>
           <button
             type="button"
-            className={`full-translation-action${prefs.layoutMode === 'layout' ? ' is-active' : ''}`}
+            className={`full-translation-action${isLayoutMode ? ' is-active' : ''}`}
             disabled={!canUseLayoutMode}
-            title={canUseLayoutMode ? '切换译文显示方式' : '译文覆盖率太低，请重新生成后再使用版式对照'}
+            title={canUseLayoutMode ? '实验性版式对照，长段落可能显示拥挤' : '译文覆盖率不足，先使用流式阅读'}
             onClick={() => setPrefs((current) => ({
               ...current,
               layoutMode: !canUseLayoutMode ? 'flow' : current.layoutMode === 'layout' ? 'flow' : 'layout',
             }))}
           >
-            <span>{prefs.layoutMode === 'layout' && canUseLayoutMode ? '版式对照' : '流式阅读'}</span>
+            <span>{isLayoutMode ? '退出版式' : '试用版式'}</span>
           </button>
           <button type="button" className="full-translation-action" onClick={downloadTranslation}>
             <Download size={15} />
@@ -572,8 +643,13 @@ export function FullTranslationReader({
             onScroll={() => handleScroll('right')}
             onWheel={(event) => handleWheel(event, 'rightZoom')}
           >
+            {isLayoutMode ? (
+              <div className="translation-layout-warning">
+                版式对照仍是实验模式，遇到双栏或长段落时建议切回流式阅读。
+              </div>
+            ) : null}
             {pages.length ? (
-              prefs.layoutMode === 'layout' && canUseLayoutMode
+              isLayoutMode
                 ? pdfPages.map((pageNumber) => (
                   <TranslatedLayoutPage
                     key={pageNumber}

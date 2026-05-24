@@ -24,8 +24,10 @@ from app.services.notification import (
     clear_all_notifications,
     delete_notification,
     get_notification_summary,
+    get_unread_notification_count,
     mark_all_notifications_read,
     mark_notification_read,
+    visible_notification_filters,
 )
 
 router = APIRouter(prefix="/notifications")
@@ -47,13 +49,12 @@ def list_notifications(
 ) -> NotificationListResponse:
     items = db.scalars(
         select(Notification)
-        .where(Notification.user_id == current_user.id)
+        .where(*visible_notification_filters(current_user.id))
         .order_by(Notification.created_at.desc(), Notification.id.desc())
         .limit(limit)
     ).all()
-    summary = get_notification_summary(db, current_user.id)
     return NotificationListResponse(
-        unread_count=summary["unread_count"],
+        unread_count=get_unread_notification_count(db, current_user.id),
         items=[NotificationItemResponse.model_validate(item) for item in items],
     )
 

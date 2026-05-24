@@ -1,4 +1,5 @@
 import { getStoredAuthToken } from './authApi'
+import { resolveApiErrorMessage } from '../utils/errorMessage'
 
 function authHeaders() {
   const token = getStoredAuthToken()
@@ -15,10 +16,7 @@ async function parseJsonResponse(response) {
   }
 
   if (!response.ok) {
-    const detail =
-      typeof payload?.detail === 'string'
-        ? payload.detail
-        : '后台请求失败，请稍后再试。'
+    const detail = resolveApiErrorMessage(payload, '后台请求失败，请稍后再试。')
     throw new Error(detail)
   }
 
@@ -27,6 +25,13 @@ async function parseJsonResponse(response) {
 
 export async function fetchAdminOverview() {
   const response = await fetch('/api/admin/overview', {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchSystemHealth() {
+  const response = await fetch('/api/health/detail', {
     headers: authHeaders(),
   })
   return parseJsonResponse(response)
@@ -78,6 +83,61 @@ export async function uploadAdminUserAvatar(userId, file) {
   return parseJsonResponse(response)
 }
 
+export async function assignAdminUserMembership(userId, payload) {
+  const response = await fetch(`/api/admin/users/${userId}/membership/assign`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function cancelAdminUserMembership(userId, payload = {}) {
+  const response = await fetch(`/api/admin/users/${userId}/membership/cancel`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchAdminMembershipCodes() {
+  const response = await fetch('/api/admin/membership/codes', {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function createAdminMembershipCodes(payload) {
+  const response = await fetch('/api/admin/membership/codes', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function updateAdminMembershipCode(codeId, payload) {
+  const response = await fetch(`/api/admin/membership/codes/${codeId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
 export async function fetchAdminPapers() {
   const response = await fetch('/api/admin/papers', {
     headers: authHeaders(),
@@ -88,6 +148,31 @@ export async function fetchAdminPapers() {
 export async function broadcastAdminNotification(payload) {
   const response = await fetch('/api/notifications/broadcast', {
     method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(payload),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchAdminFeedback(filters = {}) {
+  const query = new URLSearchParams()
+  Object.entries(filters || {}).forEach(([key, value]) => {
+    if (value !== '' && value !== null && value !== undefined) {
+      query.set(key, String(value))
+    }
+  })
+  const response = await fetch(`/api/admin/feedback${query.toString() ? `?${query.toString()}` : ''}`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function updateAdminFeedback(ticketId, payload) {
+  const response = await fetch(`/api/admin/feedback/${ticketId}`, {
+    method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
       ...authHeaders(),

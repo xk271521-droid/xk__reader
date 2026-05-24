@@ -28,15 +28,22 @@ import {
   deleteResearchMatrixRun,
   fetchPaperSummaryStatus,
   fetchResearchMatrixRun,
+  fetchResearchMatrixRunStatuses,
   fetchResearchMatrixRuns,
   refreshResearchMatrixRun,
   prepareResearchMatrixDraftSources,
   rewriteResearchMatrixDraftSection,
+  retryResearchMatrixRunPaperReview,
   retryPendingResearchMatrixRun,
   updateResearchMatrixRun,
   updateResearchMatrixRunPaper,
   refreshResearchMatrixInsights,
 } from '../../services/paperReaderApi'
+import {
+  RESEARCH_MATRIX_TEMPLATES,
+  buildResearchMatrixCreatePayload,
+  getResearchMatrixTemplate,
+} from './researchMatrixTemplates'
 
 const FIELD_CONFIG = [
   { key: 'research_question', label: '研究问题', scope: 'paper', multiline: true },
@@ -48,9 +55,11 @@ const FIELD_CONFIG = [
 
 const FIELD_MAP = Object.fromEntries(FIELD_CONFIG.map((field) => [field.key, field]))
 const RUNNING_STATUSES = new Set(['queued', 'running'])
+const MATRIX_STATUS_POLL_MS = 5000
 
 const REVIEW_STATUS_LABELS = {
   idle: '待生成',
+  queued: '排队中',
   running: '生成中',
   generated: '已综述',
   failed: '生成失败',
@@ -302,21 +311,26 @@ const DRAFT_SECTION_ORDER = [
   'limitations_future',
   'evidence_priority_queue',
   'quotable_sentences',
-  'final_integrated_review',
 ]
+const DRAFT_NON_SECTION_KEYS = new Set([
+  'review_outline',
+  'topic_diagnostic',
+  'final_integrated_review',
+  'modes',
+])
 
 function getOrderedDraftSections(run) {
   const drafts = run?.drafts || {}
   const seen = new Set()
   const sections = []
   DRAFT_SECTION_ORDER.forEach((key) => {
-    if (drafts[key]) {
+    if (drafts[key] && !DRAFT_NON_SECTION_KEYS.has(key)) {
       sections.push([key, drafts[key]])
       seen.add(key)
     }
   })
   Object.entries(drafts).forEach(([key, value]) => {
-    if (!seen.has(key)) sections.push([key, value])
+    if (!seen.has(key) && !DRAFT_NON_SECTION_KEYS.has(key)) sections.push([key, value])
   })
   return sections
 }
@@ -399,6 +413,56 @@ function stripRunDetail(run) {
     ...summary
   } = run
   return summary
+}
+
+function mergeRunStatusSummaries(previousRuns = [], statusRuns = []) {
+  const previousById = new Map(previousRuns.map((run) => [run.id, run]))
+  return statusRuns.map((statusRun) => {
+    const previous = previousById.get(statusRun.id)
+    if (!previous) return statusRun
+    return {
+      ...previous,
+      ...statusRun,
+      has_updates: previous.has_updates,
+      has_deleted_papers: previous.has_deleted_papers,
+      deleted_paper_count: previous.deleted_paper_count,
+      deleted_paper_message: previous.deleted_paper_message,
+      missing_count: previous.missing_count,
+      stale_count: previous.stale_count,
+      grouping_modes: previous.grouping_modes?.length ? previous.grouping_modes : statusRun.grouping_modes,
+    }
+  })
+}
+
+function runSummariesEqual(left = [], right = []) {
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    const leftRun = left[index]
+    const rightRun = right[index]
+    if (
+      leftRun.id !== rightRun.id
+      || leftRun.title !== rightRun.title
+      || leftRun.status !== rightRun.status
+      || leftRun.stage !== rightRun.stage
+      || leftRun.stage_label !== rightRun.stage_label
+      || Number(leftRun.progress_percent || 0) !== Number(rightRun.progress_percent || 0)
+      || Number(leftRun.ready_count || 0) !== Number(rightRun.ready_count || 0)
+      || Number(leftRun.total_count || 0) !== Number(rightRun.total_count || 0)
+      || Number(leftRun.failed_count || 0) !== Number(rightRun.failed_count || 0)
+      || leftRun.error_message !== rightRun.error_message
+      || leftRun.updated_at !== rightRun.updated_at
+      || leftRun.draft_status !== rightRun.draft_status
+      || Number(leftRun.draft_progress_percent || 0) !== Number(rightRun.draft_progress_percent || 0)
+      || Number(leftRun.draft_ready_count || 0) !== Number(rightRun.draft_ready_count || 0)
+      || Number(leftRun.draft_total_count || 0) !== Number(rightRun.draft_total_count || 0)
+      || Number(leftRun.draft_failed_count || 0) !== Number(rightRun.draft_failed_count || 0)
+      || leftRun.worker_status !== rightRun.worker_status
+      || leftRun.worker_heartbeat_at !== rightRun.worker_heartbeat_at
+    ) {
+      return false
+    }
+  }
+  return true
 }
 
 function getTopicGroups(run) {
@@ -579,6 +643,43 @@ function dedupeReadableNotes(items = []) {
   return nextItems
 }
 
+function normalizeDisplayPunctuation(value) {
+  const text = String(value || '').replace(/\s+/gu, ' ').trim()
+  if (!text) return ''
+  return text
+    .replace(/\s+([,.;:!?\u3002\uff0c\uff1b\uff1a\uff01\uff1f])/gu, '$1')
+    .replace(/([\u3002\uff01\uff1f!?])\s*[;\uff1b]\s*/gu, '\uff1b')
+    .replace(/[;\uff1b]\s*([\u3002\uff01\uff1f!?])/gu, '$1')
+    .replace(/([\u3002\uff01\uff1f!?])\s*([\u3002\uff01\uff1f!?])/gu, '$1')
+    .trim()
+}
+
+const OUTLINE_GENERIC_INSIGHT_TEXTS = new Set([
+  '现有工作已经能够围绕方法路线形成可比框架，可优先按技术路径组织相关工作。',
+  '实验结果层面已经积累出一批可归纳的结论，可在综述中单独整理共识判断。',
+  '不同论文在方法抓手与创新切入点上存在明显分化，适合用“路线 A / 路线 B”方式展开对比。',
+  '不同研究的结果表述并不完全一致，正文中应强调比较口径和适用场景，而不是简单并列结论。',
+  '现有文献已经暴露出一批共性局限，后续写作可把这些局限转化为研究空白或选题切入点。',
+  '当前局限信息仍偏少，正式成文前建议回原文补足研究边界、数据限制和实验条件。',
+  '当前批次的显性共识还不够强，建议先用文献矩阵核对方法路线和核心发现后再写共识段。',
+  '当前批次尚未抽出足够多的差异点，可补充更多方法或结果字段后再强化分歧分析。',
+])
+
+const OUTLINE_INSUFFICIENT_MESSAGES = {
+  consensus: '依据不足：当前批次还没有足够的共同结论证据，建议补齐研究问题、方法路线和核心发现字段后再归纳。',
+  divergence: '依据不足：当前批次暂未形成可核对的分歧线索，建议补齐方法路线、实验结果和创新点字段。',
+  gaps: '依据不足：当前批次暂未提取到明确研究空白，建议补齐局限、数据边界和复现条件。',
+}
+
+function normalizeOutlineInsightItems(items, type) {
+  const sourceItems = Array.isArray(items) ? items : []
+  const cleaned = sourceItems
+    .map((item) => normalizeDisplayPunctuation(item))
+    .filter((item) => item && !OUTLINE_GENERIC_INSIGHT_TEXTS.has(item))
+  if (cleaned.length) return cleaned
+  return OUTLINE_INSUFFICIENT_MESSAGES[type] ? [OUTLINE_INSUFFICIENT_MESSAGES[type]] : []
+}
+
 function shouldLiftDraftAsideText(value) {
   const note = String(value || '').replace(/\s+/gu, ' ').trim()
   if (!note) return false
@@ -626,7 +727,7 @@ function buildReadableDraftParagraph(paragraph) {
     .trim()
 
   return {
-    text: nextText || originalText,
+    text: normalizeDisplayPunctuation(nextText || originalText),
     liftedNotes: dedupeReadableNotes(liftedNotes),
   }
 }
@@ -790,7 +891,7 @@ function normalizeOutlinePointItems(points = []) {
     : String(points || '')
       .split('\n')
   return source
-    .map((item) => item.trim())
+    .map((item) => normalizeDisplayPunctuation(item))
     .filter(Boolean)
 }
 
@@ -802,7 +903,7 @@ function buildDraftCopyText(draft) {
   if (paragraphs.length) {
     paragraphs.forEach((paragraph) => {
       lines.push('')
-      lines.push(paragraph.text || '')
+      lines.push(normalizeDisplayPunctuation(paragraph.text))
       lines.push(`来源脚注：${formatCitationFootnotes(paragraph.citations || [])}`)
       if (paragraph.confidence === 'weak') {
         lines.push('提示：依据较弱，建议回查原文。')
@@ -810,7 +911,7 @@ function buildDraftCopyText(draft) {
     })
   } else if (draft?.content) {
     lines.push('')
-    lines.push(draft.content)
+    lines.push(normalizeDisplayPunctuation(draft.content))
   }
   if (items.length) {
     lines.push('')
@@ -855,21 +956,14 @@ function buildIntegratedCopyText(run) {
   const drafts = run?.drafts || {}
   const finalDraft = drafts.final_integrated_review
   if (finalDraft?.copy_ready) {
-    const text = buildDraftCopyText(finalDraft)
-    const quoteItems = normalizeDraftItems(drafts.quotable_sentences)
-    if (!quoteItems.length) return text
-    return `${text}\n\n可引用素材：\n${quoteItems.map((item, index) => `${index + 1}. ${item.paper_title || '未命名论文'} p.${item.page || '?'}：${item.quote || ''}`).join('\n')}`
+    return buildDraftCopyText(finalDraft)
   }
   const sections = getOrderedDraftSections(run)
     .filter(([key]) => DRAFT_SECTION_ORDER.slice(0, 6).includes(key))
     .map(([, draft]) => buildDraftCopyText(draft))
     .filter(Boolean)
   if (!sections.length) return ''
-  const quoteItems = normalizeDraftItems(drafts.quotable_sentences)
-  const appendix = quoteItems.length
-    ? `\n\n可引用素材：\n${quoteItems.map((item, index) => `${index + 1}. ${item.paper_title || '未命名论文'} p.${item.page || '?'}：${item.quote || ''}`).join('\n')}`
-    : ''
-  return `${sections.join('\n\n')}${appendix}`
+  return sections.join('\n\n')
 }
 
 function buildOutlineCopyText(run) {
@@ -879,7 +973,7 @@ function buildOutlineCopyText(run) {
   const lines = ['综述大纲']
   if (outline?.content) {
     lines.push('')
-    lines.push(outline.content)
+    lines.push(normalizeDisplayPunctuation(outline.content))
   }
   if (outline?.diagnostic && groups.length > 1) {
     lines.push('')
@@ -890,12 +984,12 @@ function buildOutlineCopyText(run) {
   }
   sections.forEach((section, index) => {
     lines.push('')
-    lines.push(`${index + 1}. ${section.title || `章节 ${index + 1}`}`)
-    if (section.goal) lines.push(`章节目标：${section.goal}`)
+    lines.push(`${index + 1}. ${normalizeDisplayPunctuation(section.title) || `章节 ${index + 1}`}`)
+    if (section.goal) lines.push(`章节目标：${normalizeDisplayPunctuation(section.goal)}`)
     if (Array.isArray(section.points) && section.points.length) {
       lines.push('本节要点：')
       section.points.forEach((point, pointIndex) => {
-        lines.push(`${pointIndex + 1}. ${point}`)
+        lines.push(`${pointIndex + 1}. ${normalizeDisplayPunctuation(point)}`)
       })
     }
     if (Array.isArray(section.source_titles) && section.source_titles.length) {
@@ -916,7 +1010,7 @@ function buildExportMetaHtml(items = []) {
 }
 
 function renderExportRichTextHtml(value) {
-  const paragraphs = String(value || '')
+  const paragraphs = normalizeDisplayPunctuation(value)
     .split(/\n{2,}/)
     .map((paragraph) => paragraph.trim())
     .filter(Boolean)
@@ -925,7 +1019,7 @@ function renderExportRichTextHtml(value) {
 }
 
 function buildExportListHtml(items = [], ordered = false, className = 'export-doc__list') {
-  const visibleItems = items.filter(Boolean)
+  const visibleItems = items.map((item) => normalizeDisplayPunctuation(item)).filter(Boolean)
   if (!visibleItems.length) return ''
   const tag = ordered ? 'ol' : 'ul'
   return `
@@ -1415,9 +1509,9 @@ function buildOutlineExportPayload(run) {
   const topicDiagnostic = run?.drafts?.topic_diagnostic || null
   const sections = Array.isArray(outline?.outline_sections) ? outline.outline_sections : []
   const groups = Array.isArray(outline?.topic_groups) ? outline.topic_groups : []
-  const consensusPoints = Array.isArray(outline?.consensus_points) ? outline.consensus_points : []
-  const divergencePoints = Array.isArray(outline?.divergence_points) ? outline.divergence_points : []
-  const gapPoints = Array.isArray(outline?.gap_points) ? outline.gap_points : []
+  const consensusPoints = outline ? normalizeOutlineInsightItems(outline.consensus_points, 'consensus') : []
+  const divergencePoints = outline ? normalizeOutlineInsightItems(outline.divergence_points, 'divergence') : []
+  const gapPoints = outline ? normalizeOutlineInsightItems(outline.gap_points, 'gaps') : []
   const isDiagnostic = Boolean(outline?.diagnostic && groups.length > 1)
   if (!sections.length && !consensusPoints.length && !divergencePoints.length && !gapPoints.length && !topicDiagnostic?.content && !groups.length) {
     return null
@@ -1595,7 +1689,6 @@ function buildIntegratedExportPayload(run) {
   const drafts = run?.drafts || {}
   const finalDraft = drafts.final_integrated_review || null
   const paragraphs = normalizeDraftParagraphs(finalDraft)
-  const quoteItems = normalizeDraftItems(drafts.quotable_sentences)
   const fallbackContent = !paragraphs.length ? buildIntegratedCopyText(run) : ''
   if (!paragraphs.length && !fallbackContent) return null
 
@@ -1605,7 +1698,6 @@ function buildIntegratedExportPayload(run) {
     summary: '将分节草稿收束成一篇连续综述初稿，方便直接通读和进一步润色。',
     meta: [
       `${getRunEvidenceCount(run)} 篇文献`,
-      quoteItems.length ? `${quoteItems.length} 条可回查原句` : null,
     ],
   })
 
@@ -1630,14 +1722,6 @@ function buildIntegratedExportPayload(run) {
           : `<div class="export-doc__article-paragraph">${renderExportRichTextHtml(fallbackContent)}</div>`}
       </section>
       ${paragraphs.length ? buildIntegratedEvidenceAppendixHtml(paragraphs) : ''}
-      ${quoteItems.length ? `
-        <section class="export-doc__appendix">
-          <h2 class="export-doc__section-title">可回查原句</h2>
-          <div class="export-doc__stack">
-            ${buildExportQuoteItemsHtml(quoteItems)}
-          </div>
-        </section>
-      ` : ''}
     </main>
   `
 
@@ -2391,8 +2475,49 @@ function MatrixContentHeader({
   )
 }
 
-function RunPapersPanel({ open, run, onClose }) {
+function summarizeRunPaperStatuses(papers = []) {
+  return papers.reduce((summary, item) => {
+    const status = item?.summary_status || 'idle'
+    if (status === 'generated') {
+      summary.generated += 1
+    } else if (status === 'running' || status === 'queued') {
+      summary.processing += 1
+    } else {
+      summary.retryable += 1
+    }
+    return summary
+  }, { generated: 0, processing: 0, retryable: 0 })
+}
+
+const RUN_PAPER_FILTERS = [
+  { id: 'all', label: '全部' },
+  { id: 'generated', label: '已就绪' },
+  { id: 'processing', label: '处理中' },
+  { id: 'retryable', label: '待补齐' },
+]
+
+function getRunPaperStatusGroup(item) {
+  const status = item?.summary_status || 'idle'
+  if (status === 'generated') return 'generated'
+  if (status === 'running' || status === 'queued') return 'processing'
+  return 'retryable'
+}
+
+function RunPapersPanel({ open, retryingPaperId = null, run, onClose, onRetryPaperReview }) {
+  const [activePaperFilter, setActivePaperFilter] = useState('all')
   if (!open || !run) return null
+  const papers = Array.isArray(run.papers) ? run.papers : []
+  const paperSummary = summarizeRunPaperStatuses(papers)
+  const paperFilterCounts = {
+    all: papers.length,
+    generated: paperSummary.generated,
+    processing: paperSummary.processing,
+    retryable: paperSummary.retryable,
+  }
+  const visiblePapers = activePaperFilter === 'all'
+    ? papers
+    : papers.filter((item) => getRunPaperStatusGroup(item) === activePaperFilter)
+
   return (
     <div className="matrix-dialog" role="presentation" onClick={(event) => {
       if (event.target === event.currentTarget) onClose()
@@ -2401,25 +2526,64 @@ function RunPapersPanel({ open, run, onClose }) {
         <header className="matrix-dialog__header">
           <div>
             <strong>本批次论文</strong>
-            <p>{run.paper_count || 0} 篇论文</p>
+            <p>{run.paper_count || papers.length || 0} 篇论文</p>
           </div>
           <button type="button" className="matrix-run-rail__icon" onClick={onClose} aria-label="关闭">
             <X />
           </button>
         </header>
-        <div className="matrix-run-paper-list">
-          {(run.papers || []).map((item) => (
-            <article key={item.paper_id} className="matrix-run-paper-item">
-              <div>
-                <strong title={item.title}>{item.title}</strong>
-                <small>{item.folder_name || '未分类'}</small>
-                {item.review_role ? <small className="matrix-run-paper-item__note">综述定位：{item.review_role}</small> : null}
-              </div>
-              <span className={`matrix-run-paper-item__status is-${item.summary_status || 'idle'}`}>
-                {REVIEW_STATUS_LABELS[item.summary_status] || '待补齐'}
-              </span>
-            </article>
+        <div className="matrix-run-paper-summary" aria-label="本批次论文处理概况">
+          {RUN_PAPER_FILTERS.map((filter) => (
+            <button
+              key={filter.id}
+              type="button"
+              className={`${activePaperFilter === filter.id ? 'is-active ' : ''}${
+                filter.id === 'generated' ? 'is-ready' : filter.id === 'processing' ? 'is-running' : filter.id === 'retryable' && paperSummary.retryable ? 'is-failed' : ''
+              }`.trim()}
+              onClick={() => setActivePaperFilter(filter.id)}
+              aria-pressed={activePaperFilter === filter.id}
+            >
+              {filter.label} {paperFilterCounts[filter.id] || 0}
+            </button>
           ))}
+        </div>
+        <div className="matrix-run-paper-list">
+          {visiblePapers.length ? visiblePapers.map((item) => {
+            const paperId = item.paper_id
+            const statusValue = item.summary_status || 'idle'
+            const canRetry = paperId && !['generated', 'running', 'queued'].includes(statusValue)
+            const isRetrying = retryingPaperId === paperId
+            return (
+              <article key={item.paper_id} className="matrix-run-paper-item">
+                <div>
+                  <strong title={item.title}>{item.title}</strong>
+                  <small>{item.folder_name || '未分类'}</small>
+                  {item.review_role ? <small className="matrix-run-paper-item__note">综述定位：{item.review_role}</small> : null}
+                </div>
+                <div className="matrix-run-paper-item__side">
+                  <span className={`matrix-run-paper-item__status is-${statusValue}`}>
+                    {REVIEW_STATUS_LABELS[statusValue] || '待补齐'}
+                  </span>
+                  {canRetry ? (
+                    <button
+                      type="button"
+                      className="matrix-run-paper-item__retry"
+                      onClick={() => onRetryPaperReview?.(run.id, paperId)}
+                      disabled={Boolean(retryingPaperId)}
+                      aria-label="重试这篇综述卡片"
+                      title="重试这篇综述卡片"
+                    >
+                      {isRetrying ? <LoaderCircle size={14} className="is-spinning" /> : <RotateCcw size={14} />}
+                    </button>
+                  ) : null}
+                </div>
+              </article>
+            )
+          }) : (
+            <div className="matrix-run-paper-empty">
+              这个分类下暂无论文。
+            </div>
+          )}
         </div>
       </section>
     </div>
@@ -2434,14 +2598,17 @@ function MatrixCreateDialog({
   searchTerm,
   selectedFolderId,
   selectedIds,
+  selectedTemplateId,
   uncategorizedFolderId,
   onClose,
   onConfirm,
   onFolderChange,
   onSearchChange,
+  onTemplateChange,
   onTogglePaper,
   onToggleVisible,
 }) {
+  const activeTemplate = getResearchMatrixTemplate(selectedTemplateId)
   const visiblePapers = useMemo(() => {
     const keyword = searchTerm.trim().toLowerCase()
     return papers.filter((paper) => {
@@ -2455,6 +2622,14 @@ function MatrixCreateDialog({
 
   const allVisibleSelected = visiblePapers.length > 0 && visiblePapers.every((paper) => selectedIds.has(paper.id))
   const missingCount = visiblePapers.filter((paper) => selectedIds.has(paper.id) && !paper.sourceReady).length
+  const selectedPapers = useMemo(
+    () => papers.filter((paper) => selectedIds.has(paper.id)),
+    [papers, selectedIds],
+  )
+  const selectedReadyCount = selectedPapers.filter((paper) => paper.sourceReady).length
+  const selectedMissingCount = selectedPapers.filter((paper) => !paper.sourceReady).length
+  const selectedRunningCount = selectedPapers.filter((paper) => paper.hasRunningSource).length
+  const selectedFailedCount = selectedPapers.filter((paper) => paper.hasFailedSource).length
 
   if (!open) return null
 
@@ -2474,6 +2649,23 @@ function MatrixCreateDialog({
         </header>
 
         <div className="matrix-dialog__filters">
+          <div className="matrix-template-picker" role="radiogroup" aria-label="矩阵模板">
+            {RESEARCH_MATRIX_TEMPLATES.map((template) => (
+              <button
+                key={template.id}
+                type="button"
+                className={template.id === activeTemplate.id ? 'is-active' : ''}
+                onClick={() => onTemplateChange(template.id)}
+                role="radio"
+                aria-checked={template.id === activeTemplate.id}
+                title={template.description}
+                disabled={busy}
+              >
+                <strong>{template.label}</strong>
+                <span>{template.description}</span>
+              </button>
+            ))}
+          </div>
           <label className="matrix-search">
             <Search />
             <input value={searchTerm} onChange={(event) => onSearchChange(event.target.value)} placeholder="搜索标题、作者、分类" />
@@ -2491,6 +2683,23 @@ function MatrixCreateDialog({
         <div className="matrix-dialog__meta">
           <span>已选 {selectedIds.size}/50 篇</span>
           {missingCount ? <span>{missingCount} 篇还缺单篇综述卡，创建后会在后台继续补齐</span> : <span>所选论文都已具备单篇综述卡，创建后会继续准备整篇总结和复现总结</span>}
+        </div>
+
+        <div className={`matrix-risk-panel${selectedMissingCount || selectedFailedCount ? ' is-warning' : ''}`}>
+          <div>
+            <strong>生成前检查</strong>
+            <span>
+              {selectedIds.size
+                ? '创建后会进入后台队列，任务中心会提示完成或失败。'
+                : '先选择论文后再生成矩阵。'}
+            </span>
+          </div>
+          <div className="matrix-risk-panel__stats">
+            <span>已就绪 {selectedReadyCount}</span>
+            <span>待补齐 {selectedMissingCount}</span>
+            <span>处理中 {selectedRunningCount}</span>
+            <span>异常 {selectedFailedCount}</span>
+          </div>
         </div>
 
         <div className="matrix-paper-pick-list matrix-paper-pick-list--dialog">
@@ -2966,7 +3175,6 @@ function IntegratedDraftView({
   const drafts = run?.drafts || {}
   const finalDraft = drafts.final_integrated_review || null
   const draftStatus = run?.draft_status || 'idle'
-  const quoteItems = normalizeDraftItems(drafts.quotable_sentences)
   const paragraphs = normalizeDraftParagraphs(finalDraft)
   const hasContent = Boolean(finalDraft?.copy_ready || paragraphs.length || finalDraft?.content)
   const evidenceCount = getRunEvidenceCount(run)
@@ -3048,28 +3256,6 @@ function IntegratedDraftView({
           </div>
         </article>
 
-        {quoteItems.length ? (
-          <aside className="matrix-integrated-view__sources">
-            <span>可回查原句</span>
-            {quoteItems.slice(0, 8).map((item, index) => (
-              <button
-                key={`${item.paper_title || 'quote'}-${index}`}
-                type="button"
-                className="matrix-integrated-view__source"
-                onClick={() => item.paper_id && item.page ? onJumpToEvidence?.(item.paper_id, {
-                  page: item.page,
-                  quote: item.quote || '',
-                  start_char: item.start_char ?? null,
-                  end_char: item.end_char ?? null,
-                }) : null}
-                disabled={!item.paper_id || !item.page}
-              >
-                <strong>{item.paper_title || '未命名论文'} · p.{item.page || '?'}</strong>
-                <small>{item.quote || item.usage_note || '查看来源'}</small>
-              </button>
-            ))}
-          </aside>
-        ) : null}
       </div>
     </section>
   )
@@ -3087,9 +3273,9 @@ function ReviewOutlineView({
   const topicDiagnostic = run?.drafts?.topic_diagnostic || null
   const sections = Array.isArray(outline?.outline_sections) ? outline.outline_sections : []
   const groups = Array.isArray(outline?.topic_groups) ? outline.topic_groups : []
-  const consensusPoints = Array.isArray(outline?.consensus_points) ? outline.consensus_points : []
-  const divergencePoints = Array.isArray(outline?.divergence_points) ? outline.divergence_points : []
-  const gapPoints = Array.isArray(outline?.gap_points) ? outline.gap_points : []
+  const consensusPoints = outline ? normalizeOutlineInsightItems(outline.consensus_points, 'consensus') : []
+  const divergencePoints = outline ? normalizeOutlineInsightItems(outline.divergence_points, 'divergence') : []
+  const gapPoints = outline ? normalizeOutlineInsightItems(outline.gap_points, 'gaps') : []
   const showGroupingControls = topicGroups.length > 1
   const isDiagnostic = Boolean(outline?.diagnostic && groups.length > 1)
   const activeGroupLabel = outline?.active_group_label || ''
@@ -3103,9 +3289,9 @@ function ReviewOutlineView({
     sections.map((section) => ({
       ...section,
       pointItems: normalizeOutlinePointItems(section.points),
-      goalText: String(section.goal || '').trim(),
-      summaryText: String(section.summary || '').trim(),
-      titleText: String(section.title || '').trim(),
+      goalText: normalizeDisplayPunctuation(section.goal),
+      summaryText: normalizeDisplayPunctuation(section.summary),
+      titleText: normalizeDisplayPunctuation(section.title),
     }))
   ), [sections])
 
@@ -3533,6 +3719,7 @@ export function ResearchMatrixPage({
   const [runMenuOpenId, setRunMenuOpenId] = useState(null)
   const [reviewStatuses, setReviewStatuses] = useState(new Map())
   const [showRunPapers, setShowRunPapers] = useState(false)
+  const [retryingPaperId, setRetryingPaperId] = useState(null)
   const [activeTopicGroupId, setActiveTopicGroupId] = useState('all')
   const [groupingMode, setGroupingMode] = useState('topic_first')
   const [activeStage, setActiveStage] = useState('matrix')
@@ -3541,6 +3728,7 @@ export function ResearchMatrixPage({
   const [preparingDraftSources, setPreparingDraftSources] = useState(false)
   const [editingRunId, setEditingRunId] = useState(null)
   const [editingRunTitle, setEditingRunTitle] = useState('')
+  const [selectedTemplateId, setSelectedTemplateId] = useState('review_draft')
 
   const selectablePapers = useMemo(
     () => buildSelectablePapers(recentPapers, folders, uncategorizedFolderId, reviewStatuses),
@@ -3767,17 +3955,24 @@ export function ResearchMatrixPage({
   useEffect(() => {
     if (!hasPendingRuns && !hasPendingInsights) return undefined
     let cancelled = false
+    let polling = false
     const intervalId = window.setInterval(async () => {
+      if (polling) return
+      polling = true
       try {
         const [runPayload, detail] = await Promise.all([
-          fetchResearchMatrixRuns(),
+          fetchResearchMatrixRunStatuses(),
           currentRun?.id ? fetchRunDetailCached(currentRun.id) : Promise.resolve(null),
         ])
         if (cancelled) return
-        const detailMap = new Map()
-        if (detail?.id) detailMap.set(detail.id, stripRunDetail(detail))
-        const nextRuns = (runPayload?.runs || []).map((run) => detailMap.get(run.id) || run)
-        setRuns(nextRuns)
+        setRuns((previous) => {
+          const statusRuns = runPayload?.runs || []
+          const detailSummary = detail?.id ? stripRunDetail(detail) : null
+          const nextRuns = mergeRunStatusSummaries(previous, statusRuns).map((run) => (
+            detailSummary?.id === run.id ? { ...run, ...detailSummary } : run
+          ))
+          return runSummariesEqual(previous, nextRuns) ? previous : nextRuns
+        })
         if (detail?.id && !cancelled) {
           applyRunDetail(detail)
           setGroupingMode((current) => getInitialGroupingMode(detail, current))
@@ -3787,8 +3982,10 @@ export function ResearchMatrixPage({
         }
       } catch {
         // keep silent during polling
+      } finally {
+        polling = false
       }
-    }, 1200)
+    }, MATRIX_STATUS_POLL_MS)
     return () => {
       cancelled = true
       window.clearInterval(intervalId)
@@ -3905,11 +4102,12 @@ async function handleCreateRunInBackground() {
     resetCreateSelection()
     setNotice({ type: 'success', text: '批次已加入后台生成，你可以继续处理其他内容。' })
     try {
-      const detail = await createResearchMatrixRun({
-        title: '',
-        paper_ids: paperIds,
-        include_reproduction: true,
-      })
+      const detail = await createResearchMatrixRun(
+        buildResearchMatrixCreatePayload({
+          paperIds,
+          templateId: selectedTemplateId,
+        }),
+      )
       if (!preserveCurrentView) {
         applyRunDetail(detail)
         selectRunLocally(detail)
@@ -4056,6 +4254,22 @@ async function handleCreateRunInBackground() {
       setNotice({ type: 'error', text: err.message || '继续补齐失败' })
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function handleRetryRunPaperReview(runId, paperId) {
+    if (!runId || !paperId || retryingPaperId) return
+    setRetryingPaperId(paperId)
+    setNotice(null)
+    try {
+      const detail = await retryResearchMatrixRunPaperReview(runId, paperId)
+      applyRunDetail(detail)
+      await loadRuns(false)
+      setNotice({ type: 'success', text: '这篇论文的综述卡片已重新加入后台补齐。' })
+    } catch (err) {
+      setNotice({ type: 'error', text: err.message || '单篇综述重试失败' })
+    } finally {
+      setRetryingPaperId(null)
     }
   }
 
@@ -4380,11 +4594,13 @@ async function handleCreateRunInBackground() {
         searchTerm={searchTerm}
         selectedFolderId={selectedFolderId}
         selectedIds={selectedIds}
+        selectedTemplateId={selectedTemplateId}
         uncategorizedFolderId={uncategorizedFolderId}
         onClose={closeCreateDialog}
         onConfirm={handleCreateRunInBackground}
         onFolderChange={setSelectedFolderId}
         onSearchChange={setSearchTerm}
+        onTemplateChange={setSelectedTemplateId}
         onTogglePaper={togglePaper}
         onToggleVisible={toggleVisible}
       />
@@ -4398,8 +4614,10 @@ async function handleCreateRunInBackground() {
 
       <RunPapersPanel
         open={showRunPapers}
+        retryingPaperId={retryingPaperId}
         run={currentRun}
         onClose={() => setShowRunPapers(false)}
+        onRetryPaperReview={handleRetryRunPaperReview}
       />
     </section>
   )

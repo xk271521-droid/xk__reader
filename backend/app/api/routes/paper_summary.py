@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-import subprocess
-import sys
-from pathlib import Path
-
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -26,22 +22,16 @@ from app.services.paper_summary import (
     is_summary_running_stale,
     mark_summary_interrupted,
     normalize_summary_terminal_state,
+    spawn_paper_summary_worker,
     stale_summary_message,
+)
+from app.services.membership import (
+    QUOTA_SUMMARY_CARD_MONTHLY,
+    consume_quota,
+    should_start_summary_immediately,
 )
 
 router = APIRouter(prefix="/papers/{paper_id}/summaries")
-
-
-def _spawn_paper_summary_task(summary_id: int, provider_id: int | None = None) -> None:
-    backend_root = Path(__file__).resolve().parents[3]
-    args = [sys.executable, "-m", "app.services.paper_summary_worker", str(summary_id)]
-    if provider_id is not None:
-        args.append(str(provider_id))
-    subprocess.Popen(
-        args,
-        cwd=str(backend_root),
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
 
 
 def _ensure_owned_paper(db: Session, paper_id: int, user: User) -> Paper:
@@ -112,7 +102,6 @@ def generate_paper_summary(
     paper_id: int,
     summary_type: PaperSummaryType,
     payload: PaperSummaryGenerateRequest,
-    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> PaperSummaryStatusResponse:
@@ -139,16 +128,24 @@ def generate_paper_summary(
             content_json={},
         )
 
-    item.status = "running"
-    item.stage = "extracting_context"
-    item.progress = 3
+    consume_quota(
+        db,
+        user_id=current_user.id,
+        quota_key=QUOTA_SUMMARY_CARD_MONTHLY,
+    )
+
+    should_start_now = should_start_summary_immediately(db, current_user.id)
+    item.status = "running" if should_start_now else "queued"
+    item.stage = "extracting_context" if should_start_now else "queued"
+    item.progress = 3 if should_start_now else 0
     item.provider_id = payload.provider_id
     item.error_message = None
     db.add(item)
     db.commit()
     db.refresh(item)
 
-    _spawn_paper_summary_task(item.id, payload.provider_id)
+    if should_start_now:
+        spawn_paper_summary_worker(item.id, payload.provider_id)
     return PaperSummaryStatusResponse(**build_summary_response_payload(item, summary_type))
 
 

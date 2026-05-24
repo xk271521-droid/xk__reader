@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react'
 import {
+  checkNotesExportAllowed,
   fetchFullTranslation,
   fetchPaperAnnotations,
   fetchPaperNotebooks,
@@ -36,41 +37,10 @@ import {
   triggerSummaryWordExport,
 } from './resourcePreviewShared'
 import { buildRichTextSegments, DEFAULT_NOTE_TEXT_COLOR, parseRichNoteContent } from '../reader/richNoteContent'
+import { mergeLogicalAnnotations } from '../../utils/annotationAggregation'
 
-function mergeEffectiveAnnotations(annotations = []) {
-  const groups = new Map()
-  for (const annotation of annotations || []) {
-    if (!annotation) continue
-    const key = [
-      annotation.page_number || 0,
-      annotation.type || 'highlight',
-      annotation.color || '',
-    ].join(':')
-    if (!groups.has(key)) groups.set(key, [])
-    groups.get(key).push(annotation)
-  }
-
-  const merged = []
-  for (const items of groups.values()) {
-    const ordered = [...items].sort((left, right) =>
-      (left.start_char || 0) - (right.start_char || 0) || (left.end_char || 0) - (right.end_char || 0),
-    )
-    let current = null
-    for (const item of ordered) {
-      const startChar = Number(item.start_char || 0)
-      const endChar = Number(item.end_char || 0)
-      if (!current || startChar > current.end_char) {
-        current = { ...item, start_char: startChar, end_char: endChar }
-        merged.push(current)
-        continue
-      }
-      current.end_char = Math.max(current.end_char, endChar)
-      current.quote_text = [current.quote_text, item.quote_text].filter(Boolean).join('')
-      current.rects = [...(current.rects || []), ...(item.rects || [])]
-    }
-  }
-  return merged
-}
+const HEADER_COMPACT_ENTER = 44
+const HEADER_COMPACT_EXIT = 20
 
 function darkenColor(hex, ratio = 0.26) {
   const normalized = String(hex || '').trim()
@@ -599,7 +569,7 @@ function AnnotationsPreviewView({
 }) {
   const [expandedGroups, setExpandedGroups] = useState({})
   const annotations = cacheEntry?.data?.annotations || []
-  const effectiveAnnotations = useMemo(() => mergeEffectiveAnnotations(annotations), [annotations])
+  const effectiveAnnotations = useMemo(() => mergeLogicalAnnotations(annotations), [annotations])
   const isLoading = cacheEntry?.status === 'loading'
   const error = cacheEntry?.error || ''
 
@@ -999,15 +969,18 @@ function NotesPreviewView({
 
 export function ResourcePreviewModal({
   preview,
+  currentUser,
   uiFontScale = 1,
   onClose,
   onJumpToEvidence,
+  onRequireVip,
 }) {
   const panelRef = useRef(null)
   const triggerRef = useRef(preview?.trigger || null)
   const [activeExportFormat, setActiveExportFormat] = useState('')
   const [cache, setCache] = useState({})
   const [isBusy, setIsBusy] = useState(false)
+  const [isCheckingExport, setIsCheckingExport] = useState(false)
   const [isHeaderCompact, setIsHeaderCompact] = useState(false)
   const resourceType = preview?.resourceType || ''
   const summaryMeta = PREVIEW_SUMMARY_TYPE_MAP[resourceType]
@@ -1082,7 +1055,27 @@ export function ResourcePreviewModal({
     }))
   }
 
-  function handleExport(format) {
+  async function handleExport(format) {
+    const needsVipExport = preview?.resourceType === 'notes' || preview?.resourceType === 'annotations'
+    if (needsVipExport && !currentUser?.features?.can_export_notes) {
+      onRequireVip?.()
+      return
+    }
+    if (needsVipExport) {
+      setIsCheckingExport(true)
+      try {
+        await checkNotesExportAllowed(preview.paperId)
+      } catch (error) {
+        if (error?.status === 403 || error?.code === 'membership_feature_locked') {
+          onRequireVip?.()
+        } else {
+          window.alert(error?.message || '导出权限校验失败，请稍后再试。')
+        }
+        return
+      } finally {
+        setIsCheckingExport(false)
+      }
+    }
     setActiveExportFormat(format)
     window.setTimeout(() => {
       setActiveExportFormat('')
@@ -1090,8 +1083,11 @@ export function ResourcePreviewModal({
   }
 
   function handlePanelScroll(event) {
-    const nextCompact = event.currentTarget.scrollTop > 36
-    setIsHeaderCompact((current) => (current === nextCompact ? current : nextCompact))
+    const scrollTop = event.currentTarget.scrollTop
+    setIsHeaderCompact((current) => {
+      const nextCompact = current ? scrollTop > HEADER_COMPACT_EXIT : scrollTop > HEADER_COMPACT_ENTER
+      return current === nextCompact ? current : nextCompact
+    })
   }
 
   const visualColor = preview.resourceColor || '#2563EB'
@@ -1152,11 +1148,11 @@ export function ResourcePreviewModal({
           </div>
           <div className="resource-preview-modal__actions">
             <div className="resource-preview-modal__export">
-              <button type="button" className="resource-preview-modal__action" disabled={isBusy} onClick={() => handleExport('pdf')}>
+              <button type="button" className="resource-preview-modal__action" disabled={isBusy || isCheckingExport} onClick={() => handleExport('pdf')}>
                 <Download size={15} />
                 <span>PDF</span>
               </button>
-              <button type="button" className="resource-preview-modal__action" disabled={isBusy} onClick={() => handleExport('word')}>
+              <button type="button" className="resource-preview-modal__action" disabled={isBusy || isCheckingExport} onClick={() => handleExport('word')}>
                 <FileText size={15} />
                 <span>Word</span>
               </button>

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import PlainTextResponse, Response
 from sqlalchemy import delete as sql_delete, select, update as sql_update
 from sqlalchemy.orm.attributes import flag_modified
@@ -21,21 +21,42 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import AiProvider, Annotation, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperSummary, User
+from app.models import AiProvider, Annotation, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperLiteratureCache, PaperSummary, User
 from app.schemas.paper import (
     FolderCreate,
     FullTranslationResponse,
     FullTranslationStartRequest,
+    PAPER_TEXT_LIMITS,
     FolderResponse,
     FolderUpdate,
     PaperMetadata,
     PaperResponse,
     PaperTrashResponse,
     PaperUpdate,
+    compact_paper_text,
 )
 from app.services.crypto import decrypt_api_key
 from app.services.ai_provider_manager import resolve_user_provider
+from app.services.background_task_runner import spawn_full_translation_worker_process
 from app.services.notification import compact_notification_text, create_notification
+from app.services.membership import ensure_notes_export_allowed
+from app.services.paper_metadata import (
+    extract_pdf_metadata,
+    is_missing_metadata_value,
+    is_weak_metadata_title,
+)
+from app.services.oss_storage import (
+    delete_object as delete_oss_object,
+    delete_prefix as delete_oss_prefix,
+    download_bytes as download_oss_bytes,
+    download_file as download_oss_file,
+    object_exists as oss_object_exists,
+    page_image_object_key,
+    page_image_prefix,
+    paper_object_key,
+    upload_bytes as upload_oss_bytes,
+    upload_file as upload_oss_file,
+)
 from app.services.translate import translate_title
 from app.services.upload_mirror import mirror_upload_file, remove_mirrored_upload
 
@@ -44,6 +65,12 @@ router = APIRouter(prefix="/papers", tags=["papers"])
 ALLOWED_PDF_TYPES = {"application/pdf"}
 TRASH_RETENTION = timedelta(days=7)
 UPLOAD_READ_CHUNK_SIZE = 1024 * 1024
+FULL_TRANSLATION_DISABLED_MESSAGE = "全文翻译功能已暂停。"
+
+
+def ensure_full_translation_enabled() -> None:
+    if not settings.full_translation_enabled:
+        raise HTTPException(status_code=404, detail=FULL_TRANSLATION_DISABLED_MESSAGE)
 
 
 def build_folder_response(folder: Folder) -> FolderResponse:
@@ -82,6 +109,7 @@ def build_paper_response(paper: Paper) -> PaperResponse:
         creation_date=paper.creation_date,
         modification_date=paper.modification_date,
         doi=paper.doi,
+        arxiv_id=paper.arxiv_id,
         page_count=paper.page_count,
         last_viewed_at=paper.last_viewed_at.isoformat() if paper.last_viewed_at else None,
         created_at=paper.created_at.isoformat() if paper.created_at else None,
@@ -166,6 +194,8 @@ def _permanently_delete_paper(db: Session, paper: Paper) -> None:
             remove_mirrored_upload(f"papers/{actual_file.name}")
         except OSError:
             pass
+    delete_oss_object(paper_object_key(paper.file_path))
+    delete_oss_prefix(page_image_prefix(paper.file_path))
     db.delete(paper)
 
 
@@ -183,6 +213,8 @@ def _purge_expired_trashed_papers(db: Session, user_id: int | None = None) -> in
 def build_full_translation_response(item: PaperFullTranslation | None) -> FullTranslationResponse:
     if not item:
         return FullTranslationResponse()
+    parse_summary = dict(getattr(item, "parse_summary", None) or {})
+    parse_summary["diagnostics"] = build_full_translation_diagnostics(item.pages_json or [])
     pending_blocks_count = sum(
         1
         for page in (item.pages_json or [])
@@ -196,7 +228,7 @@ def build_full_translation_response(item: PaperFullTranslation | None) -> FullTr
         if block.get("status") == "failed"
     )
     return FullTranslationResponse(
-        status=item.status if item.status in {"idle", "running", "completed", "error", "cancelled"} else "idle",
+        status=item.status if item.status in {"idle", "running", "completed", "partial_failed", "error", "cancelled"} else "idle",
         source_hash=item.source_hash or "",
         pages=item.pages_json or [],
         completed_units=item.completed_units or 0,
@@ -205,7 +237,7 @@ def build_full_translation_response(item: PaperFullTranslation | None) -> FullTr
         provider_id=item.provider_id,
         parse_mode=getattr(item, "parse_mode", "auto") or "auto",
         parse_engine=getattr(item, "parse_engine", "local") or "local",
-        parse_summary=getattr(item, "parse_summary", None) or {},
+        parse_summary=parse_summary,
         translation_engine=getattr(item, "translation_engine", "ai") or "ai",
         termbase_version=getattr(item, "termbase_version", "") or "",
         failed_blocks_count=failed_blocks_count + pending_blocks_count,
@@ -267,6 +299,108 @@ def count_translatable_units(pages: list[dict]) -> int:
     )
 
 
+def is_translation_copy_like_block(block: dict) -> bool:
+    block_type = str(block.get("type") or "").strip()
+    kind = str(block.get("kind") or "").strip()
+    policy = str(block.get("translate_policy") or "").strip()
+    status = str(block.get("status") or "").strip()
+    return bool(
+        block.get("skip_translate")
+        or block_type in COPY_BLOCK_TYPES
+        or kind in COPY_BLOCK_KINDS
+        or policy in {"copy", "skip"}
+        or status == "copied"
+    )
+
+
+def build_full_translation_diagnostics(pages: list[dict]) -> dict:
+    stats = {
+        "page_count": len(pages or []),
+        "block_count": 0,
+        "translatable_blocks": 0,
+        "copied_blocks": 0,
+        "translated_blocks": 0,
+        "failed_blocks": 0,
+        "pending_blocks": 0,
+        "source_chars": 0,
+        "translated_chars": 0,
+        "coverage_percent": 0,
+        "failure_percent": 0,
+    }
+    for page in pages or []:
+        for block in page.get("blocks") or []:
+            stats["block_count"] += 1
+            source_text = str(block.get("source_text") or "").strip()
+            translated_text = str(block.get("translated_text") or "").strip()
+            stats["source_chars"] += len(source_text)
+            if is_translation_copy_like_block(block):
+                stats["copied_blocks"] += 1
+                continue
+            if not source_text:
+                continue
+            stats["translatable_blocks"] += 1
+            status = str(block.get("status") or "").strip()
+            if (
+                status == "translated"
+                and translated_text
+                and (contains_cjk_text(translated_text) or is_allowed_untranslated_block(block, translated_text))
+            ):
+                stats["translated_blocks"] += 1
+                stats["translated_chars"] += len(translated_text)
+            elif status == "failed":
+                stats["failed_blocks"] += 1
+            else:
+                stats["pending_blocks"] += 1
+    translatable = stats["translatable_blocks"]
+    if translatable > 0:
+        stats["coverage_percent"] = round((stats["translated_blocks"] / translatable) * 100)
+        stats["failure_percent"] = round((stats["failed_blocks"] / translatable) * 100)
+    return stats
+
+
+def set_full_translation_diagnostics(item: PaperFullTranslation, pages: list[dict]) -> dict:
+    diagnostics = build_full_translation_diagnostics(pages)
+    parse_summary = dict(getattr(item, "parse_summary", None) or {})
+    parse_summary["diagnostics"] = diagnostics
+    item.parse_summary = parse_summary
+    return diagnostics
+
+
+def has_valid_translated_text(block: dict) -> bool:
+    translated_text = str(block.get("translated_text") or "").strip()
+    return bool(
+        translated_text
+        and (contains_cjk_text(translated_text) or is_allowed_untranslated_block(block, translated_text))
+    )
+
+
+def reset_translation_pages_for_retry(pages: list[dict], *, failed_only: bool = False) -> int:
+    total_units = 0
+    for page in pages or []:
+        for block in page.get("blocks") or []:
+            source_text = str(block.get("source_text") or "").strip()
+            if should_copy_block(block) or not source_text:
+                block["translate_policy"] = "copy"
+                block["status"] = "copied"
+                block["translated_text"] = block.get("translated_text") or block.get("source_text", "")
+                continue
+
+            if failed_only and has_valid_translated_text(block):
+                block["translate_policy"] = "translate"
+                block["status"] = "translated"
+                continue
+
+            status = str(block.get("status") or "").strip()
+            if failed_only and status not in {"failed", "pending"} and has_valid_translated_text(block):
+                continue
+
+            block["translate_policy"] = "translate"
+            block["status"] = "pending"
+            block["translated_text"] = ""
+            total_units += 1
+    return total_units
+
+
 def get_translation_source_hash(pages: list[dict]) -> str:
     payload = []
     for page in pages or []:
@@ -274,11 +408,13 @@ def get_translation_source_hash(pages: list[dict]) -> str:
             "page_number": page.get("page_number"),
             "width": page.get("width"),
             "height": page.get("height"),
+            "layout": page.get("layout") or {},
             "blocks": [
                 {
                     "id": block.get("id"),
                     "source_text": block.get("source_text"),
                     "bbox": block.get("bbox"),
+                    "column": block.get("column"),
                     "skip_translate": block.get("skip_translate"),
                 }
                 for block in page.get("blocks") or []
@@ -549,6 +685,9 @@ def _build_annotated_docx(
     if paper.doi:
         meta.add_run("\nDOI: ").bold = True
         meta.add_run(paper.doi)
+    if paper.arxiv_id:
+        meta.add_run("\narXiv: ").bold = True
+        meta.add_run(paper.arxiv_id)
 
     document.add_heading("Paper Text", level=1)
     pages = _extract_pdf_text_pages(file_path)
@@ -773,6 +912,12 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
         item = db.get(PaperFullTranslation, translation_id)
         if not item:
             return
+        if not settings.full_translation_enabled:
+            item.status = "cancelled"
+            item.error_message = FULL_TRANSLATION_DISABLED_MESSAGE
+            db.add(item)
+            db.commit()
+            return
         if item.status == "cancelled":
             return
 
@@ -877,6 +1022,7 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
                 return
             item.pages_json = pages
             flag_modified(item, "pages_json")
+            set_full_translation_diagnostics(item, pages)
             item.completed_units = completed
             item.status = "running"
             db.add(item)
@@ -894,6 +1040,8 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
                     block["translate_policy"] = "copy"
                     block["status"] = "copied"
                     continue
+                if str(block.get("status") or "").strip() == "translated" and has_valid_translated_text(block):
+                    continue
                 batch.append({"id": block.get("id", ""), "text": source_text})
                 block_refs.append(block)
                 if len(batch) >= 5:
@@ -905,11 +1053,19 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
 
         item = db.get(PaperFullTranslation, translation_id)
         if item:
+            diagnostics = set_full_translation_diagnostics(item, pages)
+            unresolved_blocks = int(diagnostics.get("failed_blocks") or 0) + int(diagnostics.get("pending_blocks") or 0)
             if item.status == "cancelled" or cancelled:
                 item.pages_json = pages
                 flag_modified(item, "pages_json")
                 item.status = "cancelled"
                 item.error_message = item.error_message or "已取消全文翻译。"
+            elif unresolved_blocks > 0:
+                item.pages_json = pages
+                flag_modified(item, "pages_json")
+                item.completed_units = item.total_units
+                item.status = "partial_failed"
+                item.error_message = f"全文翻译已生成，但有 {unresolved_blocks} 段未完成，可重新生成。"
             else:
                 item.pages_json = pages
                 flag_modified(item, "pages_json")
@@ -918,17 +1074,22 @@ def run_full_translation_task(translation_id: int, provider_id: int | None) -> N
                 item.error_message = None
             db.add(item)
             db.commit()
-            if item.status == "completed":
+            if item.status in {"completed", "partial_failed"}:
                 paper = db.get(Paper, item.paper_id)
                 if paper:
+                    is_partial = item.status == "partial_failed"
                     create_notification(
                         db,
                         user_id=paper.user_id,
                         source_kind="full_translation",
                         source_id=paper.id,
-                        event_kind="completed",
-                        title="全文翻译 已完成",
-                        message=compact_notification_text(paper.title or paper.file_name or "当前论文", 120),
+                        event_kind="failed" if is_partial else "completed",
+                        title="全文翻译 部分完成" if is_partial else "全文翻译 已完成",
+                        message=(
+                            f"{compact_notification_text(paper.title or paper.file_name or '当前论文', 90)} · {unresolved_blocks} 段待处理"
+                            if is_partial
+                            else compact_notification_text(paper.title or paper.file_name or "当前论文", 120)
+                        ),
                         action_kind="open-full-translation",
                         action_payload={"paper_id": paper.id},
                     )
@@ -1069,16 +1230,400 @@ def delete_folder(
 # ── Papers ───────────────────────────────────────────────
 
 
-@router.get("/references")
-def get_references(doi: str = ""):
-    """通过多个 API 获取参考文献"""
-    if not doi:
-        return {"references": [], "source": ""}
+def _clean_external_id(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+LITERATURE_CACHE_TTL = timedelta(days=7)
+
+
+def _strip_arxiv_version(arxiv_id: str) -> str:
+    return re.sub(r"v\d+$", "", _clean_external_id(arxiv_id), flags=re.IGNORECASE)
+
+
+def _clean_title_lookup(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())[:300]
+
+
+def _literature_cache_key(doi: str = "", arxiv_id: str = "", title: str = "") -> str:
+    doi = _clean_external_id(doi).lower()
+    arxiv_id = _clean_external_id(arxiv_id).lower()
+    title = _clean_title_lookup(title).lower()
+    if doi:
+        return f"doi:{doi}"
+    if arxiv_id:
+        return f"arxiv:{_strip_arxiv_version(arxiv_id).lower() or arxiv_id}"
+    if title:
+        return f"title:{sha256(title.encode('utf-8')).hexdigest()}"
+    return ""
+
+
+def _cache_is_fresh(item: PaperLiteratureCache) -> bool:
+    updated_at = item.updated_at or item.created_at
+    if not updated_at:
+        return False
+    if updated_at.tzinfo is not None:
+        updated_at = updated_at.astimezone(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return now - updated_at <= LITERATURE_CACHE_TTL
+
+
+def _read_literature_cache(db: Session, result_kind: str, lookup_key: str) -> dict | None:
+    if not lookup_key:
+        return None
+    item = db.scalar(
+        select(PaperLiteratureCache).where(
+            PaperLiteratureCache.result_kind == result_kind,
+            PaperLiteratureCache.lookup_key == lookup_key,
+        )
+    )
+    if not item or not _cache_is_fresh(item):
+        return None
+    return {
+        result_kind: item.payload_json or [],
+        "source": f"{item.source or '缓存'} · 缓存",
+    }
+
+
+def _write_literature_cache(db: Session, result_kind: str, lookup_key: str, payload: list[dict], source: str) -> None:
+    if not lookup_key or not payload:
+        return
+    item = db.scalar(
+        select(PaperLiteratureCache).where(
+            PaperLiteratureCache.result_kind == result_kind,
+            PaperLiteratureCache.lookup_key == lookup_key,
+        )
+    )
+    if not item:
+        item = PaperLiteratureCache(result_kind=result_kind, lookup_key=lookup_key)
+    item.payload_json = payload[:1000]
+    item.source = str(source or "")[:160]
+    db.add(item)
+    db.commit()
+
+
+def _semantic_scholar_paper_keys(doi: str = "", arxiv_id: str = "") -> list[str]:
+    keys: list[str] = []
+    doi = _clean_external_id(doi)
+    arxiv_id = _clean_external_id(arxiv_id)
+    if doi:
+        keys.append(f"DOI:{doi}")
+    if arxiv_id:
+        keys.append(f"ARXIV:{arxiv_id}")
+        base_arxiv_id = _strip_arxiv_version(arxiv_id)
+        if base_arxiv_id and base_arxiv_id != arxiv_id:
+            keys.append(f"ARXIV:{base_arxiv_id}")
+    return keys
+
+
+def _semantic_scholar_lookup(doi: str = "", arxiv_id: str = "", fields: str = "paperId") -> dict | None:
+    from urllib.request import Request, urlopen
+
+    for paper_key in _semantic_scholar_paper_keys(doi, arxiv_id):
+        url = f"https://api.semanticscholar.org/graph/v1/paper/{quote(paper_key, safe=':')}?fields={quote(fields, safe=',')}"
+        req = Request(url, headers={"Accept": "application/json"})
+        try:
+            resp = urlopen(req, timeout=8)
+            data = json.loads(resp.read())
+            if data.get("paperId"):
+                return data
+        except Exception:
+            continue
+    return None
+
+
+def _format_semantic_scholar_paper(paper: dict) -> dict:
+    authors = paper.get("authors") or []
+    author_str = ", ".join(a.get("name", "") for a in authors[:3])
+    if len(authors) > 3:
+        author_str += " et al."
+    external_ids = paper.get("externalIds") or {}
+    return {
+        "title": paper.get("title", ""),
+        "authors": author_str,
+        "year": paper.get("year"),
+        "journal": (paper.get("journal") or {}).get("name") if paper.get("journal") else "",
+        "doi": external_ids.get("DOI", ""),
+        "arxiv_id": external_ids.get("ArXiv", "") or external_ids.get("ARXIV", ""),
+    }
+
+
+def _crossref_work_year(work: dict) -> int | None:
+    for key in ("published-print", "published-online", "published", "issued"):
+        parts = (work.get(key) or {}).get("date-parts") or []
+        if parts and parts[0]:
+            try:
+                return int(parts[0][0])
+            except Exception:
+                continue
+    return None
+
+
+def _format_crossref_work(work: dict) -> dict:
+    authors = work.get("author") or []
+    return {
+        "title": (work.get("title") or [""])[0],
+        "authors": "; ".join(
+            [item for item in (
+                " ".join([str(author.get("given") or "").strip(), str(author.get("family") or "").strip()]).strip()
+                for author in authors[:3]
+            ) if item]
+        ),
+        "year": _crossref_work_year(work),
+        "journal": (work.get("container-title") or [""])[0],
+        "doi": work.get("DOI", ""),
+        "arxiv_id": "",
+    }
+
+
+def _lookup_literature_by_title(db: Session, title: str) -> dict | None:
+    title = _clean_title_lookup(title)
+    if not title:
+        return None
+
+    cache_key = _literature_cache_key(title=title)
+    cached = _read_literature_cache(db, "lookup", cache_key)
+    cached_items = cached.get("lookup") if cached else None
+    if cached_items:
+        return cached_items[0]
 
     from urllib.request import Request, urlopen
-    from urllib.parse import quote
+
+    def try_crossref_title() -> dict | None:
+        url = f"https://api.crossref.org/works?query.title={quote(title)}&rows=1"
+        req = Request(url, headers={"Accept": "application/json"})
+        resp = urlopen(req, timeout=8)
+        data = json.loads(resp.read())
+        items = (data.get("message") or {}).get("items") or []
+        if not items:
+            return None
+        work = items[0]
+        doi = _clean_external_id(work.get("DOI"))
+        if not doi:
+            return None
+        return {
+            **_format_crossref_work(work),
+            "doi": doi,
+            "source_note": "Crossref 标题匹配",
+        }
+
+    def try_openalex_title() -> dict | None:
+        url = f"https://api.openalex.org/works?search={quote(title)}&per-page=1"
+        req = Request(url, headers={"Accept": "application/json"})
+        resp = urlopen(req, timeout=8)
+        data = json.loads(resp.read())
+        results = data.get("results") or []
+        if not results:
+            return None
+        work = results[0]
+        doi = _clean_external_id((work.get("doi") or "").replace("https://doi.org/", ""))
+        if not doi:
+            return None
+        return {
+            "title": work.get("title", ""),
+            "authors": ", ".join(
+                (a.get("author") or {}).get("display_name", "")
+                for a in (work.get("authorships") or [])[:3]
+            ),
+            "year": work.get("publication_year"),
+            "journal": ((work.get("primary_location") or {}).get("source") or {}).get("display_name", ""),
+            "doi": doi,
+            "arxiv_id": "",
+            "source_note": "OpenAlex 标题匹配",
+        }
+
+    for fn in (try_crossref_title, try_openalex_title):
+        try:
+            result = fn()
+            if result:
+                _write_literature_cache(db, "lookup", cache_key, [result], result.get("source_note", "标题匹配"))
+                return result
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_literature_lookup(db: Session, doi: str = "", arxiv_id: str = "", title: str = "") -> dict | None:
+    doi = _clean_external_id(doi)
+    arxiv_id = _clean_external_id(arxiv_id)
+    if doi or arxiv_id:
+        return {"doi": doi, "arxiv_id": arxiv_id, "source_note": ""}
+    return _lookup_literature_by_title(db, title)
+
+
+def _is_weak_paper_title(title: str | None, file_name: str | None) -> bool:
+    cleaned = _clean_title_lookup(title)
+    file_title = _clean_title_lookup(re.sub(r"\.pdf$", "", str(file_name or ""), flags=re.IGNORECASE))
+    if not cleaned:
+        return True
+    if file_title and cleaned.lower() == file_title.lower():
+        return True
+    if re.fullmatch(r"(arxiv[:\s-]*)?\d{4}\.\d{4,5}(v\d+)?", cleaned, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _paper_to_metadata(paper: Paper) -> PaperMetadata:
+    return PaperMetadata(
+        title=paper.title or "",
+        author=paper.author,
+        subject=paper.subject,
+        keywords=paper.keywords,
+        creator=paper.creator,
+        producer=paper.producer,
+        creation_date=paper.creation_date,
+        modification_date=paper.modification_date,
+        doi=paper.doi,
+        arxiv_id=paper.arxiv_id,
+        page_count=paper.page_count or 0,
+    )
+
+
+def _apply_local_pdf_metadata(paper: Paper, metadata: PaperMetadata) -> bool:
+    changed = False
+
+    def assign(attr: str, value: object, *, force: bool = False) -> None:
+        nonlocal changed
+        text = compact_paper_text(str(value or ""), PAPER_TEXT_LIMITS.get(attr, 300))
+        if is_missing_metadata_value(text):
+            return
+        current = getattr(paper, attr, None)
+        if force or is_missing_metadata_value(current):
+            if current != text:
+                setattr(paper, attr, text)
+                changed = True
+
+    assign(
+        "title",
+        metadata.title,
+        force=is_weak_metadata_title(paper.title, paper.file_name)
+        and not is_weak_metadata_title(metadata.title, paper.file_name),
+    )
+    for attr in (
+        "author",
+        "subject",
+        "keywords",
+        "creator",
+        "producer",
+        "creation_date",
+        "modification_date",
+        "doi",
+        "arxiv_id",
+    ):
+        assign(attr, getattr(metadata, attr, None))
+
+    if metadata.page_count and not (paper.page_count or 0):
+        paper.page_count = metadata.page_count
+        changed = True
+
+    return changed
+
+
+def _apply_external_metadata(paper: Paper, lookup: dict) -> bool:
+    changed = False
+
+    def assign(attr: str, value: object, *, force: bool = False) -> None:
+        nonlocal changed
+        text = compact_paper_text(str(value or ""), PAPER_TEXT_LIMITS.get(attr, 300))
+        if not text:
+            return
+        current = str(getattr(paper, attr) or "").strip()
+        if force or not current:
+            if current != text:
+                setattr(paper, attr, text)
+                changed = True
+
+    assign("title", lookup.get("title"), force=_is_weak_paper_title(paper.title, paper.file_name))
+    assign("author", lookup.get("authors"))
+    assign("subject", lookup.get("journal"))
+    assign("doi", lookup.get("doi"))
+    assign("arxiv_id", lookup.get("arxiv_id"))
+    return changed
+
+
+@router.post("/{paper_id}/metadata/refresh", response_model=PaperResponse)
+def refresh_paper_metadata(
+    paper_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> PaperResponse:
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="论文不存在。")
+
+    changed = False
+    actual_file = _resolve_paper_file(paper.file_path)
+    if actual_file:
+        try:
+            local_metadata = extract_pdf_metadata(
+                actual_file,
+                file_name=paper.file_name or "",
+                existing=_paper_to_metadata(paper),
+            )
+            changed = _apply_local_pdf_metadata(paper, local_metadata) or changed
+        except Exception:
+            pass
+
+    lookup: dict | None = None
+    if paper.doi or paper.arxiv_id:
+        external = _semantic_scholar_lookup(
+            paper.doi or "",
+            paper.arxiv_id or "",
+            "title,authors,year,journal,externalIds",
+        )
+        if external:
+            lookup = {
+                **_format_semantic_scholar_paper(external),
+                "source_note": "Semantic Scholar 标识符匹配",
+            }
+    if not lookup:
+        lookup_title = paper.title or re.sub(r"\.pdf$", "", paper.file_name or "", flags=re.IGNORECASE)
+        lookup = _lookup_literature_by_title(db, lookup_title)
+    if not lookup:
+        if changed:
+            db.add(paper)
+            db.commit()
+            db.refresh(paper)
+            return build_paper_response(paper)
+        raise HTTPException(status_code=404, detail="未能通过标题、DOI 或 arXiv 匹配到外部文献记录。")
+
+    if _apply_external_metadata(paper, lookup):
+        changed = True
+    if changed:
+        db.add(paper)
+        db.commit()
+        db.refresh(paper)
+    return build_paper_response(paper)
+
+
+@router.get("/references")
+def get_references(
+    db: Annotated[Session, Depends(get_db)],
+    doi: str = "",
+    arxiv_id: str = "",
+    title: str = "",
+):
+    """通过多个 API 获取参考文献"""
+    doi = _clean_external_id(doi)
+    arxiv_id = _clean_external_id(arxiv_id)
+    title = _clean_title_lookup(title)
+    lookup = _resolve_literature_lookup(db, doi, arxiv_id, title)
+    if lookup:
+        doi = _clean_external_id(lookup.get("doi"))
+        arxiv_id = _clean_external_id(lookup.get("arxiv_id"))
+    if not doi and not arxiv_id:
+        return {"references": [], "source": "缺少 DOI/arXiv，标题也未能匹配到外部记录" if title else ""}
+    cache_key = _literature_cache_key(doi, arxiv_id, title)
+    cached = _read_literature_cache(db, "references", cache_key)
+    if cached:
+        return cached
+    source_note = str((lookup or {}).get("source_note") or "")
+
+    from urllib.request import Request, urlopen
 
     def try_crossref():
+        if not doi:
+            return None
         url = f"https://api.crossref.org/works/{doi}"
         req = Request(url, headers={"Accept": "application/json"})
         resp = urlopen(req, timeout=8)
@@ -1098,10 +1643,8 @@ def get_references(doi: str = ""):
         return (refs, f"Crossref ({len(raw)} 条)")
 
     def try_semantic_scholar():
-        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=paperId"
-        req = Request(url, headers={"Accept": "application/json"})
-        resp = urlopen(req, timeout=8)
-        paper_id = __import__("json").loads(resp.read()).get("paperId")
+        paper = _semantic_scholar_lookup(doi, arxiv_id, "paperId")
+        paper_id = paper.get("paperId") if paper else None
         if not paper_id:
             return None
         url2 = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}/references?limit=1000&fields=title,authors,year,journal,externalIds"
@@ -1114,22 +1657,14 @@ def get_references(doi: str = ""):
         refs = []
         for r in raw:
             p = r.get("citedPaper") or {}
-            authors = p.get("authors") or []
-            author_str = ", ".join(a.get("name", "") for a in authors[:3])
-            if len(authors) > 3:
-                author_str += " et al."
-            refs.append({
-                "title": p.get("title", ""),
-                "authors": author_str,
-                "year": p.get("year"),
-                "journal": (p.get("journal") or {}).get("name") if p.get("journal") else "",
-                "doi": (p.get("externalIds") or {}).get("DOI", ""),
-            })
+            refs.append(_format_semantic_scholar_paper(p))
         return (refs, f"Semantic Scholar ({len(raw)} 条)")
 
     def try_openalex():
         import ssl
         ctx = ssl._create_unverified_context()
+        if not doi:
+            return None
         url = f"https://api.openalex.org/works/doi:{doi}"
         req = Request(url, headers={"Accept": "application/json"})
         resp = urlopen(req, timeout=8)
@@ -1143,8 +1678,9 @@ def get_references(doi: str = ""):
         req2 = Request(url2, headers={"Accept": "application/json"})
         resp2 = urlopen(req2, timeout=10)
         data2 = __import__("json").loads(resp2.read())
+        raw = data2.get("results") or []
         refs = []
-        for r in data2.get("results") or []:
+        for r in raw:
             refs.append({
                 "title": r.get("title", ""),
                 "authors": ", ".join(
@@ -1161,7 +1697,9 @@ def get_references(doi: str = ""):
         try:
             result = fn()
             if result:
-                return {"references": result[0], "source": result[1]}
+                source = " · ".join([part for part in (source_note, result[1]) if part])
+                _write_literature_cache(db, "references", cache_key, result[0], source)
+                return {"references": result[0], "source": source}
         except Exception:
             continue
 
@@ -1169,17 +1707,35 @@ def get_references(doi: str = ""):
 
 
 @router.get("/citations")
-def get_citations(doi: str = ""):
+def get_citations(
+    db: Annotated[Session, Depends(get_db)],
+    doi: str = "",
+    arxiv_id: str = "",
+    title: str = "",
+):
     """获取引用该论文的其他论文"""
-    if not doi:
-        return {"citations": [], "source": ""}
+    doi = _clean_external_id(doi)
+    arxiv_id = _clean_external_id(arxiv_id)
+    title = _clean_title_lookup(title)
+    lookup = _resolve_literature_lookup(db, doi, arxiv_id, title)
+    if lookup:
+        doi = _clean_external_id(lookup.get("doi"))
+        arxiv_id = _clean_external_id(lookup.get("arxiv_id"))
+    if not doi and not arxiv_id:
+        return {"citations": [], "source": "缺少 DOI/arXiv，标题也未能匹配到外部记录" if title else ""}
+    cache_key = _literature_cache_key(doi, arxiv_id, title)
+    cached = _read_literature_cache(db, "citations", cache_key)
+    if cached:
+        return cached
+    source_note = str((lookup or {}).get("source_note") or "")
 
     from urllib.request import Request, urlopen
-    from urllib.parse import quote
 
     def try_openalex():
         import ssl
         ctx = ssl._create_unverified_context()
+        if not doi:
+            return None
         url = f"https://api.openalex.org/works/doi:{doi}"
         req = Request(url, headers={"Accept": "application/json"})
         resp = urlopen(req, timeout=8)
@@ -1206,10 +1762,9 @@ def get_citations(doi: str = ""):
         return (refs, f"OpenAlex (共被引 {count} 次)")
 
     def try_semantic_scholar():
-        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=paperId,citationCount"
-        req = Request(url, headers={"Accept": "application/json"})
-        resp = urlopen(req, timeout=8)
-        data = __import__("json").loads(resp.read())
+        data = _semantic_scholar_lookup(doi, arxiv_id, "paperId,citationCount")
+        if not data:
+            return None
         paper_id = data.get("paperId")
         count = data.get("citationCount", 0)
         if not paper_id:
@@ -1223,27 +1778,18 @@ def get_citations(doi: str = ""):
         refs = []
         for r in raw:
             p = r.get("citingPaper") or {}
-            authors = p.get("authors") or []
-            author_str = ", ".join(a.get("name", "") for a in authors[:3])
-            if len(authors) > 3:
-                author_str += " et al."
-            refs.append({
-                "title": p.get("title", ""),
-                "authors": author_str,
-                "year": p.get("year"),
-                "journal": (p.get("journal") or {}).get("name") if p.get("journal") else "",
-                "doi": (p.get("externalIds") or {}).get("DOI", ""),
-            })
+            refs.append(_format_semantic_scholar_paper(p))
         return (refs, f"Semantic Scholar (共被引 {count} 次)")
 
     for name, fn in [("S2", try_semantic_scholar), ("OA", try_openalex)]:
         try:
             result = fn()
             if result:
-                return {"citations": result[0], "source": result[1]}
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
+                source = " · ".join([part for part in (source_note, result[1]) if part])
+                _write_literature_cache(db, "citations", cache_key, result[0], source)
+                return {"citations": result[0], "source": source}
+        except Exception:
+            continue
 
     return {"citations": [], "source": "暂无引用数据"}
 
@@ -1420,8 +1966,18 @@ async def upload_paper(
     if file_size_bytes <= 0:
         raise HTTPException(status_code=400, detail="上传文件为空。")
     mirror_upload_file(file_path, f"papers/{file_name_on_disk}")
+    upload_oss_file(
+        file_path,
+        paper_object_key(f"/uploads/papers/{file_name_on_disk}"),
+        content_type="application/pdf",
+    )
 
     file_url = f"/uploads/papers/{file_name_on_disk}"
+
+    try:
+        meta = extract_pdf_metadata(file_path, file_name=file.filename or "", existing=meta)
+    except Exception:
+        pass
 
     page_count = meta.page_count
     if not page_count:
@@ -1446,6 +2002,7 @@ async def upload_paper(
         creation_date=meta.creation_date,
         modification_date=meta.modification_date,
         doi=meta.doi,
+        arxiv_id=meta.arxiv_id,
         page_count=page_count,
         last_viewed_at=datetime.now(timezone.utc),
     )
@@ -1486,6 +2043,7 @@ def get_full_translation(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FullTranslationResponse:
+    ensure_full_translation_enabled()
     paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
@@ -1497,10 +2055,10 @@ def get_full_translation(
 def start_full_translation(
     paper_id: int,
     payload: FullTranslationStartRequest,
-    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FullTranslationResponse:
+    ensure_full_translation_enabled()
     paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
@@ -1552,11 +2110,19 @@ def start_full_translation(
     item.completed_units = 0
     item.total_units = total_units
     item.error_message = None
+    set_full_translation_diagnostics(item, pages)
     db.add(item)
     db.commit()
     db.refresh(item)
 
-    background_tasks.add_task(run_full_translation_task, item.id, payload.provider_id)
+    try:
+        spawn_full_translation_worker_process(item.id, payload.provider_id)
+    except Exception as exc:
+        item.status = "error"
+        item.error_message = f"启动全文翻译 worker 失败：{exc}"
+        db.add(item)
+        db.commit()
+        db.refresh(item)
     return build_full_translation_response(item)
 
 
@@ -1564,15 +2130,46 @@ def start_full_translation(
 def retry_full_translation(
     paper_id: int,
     payload: FullTranslationStartRequest,
-    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FullTranslationResponse:
+    ensure_full_translation_enabled()
     item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
+    if item and item.status == "partial_failed" and item.pages_json:
+        total_units = reset_translation_pages_for_retry(item.pages_json, failed_only=True)
+        if total_units <= 0:
+            item.status = "completed"
+            item.completed_units = item.total_units
+            item.error_message = None
+            set_full_translation_diagnostics(item, item.pages_json or [])
+            flag_modified(item, "pages_json")
+            db.add(item)
+            db.commit()
+            db.refresh(item)
+            return build_full_translation_response(item)
+        item.provider_id = payload.provider_id
+        item.completed_units = 0
+        item.total_units = total_units
+        item.status = "running"
+        item.error_message = None
+        set_full_translation_diagnostics(item, item.pages_json or [])
+        flag_modified(item, "pages_json")
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        try:
+            spawn_full_translation_worker_process(item.id, payload.provider_id)
+        except Exception as exc:
+            item.status = "error"
+            item.error_message = f"启动全文翻译 worker 失败：{exc}"
+            db.add(item)
+            db.commit()
+            db.refresh(item)
+        return build_full_translation_response(item)
     if item:
         db.delete(item)
         db.commit()
-    return start_full_translation(paper_id, payload, background_tasks, current_user, db)
+    return start_full_translation(paper_id, payload, current_user, db)
 
 
 @router.post("/{paper_id}/full-translation/cancel", response_model=FullTranslationResponse)
@@ -1581,6 +2178,7 @@ def cancel_full_translation(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FullTranslationResponse:
+    ensure_full_translation_enabled()
     paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
@@ -1602,6 +2200,7 @@ def stream_full_translation(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FullTranslationResponse:
+    ensure_full_translation_enabled()
     # v1 uses lightweight polling with the stream-shaped endpoint name.
     paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
@@ -1616,11 +2215,12 @@ def download_full_translation(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ):
+    ensure_full_translation_enabled()
     paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
     item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
-    if not item or item.status != "completed":
+    if not item or item.status not in {"completed", "partial_failed"}:
         raise HTTPException(status_code=404, detail="全文翻译尚未完成。")
 
     chunks: list[str] = []
@@ -1658,6 +2258,19 @@ async def get_paper_file(
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
 
+    object_key = paper_object_key(paper.file_path)
+    if settings.oss_direct_download_enabled and oss_object_exists(object_key):
+        content = download_oss_bytes(object_key)
+        if content:
+            return Response(
+                content=content,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"inline; filename*=UTF-8''{quote(paper.file_name)}",
+                    "Cache-Control": "private, max-age=300",
+                },
+            )
+
     actual_file = _resolve_paper_file(paper.file_path)
     if not actual_file or not actual_file.exists():
         raise HTTPException(status_code=404, detail="论文文件已丢失。")
@@ -1668,6 +2281,63 @@ async def get_paper_file(
         filename=paper.file_name,
         media_type="application/pdf",
     )
+
+
+@router.get("/{paper_id}/pages/{page_number}/image")
+def get_paper_page_image(
+    paper_id: int,
+    page_number: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    scale: float = 2.0,
+):
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="论文不存在。")
+
+    actual_file = _resolve_paper_file(paper.file_path)
+    if not actual_file or not actual_file.exists():
+        raise HTTPException(status_code=404, detail="论文文件已丢失。")
+
+    zoom = max(0.5, min(float(scale or 2.0), 3.0))
+    object_key = page_image_object_key(paper.file_path, page_number, zoom)
+    if settings.oss_page_image_cache_enabled and oss_object_exists(object_key):
+        content = download_oss_bytes(object_key)
+        if content:
+            return Response(
+                content=content,
+                media_type="image/png",
+                headers={
+                    "Cache-Control": "private, max-age=86400",
+                },
+            )
+
+    try:
+        with fitz.open(actual_file) as document:
+            if page_number < 1 or page_number > document.page_count:
+                raise HTTPException(status_code=404, detail="论文页码不存在。")
+
+            page = document[page_number - 1]
+            pixmap = page.get_pixmap(
+                matrix=fitz.Matrix(zoom, zoom),
+                alpha=False,
+                annots=False,
+            )
+            content = pixmap.tobytes("png")
+            if settings.oss_page_image_cache_enabled:
+                upload_oss_bytes(content, object_key, content_type="image/png")
+            return Response(
+                content,
+                media_type="image/png",
+                headers={
+                    "Cache-Control": "private, max-age=86400",
+                    "X-Paper-Page-Count": str(document.page_count),
+                },
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"页面图片渲染失败：{exc}") from exc
 
 
 @router.get("/{paper_id}/download/pdf")
@@ -1703,6 +2373,8 @@ def download_paper_pdf(
             filename=paper.file_name,
             media_type="application/pdf",
         )
+
+    ensure_notes_export_allowed(db, current_user.id)
 
     try:
         content = _render_annotated_pdf(actual_file, annotations, ink_annotations)
@@ -1741,6 +2413,8 @@ def download_paper_word(
         .where(InkAnnotation.paper_id == paper_id, InkAnnotation.user_id == current_user.id)
         .order_by(InkAnnotation.page_number, InkAnnotation.id)
     ).all()
+
+    ensure_notes_export_allowed(db, current_user.id)
 
     try:
         content = _build_annotated_docx(paper, actual_file, annotations, ink_annotations)
@@ -1790,6 +2464,8 @@ def update_paper(
         paper.keywords = payload.keywords
     if payload.doi is not None:
         paper.doi = payload.doi
+    if payload.arxiv_id is not None:
+        paper.arxiv_id = payload.arxiv_id
     if payload.page_count is not None:
         paper.page_count = payload.page_count
 
@@ -1852,4 +2528,6 @@ def _resolve_paper_file(file_url: str) -> Path | None:
         return None
     if root not in resolved.parents:
         return None
+    if not resolved.exists():
+        download_oss_file(paper_object_key(file_url), resolved)
     return resolved

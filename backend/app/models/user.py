@@ -70,6 +70,19 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    memberships: Mapped[list["UserMembership"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        order_by="UserMembership.expires_at.desc()",
+    )
+    usage_counters: Mapped[list["UsageCounter"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    feedback_tickets: Mapped[list["FeedbackTicket"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class UserProfile(Base):

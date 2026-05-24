@@ -18,6 +18,7 @@ from app.schemas.reading_record import (
     ReadingRecordSyncPayload,
     ReadingStatsResponse,
 )
+from app.services.annotation_metrics import count_effective_annotations
 
 router = APIRouter(prefix="/reading-records", tags=["reading-records"])
 
@@ -160,11 +161,38 @@ def record_reading(
 
     opened_at = payload.opened_at or _now_utc()
 
+    duration_seconds = max(0, int(payload.duration_seconds or 0))
+    dup_window_start = opened_at - timedelta(seconds=2)
+    dup_window_end = opened_at + timedelta(seconds=2)
+    existing_record = db.scalar(
+        select(ReadingRecord)
+        .where(
+            ReadingRecord.user_id == current_user.id,
+            ReadingRecord.paper_id == payload.paper_id,
+            ReadingRecord.opened_at >= dup_window_start,
+            ReadingRecord.opened_at <= dup_window_end,
+        )
+        .order_by(ReadingRecord.opened_at.desc())
+    )
+    if existing_record:
+        existing_record.duration_seconds = max(
+            int(existing_record.duration_seconds or 0),
+            duration_seconds,
+        )
+        paper.last_viewed_at = max(
+            _as_utc(paper.last_viewed_at) or opened_at,
+            _as_utc(opened_at) or opened_at,
+        )
+        db.add(existing_record)
+        db.add(paper)
+        db.commit()
+        return {"id": existing_record.id, "message": "duplicate"}
+
     record = ReadingRecord(
         user_id=current_user.id,
         paper_id=payload.paper_id,
         opened_at=opened_at,
-        duration_seconds=max(0, int(payload.duration_seconds or 0)),
+        duration_seconds=duration_seconds,
     )
     db.add(record)
 
@@ -468,10 +496,10 @@ def get_reading_dashboard(
         for name, count in sorted(folder_distribution_map.items(), key=lambda item: (-item[1], item[0]))[:6]
     ]
 
-    text_annotation_query = select(func.count(Annotation.id)).where(Annotation.user_id == current_user.id)
+    text_annotation_query = select(Annotation).where(Annotation.user_id == current_user.id)
     if timeframe_start_utc is not None:
         text_annotation_query = text_annotation_query.where(Annotation.created_at >= timeframe_start_utc)
-    text_annotation_count = db.scalar(text_annotation_query) or 0
+    text_annotation_count = count_effective_annotations(db.scalars(text_annotation_query).all())
 
     ink_annotation_query = select(func.count(InkAnnotation.id)).where(InkAnnotation.user_id == current_user.id)
     if timeframe_start_utc is not None:

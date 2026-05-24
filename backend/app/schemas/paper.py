@@ -1,8 +1,35 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+
+
+PAPER_TEXT_LIMITS = {
+    "title": 300,
+    "translated_title": 300,
+    "author": 200,
+    "subject": 300,
+    "keywords": 300,
+    "creator": 200,
+    "producer": 200,
+    "creation_date": 50,
+    "modification_date": 50,
+    "doi": 200,
+    "arxiv_id": 80,
+}
+
+
+def compact_paper_text(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip()
 
 
 class FolderCreate(BaseModel):
@@ -49,6 +76,7 @@ class PaperResponse(BaseModel):
     creation_date: str | None = None
     modification_date: str | None = None
     doi: str | None = None
+    arxiv_id: str | None = None
     page_count: int = 0
     last_viewed_at: str | None = None
     created_at: str | None = None
@@ -71,26 +99,54 @@ class PaperUpdate(BaseModel):
     folder_id: int | None = Field(default=None)
     last_viewed_at: bool = False
     title: str | None = Field(default=None, max_length=300)
-    translated_title: str | None = None
-    author: str | None = None
-    subject: str | None = None
-    keywords: str | None = None
-    doi: str | None = None
+    translated_title: str | None = Field(default=None, max_length=300)
+    author: str | None = Field(default=None, max_length=200)
+    subject: str | None = Field(default=None, max_length=300)
+    keywords: str | None = Field(default=None, max_length=300)
+    doi: str | None = Field(default=None, max_length=200)
+    arxiv_id: str | None = Field(default=None, max_length=80)
     page_count: int | None = None
+
+    @field_validator("title", "translated_title", "author", "subject", "keywords", "doi", "arxiv_id", mode="before")
+    @classmethod
+    def normalize_text_field(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return compact_paper_text(value, PAPER_TEXT_LIMITS.get(info.field_name, 300))
 
 
 class PaperMetadata(BaseModel):
-    title: str = ""
-    translated_title: str | None = None
-    author: str | None = None
-    subject: str | None = None
-    keywords: str | None = None
-    creator: str | None = None
-    producer: str | None = None
-    creation_date: str | None = None
-    modification_date: str | None = None
-    doi: str | None = None
+    title: str = Field(default="", max_length=300)
+    translated_title: str | None = Field(default=None, max_length=300)
+    author: str | None = Field(default=None, max_length=200)
+    subject: str | None = Field(default=None, max_length=300)
+    keywords: str | None = Field(default=None, max_length=300)
+    creator: str | None = Field(default=None, max_length=200)
+    producer: str | None = Field(default=None, max_length=200)
+    creation_date: str | None = Field(default=None, max_length=50)
+    modification_date: str | None = Field(default=None, max_length=50)
+    doi: str | None = Field(default=None, max_length=200)
+    arxiv_id: str | None = Field(default=None, max_length=80)
     page_count: int = 0
+
+    @field_validator(
+        "title",
+        "translated_title",
+        "author",
+        "subject",
+        "keywords",
+        "creator",
+        "producer",
+        "creation_date",
+        "modification_date",
+        "doi",
+        "arxiv_id",
+        mode="before",
+    )
+    @classmethod
+    def normalize_text_field(cls, value: str | None, info: ValidationInfo) -> str | None:
+        text = compact_paper_text(value, PAPER_TEXT_LIMITS.get(info.field_name, 300))
+        if info.field_name == "title":
+            return text or ""
+        return text
 
 
 class FullTranslationBlock(BaseModel):
@@ -103,6 +159,7 @@ class FullTranslationBlock(BaseModel):
     font_size: float = 12
     font_weight: int = 400
     align: str = Field(default="left", max_length=20)
+    column: str = Field(default="full", max_length=16)
     skip_translate: bool = False
     translate_policy: str = Field(default="translate", max_length=24)
     status: str = Field(default="pending", max_length=24)
@@ -114,6 +171,7 @@ class FullTranslationPage(BaseModel):
     page_number: int = Field(ge=1)
     width: float = Field(gt=0)
     height: float = Field(gt=0)
+    layout: dict[str, Any] = Field(default_factory=dict)
     blocks: list[FullTranslationBlock] = Field(default_factory=list)
 
 
@@ -125,7 +183,7 @@ class FullTranslationStartRequest(BaseModel):
 
 
 class FullTranslationResponse(BaseModel):
-    status: Literal["idle", "running", "completed", "error", "cancelled"] = "idle"
+    status: Literal["idle", "running", "completed", "partial_failed", "error", "cancelled"] = "idle"
     source_hash: str = ""
     pages: list[dict[str, Any]] = Field(default_factory=list)
     completed_units: int = 0

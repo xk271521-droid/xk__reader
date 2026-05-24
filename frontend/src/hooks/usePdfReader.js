@@ -2,6 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getStoredAuthToken } from '../services/authApi'
 import { createPdfLoadingTask } from '../services/pdfjsClient'
 import {
+  readReadingSessionSnapshot,
+  removeReadingSessionSnapshot,
+  saveReadingSessionSnapshot,
+} from '../components/reader/readingSessionStorage'
+import {
+  buildImportProgress,
+  createDuplicateImportConflict,
+  createImportFailureConflict,
+  resolveImportTargetFolderId,
+} from '../components/home/importWorkflowModel'
+import {
+  mergeImportedServerPaper,
+  shouldRefreshImportedMetadata,
+} from '../components/home/importMetadataModel'
+import {
   createFolder as apiCreateFolder,
   deleteFolder as apiDeleteFolder,
   deletePaper as apiDeletePaper,
@@ -16,6 +31,7 @@ import {
   permanentlyDeletePaper as apiPermanentlyDeletePaper,
   recordReadingEvent,
   renameFolder as apiRenameFolder,
+  refreshPaperMetadata as apiRefreshPaperMetadata,
   restorePaperFromTrash as apiRestorePaperFromTrash,
   syncReadingRecords,
   updateReadingDuration,
@@ -37,6 +53,7 @@ const EMPTY_METADATA = {
   creationDate: '',
   modificationDate: '',
   doi: '',
+  arxivId: '',
   fileSize: '',
   pageCount: 0,
 }
@@ -68,8 +85,129 @@ function normalizePdfDate(rawDate) {
   return [year, month, day].filter(Boolean).join('-')
 }
 
+function cleanMetadataText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim()
+}
+
 function findDoi(text) {
-  return text.match(/\b10\.\d{4,9}\/[-._;()/:A-Z0-9]+/i)?.[0] ?? ''
+  return (text.match(/\b10\.\d{4,9}\/[-._;()/:A-Z0-9]+/i)?.[0] ?? '').replace(/[),.;]+$/, '')
+}
+
+function findArxivId(text) {
+  const match = String(text || '').match(/\b(?:arXiv:\s*)?(\d{4}\.\d{4,5})(v\d+)?\b/i)
+  if (!match) return ''
+  return `${match[1]}${match[2] || ''}`
+}
+
+function isWeakMetadataTitle(title, fileName = '') {
+  const cleanedTitle = cleanMetadataText(title)
+  const cleanedFile = cleanMetadataText(fileName).replace(/\.pdf$/i, '')
+  if (!cleanedTitle) return true
+  if (cleanedFile && cleanedTitle.toLowerCase() === cleanedFile.toLowerCase()) return true
+  if (/^\d{4}\.\d{4,5}(v\d+)?$/i.test(cleanedTitle)) return true
+  if (/^arxiv[:\s-]*\d{4}\.\d{4,5}(v\d+)?$/i.test(cleanedTitle)) return true
+  return false
+}
+
+function isFrontMatterNoise(line) {
+  return (
+    /^arxiv:/i.test(line)
+    || /^\d{4}\.\d{4,5}(v\d+)?\b/i.test(line)
+    || /^doi\b/i.test(line)
+    || /^https?:\/\//i.test(line)
+    || /^submitted\b/i.test(line)
+    || /^published\b/i.test(line)
+    || /^preprint\b/i.test(line)
+    || /^copyright\b/i.test(line)
+    || /^\d+$/.test(line)
+  )
+}
+
+function isLikelyAffiliationLine(line) {
+  return /\b(university|institute|department|school|college|laboratory|lab|academy|google|microsoft|facebook|meta|openai|research|@)\b/i.test(line)
+}
+
+function isLikelyAuthorLine(line) {
+  if (!line || isLikelyAffiliationLine(line)) return false
+  const separators = (line.match(/[,;]/g) || []).length
+  const hasAnd = /\band\b/i.test(line)
+  const capitalizedWords = line.match(/\b[A-Z][A-Za-z.'-]{1,}\b/g) || []
+  const titleVocabulary = /\b(algorithm|analysis|approach|based|benchmark|dataset|detection|estimation|framework|learning|method|model|neural|network|networks|recognition|survey|system|towards?|using|with|via|for|of)\b/i
+  if (capitalizedWords.length < 2 || line.length > 160) return false
+  if (separators > 0 || hasAnd) return true
+  return capitalizedWords.length <= 6 && !/[.!?]$/.test(line) && !titleVocabulary.test(line)
+}
+
+function extractAbstractFromLines(lines, abstractIndex) {
+  if (abstractIndex < 0) return ''
+  const chunks = []
+  const first = lines[abstractIndex].replace(/^abstract[\s.:-]*/i, '').trim()
+  if (first) chunks.push(first)
+  for (let index = abstractIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (/^(keywords|index terms|ccs concepts)\b/i.test(line)) break
+    if (/^(\d+\.?\s*)?(introduction|1\s+introduction)\b/i.test(line)) break
+    chunks.push(line)
+    if (chunks.join(' ').length > 1200) break
+  }
+  return cleanMetadataText(chunks.join(' ')).slice(0, 1200)
+}
+
+function extractKeywordsFromLines(lines) {
+  const index = lines.findIndex((line) => /^(keywords|index terms)\b/i.test(line))
+  if (index < 0) return ''
+  const first = lines[index].replace(/^(keywords|index terms)[\s.:-]*/i, '').trim()
+  const next = lines[index + 1] && !/^(abstract|introduction)\b/i.test(lines[index + 1])
+    ? lines[index + 1]
+    : ''
+  return cleanMetadataText([first, next].filter(Boolean).join(' ')).slice(0, 400)
+}
+
+function extractFrontMatterHints(firstPagesText, info, file) {
+  const rawText = [firstPagesText, info.Title, info.Subject, info.Keywords, file.name].filter(Boolean).join('\n')
+  const lines = firstPagesText
+    .split(/\n+/)
+    .map(cleanMetadataText)
+    .filter(Boolean)
+  const abstractIndex = lines.findIndex((line) => /^abstract\b/i.test(line))
+  const arxivId = findArxivId(rawText)
+  const arxivCategory = rawText.match(/\[([a-z-]+\.[A-Z]{2}(?:\.[A-Z]{2})?)\]/)?.[1] || ''
+  const frontMatter = lines
+    .slice(0, abstractIndex >= 0 ? abstractIndex : Math.min(lines.length, 18))
+    .filter((line) => !isFrontMatterNoise(line))
+
+  let title = ''
+  let titleEndIndex = -1
+  for (let index = 0; index < frontMatter.length; index += 1) {
+    const line = frontMatter[index]
+    if (title && isLikelyAuthorLine(line)) break
+    if (title && isLikelyAffiliationLine(line)) break
+    title = [title, line].filter(Boolean).join(' ')
+    titleEndIndex = index
+    if (title.length > 24 && /[.!?]$/.test(line)) break
+    if (title.length > 160) break
+  }
+
+  const authorLines = []
+  for (let index = titleEndIndex + 1; index < frontMatter.length; index += 1) {
+    const line = frontMatter[index]
+    if (isLikelyAffiliationLine(line)) break
+    if (isLikelyAuthorLine(line)) {
+      authorLines.push(line)
+      if (authorLines.length >= 3) break
+    } else if (authorLines.length > 0) {
+      break
+    }
+  }
+
+  return {
+    title: cleanMetadataText(title).slice(0, 300),
+    author: cleanMetadataText(authorLines.join('; ')).slice(0, 500),
+    subject: extractAbstractFromLines(lines, abstractIndex),
+    keywords: extractKeywordsFromLines(lines) || arxivCategory,
+    doi: findDoi(rawText),
+    arxivId,
+  }
 }
 
 async function fetchCrossrefMetadata(doi) {
@@ -91,6 +229,7 @@ async function fetchCrossrefMetadata(doi) {
           .filter(Boolean)
           .join('; ') || '',
       subject: msg['container-title']?.[0] || '',
+      keywords: Array.isArray(msg.subject) ? msg.subject.join('; ') : '',
     }
   } catch {
     return null
@@ -171,6 +310,9 @@ function createEmptyPaperState(file, paperId, folderId, extra = {}) {
 function createEmptyPaperFromServer(serverPaper) {
   const now = Date.now()
   const serverFileUrl = getPaperFileUrl(serverPaper.id)
+  const restoredSession = readReadingSessionSnapshot(String(serverPaper.id), undefined, {
+    totalPages: serverPaper.page_count || 0,
+  })
 
   return {
     id: String(serverPaper.id),
@@ -182,9 +324,9 @@ function createEmptyPaperFromServer(serverPaper) {
       ? Date.parse(serverPaper.last_viewed_at)
       : now,
     pdfDocument: null,
-    pageNumber: 1,
+    pageNumber: restoredSession?.pageNumber || 1,
     totalPages: serverPaper.page_count || 0,
-    scale: DEFAULT_SCALE,
+    scale: restoredSession?.scale || DEFAULT_SCALE,
     isLoading: false,
     error: '',
     pageMetrics: [],
@@ -199,10 +341,31 @@ function createEmptyPaperFromServer(serverPaper) {
       creationDate: serverPaper.creation_date || '',
       modificationDate: serverPaper.modification_date || '',
       doi: serverPaper.doi || '',
+      arxivId: serverPaper.arxiv_id || '',
       fileSize: serverPaper.file_size,
       pageCount: serverPaper.page_count,
     },
     _serverFileUrl: serverFileUrl,
+  }
+}
+
+function buildMetadataFromServerPaper(serverPaper, fallback = {}) {
+  return {
+    ...EMPTY_METADATA,
+    ...fallback,
+    title: serverPaper.title || fallback.title || serverPaper.file_name?.replace(/\.pdf$/i, '') || '',
+    translatedTitle: serverPaper.translated_title || fallback.translatedTitle || '',
+    author: serverPaper.author || '',
+    subject: serverPaper.subject || '',
+    keywords: serverPaper.keywords || '',
+    creator: serverPaper.creator || fallback.creator || '',
+    producer: serverPaper.producer || fallback.producer || '',
+    creationDate: serverPaper.creation_date || fallback.creationDate || '',
+    modificationDate: serverPaper.modification_date || fallback.modificationDate || '',
+    doi: serverPaper.doi || '',
+    arxivId: serverPaper.arxiv_id || fallback.arxivId || '',
+    fileSize: serverPaper.file_size || fallback.fileSize || '',
+    pageCount: serverPaper.page_count || fallback.pageCount || 0,
   }
 }
 
@@ -221,6 +384,35 @@ function normalizeTrashPaper(serverPaper) {
   }
 }
 
+function buildTextLines(textContent) {
+  const positionedItems = (textContent?.items || [])
+    .map((item) => ({
+      text: cleanMetadataText(item?.str),
+      x: Number(item?.transform?.[4] || 0),
+      y: Number(item?.transform?.[5] || 0),
+    }))
+    .filter((item) => item.text)
+    .sort((left, right) => {
+      if (Math.abs(right.y - left.y) > 3) return right.y - left.y
+      return left.x - right.x
+    })
+
+  const lines = []
+  for (const item of positionedItems) {
+    const current = lines[lines.length - 1]
+    if (!current || Math.abs(current.y - item.y) > 3) {
+      lines.push({ y: item.y, items: [item] })
+    } else {
+      current.items.push(item)
+    }
+  }
+
+  return lines
+    .map((line) => line.items.sort((left, right) => left.x - right.x).map((item) => item.text).join(' '))
+    .map(cleanMetadataText)
+    .filter(Boolean)
+}
+
 async function extractFirstPagesText(documentProxy, maxPages = 5) {
   const pageCount = Math.min(documentProxy.numPages, maxPages)
   const chunks = []
@@ -228,19 +420,28 @@ async function extractFirstPagesText(documentProxy, maxPages = 5) {
   for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
     const page = await documentProxy.getPage(pageNumber)
     const textContent = await page.getTextContent()
-    chunks.push(textContent.items.map((item) => item.str).join(' '))
+    chunks.push(buildTextLines(textContent).join('\n'))
   }
 
   return chunks.join('\n')
 }
 
-async function extractFullText(documentProxy, maxPages = 200) {
+async function extractFullText(documentProxy, maxPages = 80, maxChars = 50000) {
   const pageCount = Math.min(documentProxy.numPages, maxPages)
   const chunks = []
+  let totalChars = 0
   for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
     const page = await documentProxy.getPage(pageNumber)
     const textContent = await page.getTextContent()
-    chunks.push(textContent.items.map((item) => item.str).join(' '))
+    const text = textContent.items.map((item) => item.str || '').join(' ')
+    const cleanText = text.trim()
+    if (cleanText) {
+      chunks.push(`[第 ${pageNumber} 页]\n${cleanText}`)
+      totalChars += text.length
+      if (totalChars >= maxChars) {
+        break
+      }
+    }
   }
   return chunks.join('\n')
 }
@@ -249,17 +450,24 @@ async function extractPaperMetadata(documentProxy, file) {
   const metadataResult = await documentProxy.getMetadata().catch(() => null)
   const info = metadataResult?.info ?? {}
   const firstPagesText = await extractFirstPagesText(documentProxy).catch(() => '')
+  const hints = extractFrontMatterHints(firstPagesText, info, file)
+  const titleFromMetadata = cleanMetadataText(info.Title)
+  const fileTitle = file.name.replace(/\.pdf$/i, '')
+  const title = isWeakMetadataTitle(titleFromMetadata, file.name)
+    ? hints.title || titleFromMetadata || fileTitle
+    : titleFromMetadata
 
   return {
-    title: info.Title || file.name.replace(/\.pdf$/i, ''),
-    author: info.Author || '',
-    subject: info.Subject || '',
-    keywords: info.Keywords || '',
-    creator: info.Creator || '',
-    producer: info.Producer || '',
+    title,
+    author: cleanMetadataText(info.Author) || hints.author,
+    subject: cleanMetadataText(info.Subject) || hints.subject,
+    keywords: cleanMetadataText(info.Keywords) || hints.keywords,
+    creator: cleanMetadataText(info.Creator),
+    producer: cleanMetadataText(info.Producer),
     creationDate: normalizePdfDate(info.CreationDate),
     modificationDate: normalizePdfDate(info.ModDate),
-    doi: findDoi(firstPagesText),
+    doi: hints.doi,
+    arxivId: hints.arxivId,
     fileSize: formatFileSize(file.size),
     pageCount: documentProxy.numPages,
   }
@@ -309,15 +517,17 @@ export function usePdfReader({ currentUser } = {}) {
   const shouldActivateImportedPaperRef = useRef(true)
   const paperResourcesRef = useRef(new Map())
   const summaryMapRef = useRef(new Map())
+  const summaryIdleHandlesRef = useRef(new Map())
   const fullTextMapRef = useRef(new Map())
   const uncategorizedFolderIdRef = useRef('')
   const lastSyncUserRef = useRef(null)
   const readingSessionsRef = useRef(new Map())
+  const openTabIdsRef = useRef([])
   const [activeView, setActiveView] = useState('home')
   const [papers, setPapers] = useState([])
   const [folders, setFolders] = useState([])
   const [trashPapers, setTrashPapers] = useState([])
-  const [openTabIds, setOpenTabIds] = useState([])
+  const [openTabIds, setOpenTabIdsState] = useState([])
   const [uncategorizedFolderId, setUncategorizedFolderId] = useState('')
   const [recentReadings, setRecentReadings] = useState(getStoredRecentReadings())
   const [importConflict, setImportConflict] = useState(null)
@@ -325,6 +535,18 @@ export function usePdfReader({ currentUser } = {}) {
   const [readingDurationVersion, setReadingDurationVersion] = useState(0)
   const [paperSummaries, setPaperSummaries] = useState({})
   const [paperFullTexts, setPaperFullTexts] = useState({})
+
+  function setOpenTabIds(nextOpenTabIds) {
+    const nextIds = typeof nextOpenTabIds === 'function'
+      ? nextOpenTabIds(openTabIdsRef.current)
+      : nextOpenTabIds
+    openTabIdsRef.current = nextIds
+    setOpenTabIdsState(nextIds)
+  }
+
+  useEffect(() => {
+    openTabIdsRef.current = openTabIds
+  }, [openTabIds])
 
   // ── Cleanup on unmount ──────────────────────────────────
 
@@ -334,6 +556,14 @@ export function usePdfReader({ currentUser } = {}) {
         destroyPaperResources(resource)
       })
       paperResourcesRef.current.clear()
+      summaryIdleHandlesRef.current.forEach((handle) => {
+        if (handle.type === 'idle') {
+          window.cancelIdleCallback?.(handle.id)
+        } else {
+          window.clearTimeout(handle.id)
+        }
+      })
+      summaryIdleHandlesRef.current.clear()
     },
     [],
   )
@@ -386,16 +616,25 @@ export function usePdfReader({ currentUser } = {}) {
       const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000
 
       // Upload local records to server (only within 30 days)
-      const uploadable = localReadings
+      const uploadableByKey = new Map()
+      localReadings
         .filter((r) => r.openedAt > thirtyDaysAgo)
-        .map((r) => ({
-          paper_id: Number(r.paperId),
-          opened_at: new Date(r.openedAt).toISOString(),
-        }))
-        .filter((r) => !Number.isNaN(r.paper_id))
+        .forEach((r) => {
+          const paperId = Number(r.paperId)
+          const openedAt = Number(r.openedAt)
+          if (Number.isNaN(paperId) || Number.isNaN(openedAt)) return
+          const key = `${paperId}_${Math.round(openedAt / 2000)}`
+          if (!uploadableByKey.has(key)) {
+            uploadableByKey.set(key, {
+              paper_id: paperId,
+              opened_at: new Date(openedAt).toISOString(),
+            })
+          }
+        })
+      const uploadable = [...uploadableByKey.values()]
 
       if (uploadable.length > 0) {
-        syncReadingRecords(uploadable).catch(() => {})
+        await syncReadingRecords(uploadable).catch(() => null)
       }
 
       // Pull server stats + records
@@ -492,10 +731,11 @@ export function usePdfReader({ currentUser } = {}) {
     [openTabIds, paperMap],
   )
 
-  const isImporting = useMemo(
-    () => papers.some((p) => p.isLoading),
+  const importStatus = useMemo(
+    () => buildImportProgress(papers.filter((paper) => paper.isLoading)),
     [papers],
   )
+  const isImporting = importStatus.isImporting
 
   const activePaper = activeView === 'home' ? null : paperMap.get(activeView) ?? null
 
@@ -535,6 +775,11 @@ export function usePdfReader({ currentUser } = {}) {
     )
   }
 
+  function persistReadingSessionView(paperId, patch = {}) {
+    if (!paperId) return
+    saveReadingSessionSnapshot(String(paperId), patch)
+  }
+
   function setPaperSummary(paperId, summary) {
     summaryMapRef.current.set(paperId, summary)
     setPaperSummaries((current) => (
@@ -560,6 +805,7 @@ export function usePdfReader({ currentUser } = {}) {
   }
 
   function clearPaperDerivedContent(paperId) {
+    clearScheduledSummarization(paperId)
     summaryMapRef.current.delete(paperId)
     fullTextMapRef.current.delete(paperId)
     setPaperSummaries((current) => {
@@ -574,6 +820,17 @@ export function usePdfReader({ currentUser } = {}) {
       delete next[paperId]
       return next
     })
+  }
+
+  function clearScheduledSummarization(paperId) {
+    const handle = summaryIdleHandlesRef.current.get(paperId)
+    if (!handle) return
+    summaryIdleHandlesRef.current.delete(paperId)
+    if (handle.type === 'idle') {
+      window.cancelIdleCallback?.(handle.id)
+    } else {
+      window.clearTimeout(handle.id)
+    }
   }
 
   function flushReadingDuration(paperId, options = {}) {
@@ -665,6 +922,11 @@ export function usePdfReader({ currentUser } = {}) {
       paperResourcesRef.current.delete(oldId)
       paperResourcesRef.current.set(newId, resource)
     }
+    const summaryHandle = summaryIdleHandlesRef.current.get(oldId)
+    if (summaryHandle) {
+      summaryIdleHandlesRef.current.delete(oldId)
+      summaryIdleHandlesRef.current.set(newId, summaryHandle)
+    }
     if (summaryMapRef.current.has(oldId)) {
       const summary = summaryMapRef.current.get(oldId) ?? ''
       summaryMapRef.current.delete(oldId)
@@ -710,6 +972,11 @@ export function usePdfReader({ currentUser } = {}) {
       pauseReadingSession(activeView)
     }
 
+    const isAlreadyOpen = openTabIdsRef.current.includes(paperId)
+    if (!isAlreadyOpen) {
+      openTabIdsRef.current = [...openTabIdsRef.current, paperId]
+    }
+
     setOpenTabIds((currentIds) =>
       currentIds.includes(paperId) ? currentIds : [...currentIds, paperId],
     )
@@ -721,10 +988,6 @@ export function usePdfReader({ currentUser } = {}) {
       ),
     )
     setActiveView(paperId)
-
-    // Only record reading event if this is a fresh open (not switching tabs)
-    // Uses ref (not state) to avoid stale closure — ref is synced to latest openTabIds every render
-    const isAlreadyOpen = openTabIds.includes(paperId)
 
     // Write to localStorage recent readings
     const folderName = folderMap.get(paper.folderId)?.name || '未分类'
@@ -782,6 +1045,106 @@ export function usePdfReader({ currentUser } = {}) {
       }
     } catch { /* silent */ }
   }
+
+  function scheduleSummarization(paperId, documentProxy) {
+    if (!documentProxy || summaryMapRef.current.has(paperId) || summaryIdleHandlesRef.current.has(paperId)) {
+      return
+    }
+
+    const run = () => {
+      summaryIdleHandlesRef.current.delete(paperId)
+      triggerSummarization(paperId, documentProxy)
+    }
+
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(run, { timeout: 4000 })
+      summaryIdleHandlesRef.current.set(paperId, { type: 'idle', id })
+      return
+    }
+
+    const id = window.setTimeout(run, 1200)
+    summaryIdleHandlesRef.current.set(paperId, { type: 'timeout', id })
+  }
+
+  function buildPaperMetadataUpdate(metadata, options = {}) {
+    const includeEmpty = Boolean(options.includeEmpty)
+    const payload = {}
+    const assignText = (key, value) => {
+      const text = cleanMetadataText(value)
+      if (includeEmpty || text) payload[key] = text
+    }
+    assignText('title', metadata.title)
+    assignText('author', metadata.author)
+    assignText('subject', metadata.subject)
+    assignText('keywords', metadata.keywords)
+    assignText('doi', metadata.doi)
+    assignText('arxiv_id', metadata.arxivId)
+    if (metadata.pageCount) payload.page_count = metadata.pageCount
+    return payload
+  }
+
+  async function savePaperMetadata(paperId, nextMetadata = {}) {
+    const localPaperId = String(paperId || activePaper?.id || '')
+    if (!localPaperId) {
+      throw new Error('当前没有可保存的文献。')
+    }
+
+    const currentPaper = papers.find((paper) => paper.id === localPaperId) || activePaper
+    const mergedMetadata = {
+      ...(currentPaper?.metadata || EMPTY_METADATA),
+      ...nextMetadata,
+      title: cleanMetadataText(nextMetadata.title ?? currentPaper?.metadata?.title),
+      author: cleanMetadataText(nextMetadata.author ?? currentPaper?.metadata?.author),
+      subject: cleanMetadataText(nextMetadata.subject ?? currentPaper?.metadata?.subject),
+      keywords: cleanMetadataText(nextMetadata.keywords ?? currentPaper?.metadata?.keywords),
+      doi: cleanMetadataText(nextMetadata.doi ?? currentPaper?.metadata?.doi),
+      arxivId: cleanMetadataText(nextMetadata.arxivId ?? currentPaper?.metadata?.arxivId),
+    }
+
+    const serverPaperId = Number(localPaperId)
+    if (!getStoredAuthToken() || Number.isNaN(serverPaperId)) {
+      updatePaper(localPaperId, (paper) => ({
+        metadata: { ...paper.metadata, ...mergedMetadata },
+      }))
+      return { ok: true, metadata: mergedMetadata }
+    }
+
+    const serverPaper = await apiUpdatePaper(
+      serverPaperId,
+      buildPaperMetadataUpdate(mergedMetadata, { includeEmpty: true }),
+    )
+    const serverMetadata = buildMetadataFromServerPaper(serverPaper, mergedMetadata)
+    updatePaper(localPaperId, (paper) => ({
+      fileName: serverPaper.file_name || paper.fileName,
+      folderId: serverPaper.folder_id ? String(serverPaper.folder_id) : paper.folderId,
+      totalPages: serverPaper.page_count || paper.totalPages,
+      metadata: { ...paper.metadata, ...serverMetadata },
+    }))
+    return { ok: true, metadata: serverMetadata }
+  }
+
+  async function refreshPaperMetadata(paperId) {
+    const localPaperId = String(paperId || activePaper?.id || '')
+    if (!localPaperId) {
+      throw new Error('当前没有可重新识别的文献。')
+    }
+    const serverPaperId = Number(localPaperId)
+    if (!getStoredAuthToken() || Number.isNaN(serverPaperId)) {
+      throw new Error('请登录后再重新识别元数据。')
+    }
+
+    const serverPaper = await apiRefreshPaperMetadata(serverPaperId)
+    const currentPaper = papers.find((paper) => paper.id === localPaperId) || activePaper
+    const serverMetadata = buildMetadataFromServerPaper(serverPaper, currentPaper?.metadata || EMPTY_METADATA)
+    updatePaper(localPaperId, (paper) => ({
+      fileName: serverPaper.file_name || paper.fileName,
+      folderId: serverPaper.folder_id ? String(serverPaper.folder_id) : paper.folderId,
+      totalPages: serverPaper.page_count || paper.totalPages,
+      metadata: { ...paper.metadata, ...serverMetadata },
+    }))
+    return { ok: true, metadata: serverMetadata }
+  }
+
   async function loadPdfFromUrl(paperId, url) {
     updatePaper(paperId, () => ({ isLoading: true, error: '' }))
 
@@ -841,7 +1204,13 @@ export function usePdfReader({ currentUser } = {}) {
       if (pdfMeta && pdfMeta.doi) {
         const cr = await fetchCrossrefMetadata(pdfMeta.doi)
         if (cr) {
-          metadata = { ...pdfMeta, title: cr.title || pdfMeta.title, author: cr.author || pdfMeta.author, subject: cr.subject || pdfMeta.subject }
+          metadata = {
+            ...pdfMeta,
+            title: cr.title || pdfMeta.title,
+            author: cr.author || pdfMeta.author,
+            subject: pdfMeta.subject || cr.subject,
+            keywords: pdfMeta.keywords || cr.keywords || '',
+          }
           const sid = Number(paperId)
           if (!Number.isNaN(sid)) {
             apiUpdatePaper(sid, { author: metadata.author, subject: metadata.subject || undefined }).catch(function(){})
@@ -849,16 +1218,29 @@ export function usePdfReader({ currentUser } = {}) {
         }
       }
 
-      updatePaper(paperId, () => ({
-        isLoading: false,
-        error: '',
-        pdfDocument: documentProxy,
-        totalPages: documentProxy.numPages,
-        ...(metadata ? { metadata } : {}),
-        ...(pageMetrics.length ? { pageMetrics } : {}),
-      }))
+      updatePaper(paperId, (paper) => {
+        const restoredSession = readReadingSessionSnapshot(String(paperId), undefined, {
+          totalPages: documentProxy.numPages,
+        })
+        return {
+          isLoading: false,
+          error: '',
+          pdfDocument: documentProxy,
+          pageNumber: restoredSession?.pageNumber || Math.min(paper.pageNumber || 1, documentProxy.numPages),
+          scale: restoredSession?.scale || paper.scale || DEFAULT_SCALE,
+          totalPages: documentProxy.numPages,
+          ...(metadata ? { metadata } : {}),
+          ...(pageMetrics.length ? { pageMetrics } : {}),
+        }
+      })
 
-      triggerSummarization(paperId, documentProxy)
+      const serverPaperId = Number(paperId)
+      if (!Number.isNaN(serverPaperId) && documentProxy.numPages > 0) {
+        const updatePayload = buildPaperMetadataUpdate(metadata || {})
+        apiUpdatePaper(serverPaperId, updatePayload).catch(() => {})
+      }
+
+      scheduleSummarization(paperId, documentProxy)
     } catch (error) {
       console.error('Failed to load server PDF', { paperId, url, error })
       updatePaper(paperId, () => ({
@@ -874,7 +1256,7 @@ export function usePdfReader({ currentUser } = {}) {
     }
 
     const serverFolderId = Number(targetFolderId) || undefined
-    const serverPaper = await uploadPaper(
+    let serverPaper = await uploadPaper(
       file,
       {
         title: metadata.title,
@@ -882,10 +1264,15 @@ export function usePdfReader({ currentUser } = {}) {
         subject: metadata.subject || null,
         keywords: metadata.keywords || null,
         doi: metadata.doi || null,
+        arxiv_id: metadata.arxivId || null,
         page_count: metadata.pageCount,
       },
       serverFolderId,
     )
+    if (shouldRefreshImportedMetadata(serverPaper, metadata, file)) {
+      const refreshedPaper = await apiRefreshPaperMetadata(serverPaper.id).catch(() => null)
+      serverPaper = mergeImportedServerPaper(serverPaper, refreshedPaper)
+    }
 
     const newId = String(serverPaper.id)
     const fileUrl = getPaperFileUrl(serverPaper.id)
@@ -899,8 +1286,7 @@ export function usePdfReader({ currentUser } = {}) {
               _serverFileUrl: fileUrl,
               metadata: {
                 ...paper.metadata,
-                translatedTitle:
-                  serverPaper.translated_title || paper.metadata.translatedTitle || '',
+                ...buildMetadataFromServerPaper(serverPaper, paper.metadata),
               },
             }
           : paper,
@@ -944,6 +1330,7 @@ export function usePdfReader({ currentUser } = {}) {
   function deletePaper(paperId) {
     flushReadingDuration(paperId, { finalize: true })
     clearPaperDerivedContent(paperId)
+    removeReadingSessionSnapshot(String(paperId))
     const paper = paperMap.get(paperId)
     if (paper) {
       const deletedAt = getNow()
@@ -1032,6 +1419,7 @@ export function usePdfReader({ currentUser } = {}) {
     if (!getStoredAuthToken()) return { ok: false, message: '请先登录' }
     try {
       await apiPermanentlyDeletePaper(Number(paperId))
+      removeReadingSessionSnapshot(String(paperId))
       setTrashPapers((current) => current.filter((paper) => paper.id !== String(paperId)))
       return { ok: true }
     } catch (error) {
@@ -1044,6 +1432,7 @@ export function usePdfReader({ currentUser } = {}) {
     if (!getStoredAuthToken()) return { ok: false, message: '请先登录' }
     try {
       await apiEmptyTrash()
+      trashPapers.forEach((paper) => removeReadingSessionSnapshot(String(paper.id)))
       setTrashPapers([])
       return { ok: true }
     } catch (error) {
@@ -1177,31 +1566,83 @@ export function usePdfReader({ currentUser } = {}) {
     if (importConflict?.conflictType === 'other_folder') {
       assignPaperToFolder(importConflict.existingPaper.id, importConflict.targetFolderId)
     }
+    if (importConflict?.conflictType === 'same_file') {
+      const existingPaper = importConflict.existingPaper
+      if (existingPaper?.id) {
+        if (importConflict.targetFolderId && existingPaper.folderId !== importConflict.targetFolderId) {
+          assignPaperToFolder(existingPaper.id, importConflict.targetFolderId)
+        }
+        activatePaper(existingPaper.id)
+      }
+    }
     setImportConflict(null)
   }
 
   function cancelImportConflict() {
+    if (importConflict?.conflictType === 'failed_import') {
+      discardImportDraft(importConflict.failedPaperId)
+    }
     setImportConflict(null)
+  }
+
+  function discardImportDraft(paperId) {
+    if (!paperId) return
+
+    const resource = paperResourcesRef.current.get(paperId)
+    if (resource) {
+      destroyPaperResources(resource)
+      paperResourcesRef.current.delete(paperId)
+    }
+
+    setOpenTabIds((currentIds) => currentIds.filter((id) => id !== paperId))
+    setActiveView((currentView) => (currentView === paperId ? 'home' : currentView))
+    setPapers((currentPapers) => currentPapers.filter((paper) => paper.id !== paperId))
+  }
+
+  function retryImportConflict() {
+    if (importConflict?.conflictType !== 'failed_import' || !importConflict.file) {
+      return
+    }
+
+    const {
+      file,
+      targetFolderId,
+      shouldActivate,
+      failedPaperId,
+    } = importConflict
+
+    setImportConflict(null)
+    discardImportDraft(failedPaperId)
+    void loadPdfFile(file, targetFolderId, shouldActivate, { ignorePaperId: failedPaperId })
   }
 
   // ── File loading ───────────────────────────────────────
 
-  async function loadPdfFile(file, folderId = '', shouldActivate = true) {
+  async function loadPdfFile(file, folderId = '', shouldActivate = true, options = {}) {
+    const { ignorePaperId = '' } = options
+    const targetFolderId = resolveImportTargetFolderId(folderId, uncategorizedFolderIdRef.current)
     const fingerprint = createFileFingerprint(file)
-    const existingPaper = papers.find((paper) => paper.fingerprint === fingerprint)
+    const existingPaper = papers.find(
+      (paper) => paper.id !== ignorePaperId && paper.fingerprint === fingerprint,
+    )
 
     if (existingPaper) {
-      assignPaperToFolder(existingPaper.id, folderId)
-      if (shouldActivate) {
-        activatePaper(existingPaper.id)
-      }
+      setImportConflict(createDuplicateImportConflict({
+        fileName: file.name,
+        existingPaper,
+        sourceFolderName: folderMap.get(existingPaper.folderId)?.name || '未分类',
+        targetFolderId,
+        shouldActivate,
+      }))
       return
     }
 
     // Check for same-name conflict (different file, same name)
-    const sameNamePaper = papers.find((p) => p.fileName === file.name)
+    const sameNamePaper = papers.find(
+      (paper) => paper.id !== ignorePaperId && paper.fileName === file.name,
+    )
     if (sameNamePaper) {
-      if (sameNamePaper.folderId === folderId) {
+      if (sameNamePaper.folderId === targetFolderId) {
         setImportConflict({
           conflictType: 'same_folder',
           message: `当前文件夹已有同名文献「${file.name}」，不重复导入。`,
@@ -1212,15 +1653,13 @@ export function usePdfReader({ currentUser } = {}) {
           conflictType: 'other_folder',
           file,
           existingPaper: sameNamePaper,
-          targetFolderId: folderId,
+          targetFolderId,
           message: `「${file.name}」已在「${sourceFolderName}」中，是否移入当前文件夹？`,
         })
       }
       return
     }
 
-    // Resolve target folder: use uncategorized if none specified
-    const targetFolderId = folderId || uncategorizedFolderIdRef.current || ''
     const paperId = createPaperId()
     const nextPaper = createEmptyPaperState(file, paperId, targetFolderId)
     setPapers((currentPapers) => [...currentPapers, nextPaper])
@@ -1265,7 +1704,8 @@ export function usePdfReader({ currentUser } = {}) {
             ...metadata,
             title: crossrefData.title || metadata.title,
             author: crossrefData.author || metadata.author,
-            subject: crossrefData.subject || metadata.subject,
+            subject: metadata.subject || crossrefData.subject,
+            keywords: metadata.keywords || crossrefData.keywords || '',
           }
         }
       }
@@ -1280,50 +1720,16 @@ export function usePdfReader({ currentUser } = {}) {
         pageMetrics,
       }))
 
-        triggerSummarization(paperId, documentProxy)
-
-      persistPaperToServer(paperId, file, targetFolderId, metadata).catch(() => {
-        // Upload failed but keep the locally opened paper available.
-      })
-      return
-
-      // ── Step 4: Upload to backend with COMPLETE metadata ──
-      if (getStoredAuthToken()) {
-        const serverFolderId = Number(targetFolderId) || undefined
-
-        uploadPaper(file, {
-          title: metadata.title,
-          author: metadata.author || null,
-          subject: metadata.subject || null,
-          keywords: metadata.keywords || null,
-          doi: metadata.doi || null,
-          page_count: metadata.pageCount,
-        }, serverFolderId)
-          .then((serverPaper) => {
-            const newId = String(serverPaper.id)
-            replacePaperId(paperId, newId)
-            setPapers((currentPapers) =>
-              currentPapers.map((p) =>
-                p.id === newId
-                  ? {
-                      ...p,
-                      fingerprint: createFileFingerprint(file),
-                      _serverFileUrl: getPaperFileUrl(serverPaper.id),
-                      metadata: {
-                        ...p.metadata,
-                        translatedTitle: serverPaper.translated_title || p.metadata.translatedTitle || '',
-                      },
-                    }
-                  : p,
-              ),
-            )
-          })
-          .catch(() => {
-            // Upload failed — paper stays in memory, serverId not set
-          })
-      }
+      persistPaperToServer(paperId, file, targetFolderId, metadata)
+        .then(({ paperId: persistedPaperId }) => {
+          scheduleSummarization(persistedPaperId, documentProxy)
+        })
+        .catch(() => {
+          scheduleSummarization(paperId, documentProxy)
+        })
     } catch (loadError) {
       console.error('Failed to load PDF', loadError)
+      let finalImportError = loadError
       try {
         const { paperId: serverPaperId, fileUrl } = await persistPaperToServer(
           paperId,
@@ -1341,11 +1747,20 @@ export function usePdfReader({ currentUser } = {}) {
         }
       } catch (uploadError) {
         console.error('Failed to upload PDF after local parse error', uploadError)
+        finalImportError = uploadError
       }
+      const failureConflict = createImportFailureConflict({
+        file,
+        targetFolderId,
+        shouldActivate,
+        failedPaperId: paperId,
+        error: finalImportError,
+      })
       updatePaper(paperId, () => ({
         isLoading: false,
-        error: 'PDF 加载失败，请确认文件没有损坏。',
+        error: failureConflict.message,
       }))
+      setImportConflict(failureConflict)
     }
   }
 
@@ -1377,9 +1792,13 @@ export function usePdfReader({ currentUser } = {}) {
       return
     }
 
-    updatePaper(activePaper.id, (paper) => ({
-      scale: clampScale(paper.scale - SCALE_STEP),
-    }))
+    const nextScale = clampScale(activePaper.scale - SCALE_STEP)
+    persistReadingSessionView(activePaper.id, {
+      pageNumber: activePaper.pageNumber,
+      scale: nextScale,
+      totalPages: activePaper.totalPages,
+    })
+    updatePaper(activePaper.id, () => ({ scale: nextScale }))
   }
 
   function zoomIn() {
@@ -1387,16 +1806,24 @@ export function usePdfReader({ currentUser } = {}) {
       return
     }
 
-    updatePaper(activePaper.id, (paper) => ({
-      scale: clampScale(paper.scale + SCALE_STEP),
-    }))
+    const nextScale = clampScale(activePaper.scale + SCALE_STEP)
+    persistReadingSessionView(activePaper.id, {
+      pageNumber: activePaper.pageNumber,
+      scale: nextScale,
+      totalPages: activePaper.totalPages,
+    })
+    updatePaper(activePaper.id, () => ({ scale: nextScale }))
   }
 
   function zoomBy(direction) {
     if (!activePaper) return
-    updatePaper(activePaper.id, (paper) => ({
-      scale: clampScale(paper.scale + direction * SCALE_STEP),
-    }))
+    const nextScale = clampScale(activePaper.scale + direction * SCALE_STEP)
+    persistReadingSessionView(activePaper.id, {
+      pageNumber: activePaper.pageNumber,
+      scale: nextScale,
+      totalPages: activePaper.totalPages,
+    })
+    updatePaper(activePaper.id, () => ({ scale: nextScale }))
   }
 
   function fitToWidth(availableWidth, pageWidth) {
@@ -1404,9 +1831,13 @@ export function usePdfReader({ currentUser } = {}) {
       return
     }
 
-    updatePaper(activePaper.id, () => ({
-      scale: clampScale((availableWidth - 40) / pageWidth),
-    }))
+    const nextScale = clampScale((availableWidth - 40) / pageWidth)
+    persistReadingSessionView(activePaper.id, {
+      pageNumber: activePaper.pageNumber,
+      scale: nextScale,
+      totalPages: activePaper.totalPages,
+    })
+    updatePaper(activePaper.id, () => ({ scale: nextScale }))
   }
 
   function setCurrentPage(pageNumber) {
@@ -1414,6 +1845,11 @@ export function usePdfReader({ currentUser } = {}) {
       return
     }
 
+    persistReadingSessionView(activePaper.id, {
+      pageNumber,
+      scale: activePaper.scale,
+      totalPages: activePaper.totalPages,
+    })
     updatePaper(activePaper.id, (paper) => {
       if (paper.pageNumber === pageNumber) {
         return {}
@@ -1440,6 +1876,7 @@ export function usePdfReader({ currentUser } = {}) {
     goHome,
     handleFileChange,
     importConflict,
+    importStatus,
     isImporting,
     isLoading: activePaper?.isLoading ?? false,
     metadata: activePaper?.metadata ?? EMPTY_METADATA,
@@ -1456,10 +1893,13 @@ export function usePdfReader({ currentUser } = {}) {
     recentReadings,
     readingDurationVersion,
     refreshTrashPapers,
+    refreshPaperMetadata,
     renameFolder,
     resolveImportConflict,
+    retryImportConflict,
     restorePaperFromTrash,
     scale: activePaper?.scale ?? DEFAULT_SCALE,
+    savePaperMetadata,
     setCurrentPage,
     switchToPaper: activatePaper,
     permanentlyDeletePaper,

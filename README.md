@@ -1,61 +1,63 @@
-# Paper Reader MVP
+# Paper Reader
 
-当前版本已经完成项目骨架，并接入了 `pdf.js` 单篇阅读页。
+面向论文阅读、笔记、摘要、文献矩阵和格式检查的前后端项目。
 
-## 目录结构
+## 项目结构
 
 ```text
 codexwork/
-├─ frontend/
-│  ├─ src/
-│  │  ├─ app/            # 页面装配
-│  │  ├─ components/     # 复用组件
-│  │  ├─ hooks/          # 交互逻辑
-│  │  ├─ services/       # 接口请求
-│  │  └─ styles/         # 样式文件
-│  └─ ...
-├─ backend/
-│  ├─ app/
-│  │  ├─ api/            # 路由入口
-│  │  ├─ core/           # 配置
-│  │  ├─ schemas/        # 请求/响应模型
-│  │  └─ services/       # 业务逻辑
-│  ├─ main.py            # uvicorn 兼容入口
-│  └─ requirements.txt
-└─ README.md
+├─ frontend/              # Vite + React 前端
+│  ├─ src/app/            # 应用装配入口
+│  ├─ src/components/     # 页面和可复用组件
+│  ├─ src/hooks/          # 阅读器和交互 hooks
+│  ├─ src/services/       # API 请求封装
+│  └─ src/styles/         # 全局和页面样式
+├─ backend/               # FastAPI 后端
+│  ├─ app/api/routes/     # API 路由
+│  ├─ app/models/         # 数据模型
+│  ├─ app/schemas/        # 请求/响应模型
+│  ├─ app/services/       # 业务逻辑
+│  └─ tests/              # 后端测试
+└─ check-before-deploy.ps1 # 部署前检查
 ```
 
-## 运行方式
+## 本地运行
 
-### 1. 启动后端
+### 后端
 
 ```powershell
-cd D:\codexwork\backend
+cd backend
 python -m pip install -r requirements.txt
 python -m uvicorn main:app --reload
 ```
 
-### 2. 启动前端
+### 前端
 
 ```powershell
-cd D:\codexwork\frontend
+cd frontend
 npm install
 npm run dev
 ```
 
-## 当前已完成
+## 常用检查
 
-- React 单篇阅读页
-- `pdf.js` 本地 PDF 上传与渲染
-- 上一页 / 下一页 / 页码 / 缩放
-- 右侧固定翻译解释面板
-- FastAPI 健康检查接口
-- 划词后自动请求解释接口
-- mock 翻译与术语解释返回
-- 前后端按模块拆分，便于继续扩展
+```powershell
+# 后端测试
+cd backend
+python -m unittest discover -s tests
 
-## 下一步
+# 前端测试和构建
+cd frontend
+npm test
+npm run build
 
-- 保存笔记和高亮
-- 实现批注模式
-- 接入真实 AI 翻译解释服务
+# 部署前整体验证
+cd ..
+.\check-before-deploy.ps1
+```
+
+## 改进优先级
+
+1. 先保证质量门禁可一键运行：测试、构建、路由 smoke check、敏感信息扫描。
+2. 再清理技术债：ESLint 错误、大组件、大 CSS、重复请求处理。
+3. 最后做深层优化：PDF 渲染、文献矩阵长任务、数据库迁移、接口限流和监控。

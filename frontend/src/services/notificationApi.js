@@ -1,4 +1,5 @@
 import { getStoredAuthToken } from './authApi'
+import { resolveApiErrorMessage } from '../utils/errorMessage'
 
 async function parseJsonResponse(response) {
   let payload = null
@@ -9,7 +10,7 @@ async function parseJsonResponse(response) {
   }
 
   if (!response.ok) {
-    const detail = typeof payload?.detail === 'string' ? payload.detail : '请求失败，请稍后再试。'
+    const detail = resolveApiErrorMessage(payload, '通知请求失败，请稍后再试。')
     const error = new Error(detail)
     error.status = response.status
     throw error

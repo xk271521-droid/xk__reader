@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 PaperSummaryType = Literal["overview", "annotations", "review", "reproduction", "meeting"]
-PaperSummaryStatus = Literal["idle", "running", "generated", "failed"]
+PaperSummaryStatus = Literal["idle", "queued", "running", "generated", "failed"]
 
 
 class PaperSummaryEvidence(BaseModel):

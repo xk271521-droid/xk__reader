@@ -4,6 +4,8 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.schemas.membership import MembershipFeatures, MembershipInfo, MembershipQuotaUsage
+
 
 PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
 SMS_CODE_PATTERN = re.compile(r"^\d{6}$")
@@ -172,6 +174,9 @@ class UserResponse(BaseModel):
     discipline: str
     education_verified: bool
     is_admin: bool = False
+    membership: MembershipInfo
+    usage: dict[str, MembershipQuotaUsage]
+    features: MembershipFeatures
 
 
 class UpdateProfileRequest(BaseModel):

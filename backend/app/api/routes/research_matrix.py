@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-import subprocess
-import sys
-from pathlib import Path
-
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -23,14 +19,23 @@ from app.schemas.research_matrix import (
     ResearchMatrixOutlineUpdateRequest,
     ResearchMatrixPrepareDraftSourcesRequest,
     ResearchMatrixRefreshRequest,
+    ResearchMatrixRetryPaperRequest,
     ResearchMatrixRunListResponse,
     ResearchMatrixRunPaperUpdateRequest,
     ResearchMatrixRunResponse,
     ResearchMatrixRunUpdateRequest,
 )
-from app.services.paper_summary import is_summary_stale, run_paper_summary_task
+from app.services.paper_summary import is_summary_stale, spawn_paper_summary_worker
+from app.services.membership import (
+    QUOTA_MATRIX_RUN_MONTHLY,
+    consume_quota,
+    should_start_matrix_immediately,
+    should_start_summary_immediately,
+)
 from app.services.research_matrix import (
     DELETED_SOURCE_PAPER_MESSAGE,
+    DRAFT_REQUIRED_SUMMARY_TYPES,
+    RUN_STAGE_LABELS,
     WORKER_MAX_RETRIES,
     build_dashboard_snapshot,
     build_run_source_state_map,
@@ -39,35 +44,83 @@ from app.services.research_matrix import (
     get_owned_papers,
     inspect_run_source_state,
     is_run_worker_stale,
+    normalize_run_runtime_state,
     prepare_missing_run_draft_sources,
     rename_matrix_run,
     refresh_run_insights,
     retry_pending_run,
     rewrite_matrix_run_draft_section,
-    run_matrix_run_task,
+    run_dependencies_ready,
     serialize_run_detail,
     serialize_run_list_item,
+    serialize_draft_state,
+    spawn_matrix_run_worker,
     sync_run_draft_snapshot,
     sync_run_draft_progress,
     sync_run_matrix_snapshot,
+    update_run_progress,
     update_matrix_run_grouping_mode,
     update_matrix_run_outline,
     update_matrix_run_paper,
+    utcnow,
 )
 
 router = APIRouter(prefix="/research-matrix", tags=["research-matrix"])
 
 
 def _spawn_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
-    backend_root = Path(__file__).resolve().parents[3]
-    args = [sys.executable, "-m", "app.services.research_matrix_worker", str(run_id)]
-    if provider_id is not None:
-        args.append(str(provider_id))
-    subprocess.Popen(
-        args,
-        cwd=str(backend_root),
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    spawn_matrix_run_worker(run_id, provider_id)
+
+
+def _ensure_matrix_worker_started(
+    db: Session,
+    run: ResearchMatrixRun,
+    provider_id: int | None = None,
+) -> ResearchMatrixRun:
+    run = normalize_run_runtime_state(db, run)
+    if run.status not in {"queued", "running"}:
+        return run
+    if run.status == "running" and run.worker_status == "running" and run.worker_heartbeat_at and not is_run_worker_stale(run):
+        return run
+    if not run_dependencies_ready(db, run):
+        summary_ids = prepare_missing_run_draft_sources(
+            db,
+            run,
+            provider_id=provider_id,
+            summary_types=DRAFT_REQUIRED_SUMMARY_TYPES,
+        )
+        for summary_id in summary_ids:
+            spawn_paper_summary_worker(summary_id, provider_id)
+        refreshed = db.get(ResearchMatrixRun, run.id)
+        return refreshed or run
+    if run.status == "queued" and not should_start_matrix_immediately(db, run.user_id):
+        return run
+    if run.status == "queued":
+        run.status = "running"
+    if not run.stage or run.stage in {"idle", "queued"}:
+        run.stage = "building_matrix" if run.total_count and run.ready_count >= run.total_count else "preparing_reviews"
+    run.error_message = None
+    now = utcnow()
+    run.worker_status = "running"
+    run.worker_started_at = now
+    run.worker_heartbeat_at = now
+    run.worker_pid = None
+    run.last_worker_error = None
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    try:
+        _spawn_matrix_run_task(run.id, provider_id)
+    except Exception as exc:
+        run.status = "queued"
+        run.stage = "queued"
+        run.worker_status = "failed"
+        run.worker_pid = None
+        run.last_worker_error = f"启动矩阵 worker 失败：{exc}"
+        db.add(run)
+        db.commit()
+        raise HTTPException(status_code=500, detail="启动文献矩阵后台任务失败，请稍后重试") from exc
+    return run
 
 
 def resume_stale_matrix_runs() -> None:
@@ -81,10 +134,13 @@ def resume_stale_matrix_runs() -> None:
             )
         ).all()
         for run in runs:
-            if run.status == "queued" or is_run_worker_stale(run):
+            if run.status == "queued":
+                _ensure_matrix_worker_started(db, run, None)
+                continue
+            if run.worker_status != "running" or not run.worker_heartbeat_at or is_run_worker_stale(run):
                 if int(run.worker_retry_count or 0) > WORKER_MAX_RETRIES:
                     continue
-                _spawn_matrix_run_task(run.id, None)
+                _ensure_matrix_worker_started(db, run, None)
     finally:
         db.close()
 
@@ -109,6 +165,41 @@ def _raise_if_run_source_deleted(db: Session, run: ResearchMatrixRun, user_id: i
         raise HTTPException(status_code=409, detail=DELETED_SOURCE_PAPER_MESSAGE)
 
 
+def _iso(value) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _serialize_run_status(run: ResearchMatrixRun) -> dict:
+    stage = run.stage or "idle"
+    config = run.config_json if isinstance(run.config_json, dict) else {}
+    grouping_mode = str(config.get("grouping_mode") or "topic_first")
+    return {
+        "id": run.id,
+        "title": run.title,
+        "status": run.status,
+        "stage": stage,
+        "stage_label": RUN_STAGE_LABELS.get(stage, stage),
+        "paper_count": run.paper_count,
+        "version": run.version,
+        "refreshed_from_id": run.refreshed_from_id,
+        "progress_percent": int(run.progress_percent or 0),
+        "ready_count": int(run.ready_count or 0),
+        "total_count": int(run.total_count or run.paper_count or 0),
+        "failed_count": int(run.failed_count or 0),
+        "error_message": run.error_message,
+        "created_at": _iso(run.created_at),
+        "updated_at": _iso(run.updated_at),
+        "grouping_mode": grouping_mode,
+        "grouping_modes": [grouping_mode],
+        "worker_status": run.worker_status or "idle",
+        "worker_started_at": _iso(run.worker_started_at),
+        "worker_heartbeat_at": _iso(run.worker_heartbeat_at),
+        "worker_retry_count": int(run.worker_retry_count or 0),
+        "last_worker_error": run.last_worker_error,
+        **serialize_draft_state(run),
+    }
+
+
 @router.get("/dashboard", response_model=ResearchDashboardResponse)
 def get_research_dashboard(
     current_user: Annotated[User, Depends(get_current_user)],
@@ -130,8 +221,15 @@ def list_matrix_runs(
         .limit(80)
     ).all()
     for run in runs:
-        if run.status == "queued":
-            _spawn_matrix_run_task(run.id, None)
+        if run.status in {"queued", "running"}:
+            _ensure_matrix_worker_started(db, run, None)
+    runs = db.scalars(
+        select(ResearchMatrixRun)
+        .options(selectinload(ResearchMatrixRun.papers))
+        .where(ResearchMatrixRun.user_id == current_user.id)
+        .order_by(ResearchMatrixRun.created_at.desc(), ResearchMatrixRun.id.desc())
+        .limit(80)
+    ).all()
     source_state_map = build_run_source_state_map(db, runs, current_user.id)
     return ResearchMatrixRunListResponse(
         runs=[
@@ -146,10 +244,23 @@ def list_matrix_runs(
     )
 
 
+@router.get("/runs/status", response_model=ResearchMatrixRunListResponse)
+def list_matrix_run_statuses(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ResearchMatrixRunListResponse:
+    runs = db.scalars(
+        select(ResearchMatrixRun)
+        .where(ResearchMatrixRun.user_id == current_user.id)
+        .order_by(ResearchMatrixRun.created_at.desc(), ResearchMatrixRun.id.desc())
+        .limit(80)
+    ).all()
+    return ResearchMatrixRunListResponse(runs=[_serialize_run_status(run) for run in runs])
+
+
 @router.post("/runs", response_model=ResearchMatrixRunResponse, status_code=status.HTTP_201_CREATED)
 def create_matrix_run_endpoint(
     payload: ResearchMatrixCreateRequest,
-    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ResearchMatrixRunResponse:
@@ -157,6 +268,11 @@ def create_matrix_run_endpoint(
     papers = get_owned_papers(db, current_user.id, paper_ids)
     if not papers:
         raise HTTPException(status_code=404, detail="没有可用的文献")
+    consume_quota(
+        db,
+        user_id=current_user.id,
+        quota_key=QUOTA_MATRIX_RUN_MONTHLY,
+    )
     try:
         run = create_matrix_run(
             db,
@@ -173,12 +289,11 @@ def create_matrix_run_endpoint(
         db,
         run,
         provider_id=payload.provider_id,
-        summary_types=("overview", "reproduction"),
+        summary_types=DRAFT_REQUIRED_SUMMARY_TYPES,
     ):
-        background_tasks.add_task(run_paper_summary_task, summary_id, payload.provider_id)
+        spawn_paper_summary_worker(summary_id, payload.provider_id)
     sync_run_draft_progress(db, run)
-    if run.status in {"queued", "running"}:
-        _spawn_matrix_run_task(run.id, payload.provider_id)
+    run = _ensure_matrix_worker_started(db, run, payload.provider_id)
     return ResearchMatrixRunResponse(**serialize_run_detail(db, run, current_user.id))
 
 
@@ -189,8 +304,6 @@ def get_matrix_run(
     db: Annotated[Session, Depends(get_db)],
 ) -> ResearchMatrixRunResponse:
     run = _load_run(db, run_id, current_user.id)
-    if run.status == "queued":
-        _spawn_matrix_run_task(run.id, None)
     draft_state = (run.config_json or {}).get("draft_state") if isinstance(run.config_json, dict) else {}
     if (draft_state or {}).get("status") != "completed":
         sync_run_draft_progress(db, run)
@@ -211,6 +324,8 @@ def get_matrix_run(
             db.add(run)
             db.commit()
             db.refresh(run)
+    if run.status in {"queued", "running"}:
+        run = _ensure_matrix_worker_started(db, run, None)
     return ResearchMatrixRunResponse(**serialize_run_detail(db, run, current_user.id))
 
 
@@ -286,6 +401,91 @@ def update_matrix_run_paper_endpoint(
     return ResearchMatrixRunResponse(**serialize_run_detail(db, updated, current_user.id))
 
 
+@router.post("/runs/{run_id}/papers/{paper_id}/retry-review", response_model=ResearchMatrixRunResponse)
+def retry_matrix_run_paper_review(
+    run_id: int,
+    paper_id: int,
+    payload: ResearchMatrixRetryPaperRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ResearchMatrixRunResponse:
+    run = _load_run(db, run_id, current_user.id)
+    _raise_if_run_source_deleted(db, run, current_user.id)
+    target = next((item for item in run.papers if item.paper_id == paper_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="当前批次里没有这篇论文")
+    papers = get_owned_papers(db, current_user.id, [paper_id])
+    if not papers:
+        raise HTTPException(status_code=404, detail="原论文不存在或已删除")
+    paper = papers[0]
+
+    summary = db.scalar(
+        select(PaperSummary).where(
+            PaperSummary.paper_id == paper_id,
+            PaperSummary.user_id == current_user.id,
+            PaperSummary.summary_type == "review",
+        )
+    )
+    if summary and summary.status == "running":
+        target.summary_status = "running"
+        target.is_missing = True
+        target.is_stale = False
+        db.add(target)
+        sync_run_matrix_snapshot(db, run, current_user.id)
+        update_run_progress(run)
+        db.add(run)
+        db.commit()
+        refreshed = _load_run(db, run_id, current_user.id)
+        return ResearchMatrixRunResponse(**serialize_run_detail(db, refreshed, current_user.id))
+
+    if summary and summary.status == "generated" and not is_summary_stale(db, paper, summary):
+        target.summary_status = "generated"
+        target.summary_updated_at = _iso(summary.updated_at) or ""
+        target.summary_source_hash = summary.source_hash or ""
+        target.is_missing = False
+        target.is_stale = False
+        db.add(target)
+        sync_run_matrix_snapshot(db, run, current_user.id)
+        update_run_progress(run)
+        db.add(run)
+        db.commit()
+        refreshed = _load_run(db, run_id, current_user.id)
+        return ResearchMatrixRunResponse(**serialize_run_detail(db, refreshed, current_user.id))
+
+    if not summary:
+        summary = PaperSummary(
+            paper_id=paper_id,
+            user_id=current_user.id,
+            summary_type="review",
+            content_json={},
+        )
+    should_start_now = should_start_summary_immediately(db, current_user.id)
+    summary.status = "running" if should_start_now else "queued"
+    summary.stage = "extracting_context" if should_start_now else "queued"
+    summary.progress = 3 if should_start_now else 0
+    summary.provider_id = payload.provider_id
+    summary.error_message = None
+    db.add(summary)
+    db.flush()
+
+    target.summary_status = summary.status
+    target.summary_updated_at = _iso(summary.updated_at) or ""
+    target.summary_source_hash = summary.source_hash or ""
+    target.is_missing = True
+    target.is_stale = False
+    db.add(target)
+    sync_run_matrix_snapshot(db, run, current_user.id)
+    update_run_progress(run)
+    db.add(run)
+    db.commit()
+
+    if should_start_now:
+        spawn_paper_summary_worker(summary.id, payload.provider_id)
+
+    refreshed = _load_run(db, run_id, current_user.id)
+    return ResearchMatrixRunResponse(**serialize_run_detail(db, refreshed, current_user.id))
+
+
 @router.patch("/runs/{run_id}/outline", response_model=ResearchMatrixRunResponse)
 def update_matrix_run_outline_endpoint(
     run_id: int,
@@ -344,7 +544,6 @@ def rewrite_matrix_run_draft_section_endpoint(
 def prepare_matrix_run_draft_sources_endpoint(
     run_id: int,
     payload: ResearchMatrixPrepareDraftSourcesRequest,
-    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ResearchMatrixRunResponse:
@@ -354,10 +553,10 @@ def prepare_matrix_run_draft_sources_endpoint(
         db,
         run,
         provider_id=payload.provider_id,
-        summary_types=tuple(payload.summary_types or ["overview", "reproduction"]),
+        summary_types=tuple(payload.summary_types or DRAFT_REQUIRED_SUMMARY_TYPES),
     )
     for summary_id in summary_ids:
-        background_tasks.add_task(run_paper_summary_task, summary_id, payload.provider_id)
+        spawn_paper_summary_worker(summary_id, payload.provider_id)
     refreshed = _load_run(db, run_id, current_user.id)
     return ResearchMatrixRunResponse(**serialize_run_detail(db, refreshed, current_user.id))
 
@@ -386,7 +585,6 @@ def refresh_matrix_run_insights(
 def refresh_matrix_run(
     run_id: int,
     payload: ResearchMatrixRefreshRequest,
-    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ResearchMatrixRunResponse:
@@ -395,6 +593,11 @@ def refresh_matrix_run(
     paper_ids = [item.paper_id for item in run.papers if item.paper_id]
     if not paper_ids:
         raise HTTPException(status_code=400, detail="当前矩阵没有可刷新的文献")
+    consume_quota(
+        db,
+        user_id=current_user.id,
+        quota_key=QUOTA_MATRIX_RUN_MONTHLY,
+    )
     refreshed = create_matrix_run(
         db,
         current_user.id,
@@ -405,23 +608,20 @@ def refresh_matrix_run(
         refreshed_from_id=run.id,
     )
     refreshed = _load_run(db, refreshed.id, current_user.id)
-    if refreshed.status in {"queued", "running"}:
-        _spawn_matrix_run_task(refreshed.id, payload.provider_id)
+    refreshed = _ensure_matrix_worker_started(db, refreshed, payload.provider_id)
     return ResearchMatrixRunResponse(**serialize_run_detail(db, refreshed, current_user.id))
 
 
 @router.post("/runs/{run_id}/retry-pending", response_model=ResearchMatrixRunResponse)
 def retry_pending_matrix_run(
     run_id: int,
-    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ResearchMatrixRunResponse:
     run = _load_run(db, run_id, current_user.id)
     _raise_if_run_source_deleted(db, run, current_user.id)
     run = retry_pending_run(db, run)
-    _spawn_matrix_run_task(run.id, None)
-    run = _load_run(db, run.id, current_user.id)
+    run = _ensure_matrix_worker_started(db, run, None)
     return ResearchMatrixRunResponse(**serialize_run_detail(db, run, current_user.id))
 
 
@@ -440,7 +640,6 @@ def delete_matrix_run(
 @router.post("/generate-missing", response_model=ResearchMatrixGenerateMissingResponse)
 def generate_missing_reviews(
     payload: ResearchMatrixGenerateMissingRequest,
-    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ResearchMatrixGenerateMissingResponse:
@@ -452,6 +651,7 @@ def generate_missing_reviews(
     started = 0
     skipped = 0
     running = 0
+    summary_ids_to_spawn: list[int] = []
     for paper in papers:
         item = db.scalar(
             select(PaperSummary).where(
@@ -473,16 +673,20 @@ def generate_missing_reviews(
                 summary_type="review",
                 content_json={},
             )
-        item.status = "running"
-        item.stage = "extracting_context"
-        item.progress = 3
+        should_start_now = should_start_summary_immediately(db, current_user.id)
+        item.status = "running" if should_start_now else "queued"
+        item.stage = "extracting_context" if should_start_now else "queued"
+        item.progress = 3 if should_start_now else 0
         item.provider_id = payload.provider_id
         item.error_message = None
         db.add(item)
         db.flush()
-        background_tasks.add_task(run_paper_summary_task, item.id, payload.provider_id)
+        if should_start_now:
+            summary_ids_to_spawn.append(int(item.id))
         started += 1
     db.commit()
+    for summary_id in summary_ids_to_spawn:
+        spawn_paper_summary_worker(summary_id, payload.provider_id)
     return ResearchMatrixGenerateMissingResponse(
         started_count=started,
         skipped_count=skipped,

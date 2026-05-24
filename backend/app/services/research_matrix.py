@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -11,6 +10,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.models import (
     Annotation,
     Folder,
@@ -24,8 +24,16 @@ from app.models import (
     ResearchMatrixRun,
     ResearchMatrixRunPaper,
 )
+from app.services.annotation_metrics import count_effective_annotations
+from app.services.background_task_runner import spawn_research_matrix_worker_process
 from app.services.crypto import decrypt_api_key
 from app.services.notification import compact_notification_text, create_notification
+from app.services.membership import (
+    get_matrix_runs_to_start,
+    get_next_summary_to_start,
+    should_start_matrix_immediately,
+    should_start_summary_immediately,
+)
 from app.services.paper_summary import (
     REVIEW_STRUCTURED_FIELD_ORDER,
     apply_review_field_updates,
@@ -37,7 +45,7 @@ from app.services.paper_summary import (
     normalize_summary_terminal_state,
     parse_json_object,
     parse_compound_list,
-    run_paper_summary_task,
+    spawn_paper_summary_worker,
     summary_title,
 )
 
@@ -83,6 +91,10 @@ WORKER_HEARTBEAT_INTERVAL_SECONDS = 5
 WORKER_MAX_RETRIES = 2
 
 
+class MatrixRunCancelled(Exception):
+    pass
+
+
 INSIGHT_STATUS_LABELS = {
     "idle": "等待生成",
     "running": "正在整理",
@@ -108,6 +120,10 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def spawn_matrix_run_worker(run_id: int, provider_id: int | None = None) -> None:
+    spawn_research_matrix_worker_process(run_id, provider_id)
+
+
 def normalize_utc_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -129,6 +145,9 @@ def ensure_unique_paper_ids(paper_ids: list[int]) -> list[int]:
 
 
 def mark_run_worker_started(db: Session, run: ResearchMatrixRun) -> None:
+    db.refresh(run)
+    if run.status == "cancelled":
+        return
     run.worker_status = "running"
     run.worker_started_at = utcnow()
     run.worker_heartbeat_at = run.worker_started_at
@@ -140,6 +159,9 @@ def mark_run_worker_started(db: Session, run: ResearchMatrixRun) -> None:
 
 
 def heartbeat_run_worker(db: Session, run: ResearchMatrixRun) -> None:
+    db.refresh(run)
+    if run.status == "cancelled":
+        return
     run.worker_status = "running"
     run.worker_heartbeat_at = utcnow()
     if not run.worker_started_at:
@@ -152,6 +174,9 @@ def heartbeat_run_worker(db: Session, run: ResearchMatrixRun) -> None:
 
 
 def mark_run_worker_finished(db: Session, run: ResearchMatrixRun) -> None:
+    db.refresh(run)
+    if run.status == "cancelled":
+        return
     run.worker_status = "completed"
     run.worker_heartbeat_at = utcnow()
     run.worker_pid = None
@@ -159,9 +184,13 @@ def mark_run_worker_finished(db: Session, run: ResearchMatrixRun) -> None:
     db.add(run)
     db.commit()
     db.refresh(run)
+    _start_next_queued_matrix_run_if_possible(db)
 
 
 def mark_run_worker_failed(db: Session, run: ResearchMatrixRun, message: str) -> None:
+    db.refresh(run)
+    if run.status == "cancelled":
+        return
     run.worker_status = "failed"
     run.worker_heartbeat_at = utcnow()
     run.worker_pid = None
@@ -170,6 +199,7 @@ def mark_run_worker_failed(db: Session, run: ResearchMatrixRun, message: str) ->
     db.add(run)
     db.commit()
     db.refresh(run)
+    _start_next_queued_matrix_run_if_possible(db)
 
 
 def is_run_worker_stale(run: ResearchMatrixRun) -> bool:
@@ -185,7 +215,11 @@ def is_run_worker_stale(run: ResearchMatrixRun) -> bool:
 def normalize_run_runtime_state(db: Session, run: ResearchMatrixRun) -> ResearchMatrixRun:
     if run.status not in {"queued", "running"}:
         return run
-    if not is_run_worker_stale(run):
+    worker_missing = (
+        run.status == "running"
+        and (run.worker_status != "running" or not run.worker_heartbeat_at)
+    )
+    if not worker_missing and not is_run_worker_stale(run):
         return run
     if int(run.worker_retry_count or 0) >= WORKER_MAX_RETRIES:
         run.status = "failed"
@@ -203,14 +237,85 @@ def normalize_run_runtime_state(db: Session, run: ResearchMatrixRun) -> Research
     db.add(run)
     db.commit()
     db.refresh(run)
-    return run
+    refreshed = load_run_with_papers(db, run.id)
+    return refreshed or run
+
+
+def _start_next_queued_summary_if_possible(db: Session) -> None:
+    next_item = get_next_summary_to_start(db)
+    if not next_item:
+        return
+    if not should_start_summary_immediately(db, next_item.user_id):
+        return
+    next_item.status = "running"
+    next_item.stage = "extracting_context"
+    next_item.progress = max(3, int(next_item.progress or 0))
+    next_item.error_message = None
+    db.add(next_item)
+    db.commit()
+    try:
+        spawn_paper_summary_worker(next_item.id, next_item.provider_id)
+    except Exception as exc:
+        next_item.status = "queued"
+        next_item.stage = "queued"
+        next_item.progress = 0
+        next_item.error_message = compact_text(f"启动摘要 worker 失败：{exc}", 600)
+        db.add(next_item)
+        db.commit()
+
+
+def _start_next_queued_matrix_run_if_possible(db: Session) -> None:
+    for next_run in get_matrix_runs_to_start(db):
+        next_run = load_run_with_papers(db, next_run.id) or next_run
+        if not run_dependencies_ready(db, next_run):
+            continue
+        if not should_start_matrix_immediately(db, next_run.user_id):
+            continue
+        next_run.status = "running"
+        next_run.stage = "building_matrix" if next_run.total_count and next_run.ready_count >= next_run.total_count else "preparing_reviews"
+        next_run.error_message = None
+        now = utcnow()
+        next_run.worker_status = "running"
+        next_run.worker_started_at = now
+        next_run.worker_heartbeat_at = now
+        next_run.worker_pid = None
+        next_run.last_worker_error = None
+        db.add(next_run)
+        db.commit()
+        try:
+            spawn_matrix_run_worker(next_run.id)
+        except Exception as exc:
+            next_run.status = "queued"
+            next_run.stage = "queued"
+            next_run.worker_status = "failed"
+            next_run.worker_pid = None
+            next_run.last_worker_error = compact_text(f"启动矩阵 worker 失败：{exc}", 600)
+            db.add(next_run)
+            db.commit()
+        return
 
 
 def compact_text(value: Any, limit: int = 220) -> str:
-    text = " ".join(str(value or "").split())
+    text = normalize_generated_punctuation(value)
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "..."
+
+
+def normalize_generated_punctuation(value: Any) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+([,.;:!?\u3002\uff0c\uff1b\uff1a\uff01\uff1f])", r"\1", text)
+    text = re.sub(r"([\u3002\uff01\uff1f!?])\s*[;\uff1b]\s*", "\uff1b", text)
+    text = re.sub(r"[;\uff1b]\s*([\u3002\uff01\uff1f!?])", r"\1", text)
+    text = re.sub(r"([\u3002\uff01\uff1f!?])\s*([\u3002\uff01\uff1f!?])", r"\1", text)
+    return text.strip()
+
+
+def normalize_clause_for_join(value: Any) -> str:
+    text = normalize_generated_punctuation(value).strip("\uff1b\u3002;\uff0c, ")
+    return re.sub(r"[\u3002\uff01\uff1f!?]+$", "", text).strip()
 
 
 def extract_year(paper: Paper) -> str:
@@ -1416,37 +1521,130 @@ def build_outline_section(
     }
 
 
+OUTLINE_GENERIC_INSIGHT_TEXTS = {
+    "现有工作已经能够围绕方法路线形成可比框架，可优先按技术路径组织相关工作。",
+    "实验结果层面已经积累出一批可归纳的结论，可在综述中单独整理共识判断。",
+    "不同论文在方法抓手与创新切入点上存在明显分化，适合用“路线 A / 路线 B”方式展开对比。",
+    "不同研究的结果表述并不完全一致，正文中应强调比较口径和适用场景，而不是简单并列结论。",
+    "现有文献已经暴露出一批共性局限，后续写作可把这些局限转化为研究空白或选题切入点。",
+    "当前局限信息仍偏少，正式成文前建议回原文补足研究边界、数据限制和实验条件。",
+    "当前批次的显性共识还不够强，建议先用文献矩阵核对方法路线和核心发现后再写共识段。",
+    "当前批次尚未抽出足够多的差异点，可补充更多方法或结果字段后再强化分歧分析。",
+}
+
+OUTLINE_INSUFFICIENT_INSIGHTS = {
+    "consensus": "依据不足：当前批次还没有足够的共同结论证据，建议补齐研究问题、方法路线和核心发现字段后再归纳。",
+    "divergence": "依据不足：当前批次暂未形成可核对的分歧线索，建议补齐方法路线、实验结果和创新点字段。",
+    "gaps": "依据不足：当前批次暂未提取到明确研究空白，建议补齐局限、数据边界和复现条件。",
+}
+
+
+def section_paragraph_texts(section: dict[str, Any]) -> list[str]:
+    texts: list[str] = []
+    paragraphs = section.get("paragraphs") if isinstance(section, dict) else []
+    for paragraph in list(paragraphs or []):
+        if isinstance(paragraph, dict):
+            text = paragraph.get("text") or paragraph.get("content") or ""
+        else:
+            text = paragraph
+        normalized = normalize_generated_punctuation(text)
+        if normalized:
+            texts.append(normalized)
+    if not texts and isinstance(section, dict):
+        content = normalize_generated_punctuation(section.get("content"))
+        if content:
+            texts.append(content)
+    return texts
+
+
+def split_outline_insight_clauses(value: Any, *, limit: int = 4) -> list[str]:
+    text = normalize_generated_punctuation(value)
+    if not text:
+        return []
+    raw_parts = re.split(r"(?:[。！？!?]\s*|[；;]\s*)", text)
+    clauses: list[str] = []
+    seen: set[str] = set()
+    for raw_part in raw_parts:
+        clause = normalize_clause_for_join(raw_part)
+        if not clause:
+            continue
+        if clause in OUTLINE_GENERIC_INSIGHT_TEXTS:
+            continue
+        if clause.startswith("当前还没有足够证据") or "正在整理中" in clause:
+            continue
+        if len(clause) < 8:
+            continue
+        key = clause.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        clauses.append(compact_text(clause, 180))
+        if len(clauses) >= limit:
+            break
+    return clauses
+
+
+def collect_outline_insight_clauses(section: dict[str, Any], *, limit: int = 4) -> list[str]:
+    clauses: list[str] = []
+    seen: set[str] = set()
+    for text in section_paragraph_texts(section):
+        for clause in split_outline_insight_clauses(text, limit=limit):
+            key = clause.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            clauses.append(clause)
+            if len(clauses) >= limit:
+                return clauses
+    return clauses
+
+
+def outline_insight_line(label: str, clauses: list[str], *, limit: int = 2, text_limit: int = 320) -> str:
+    selected = [normalize_clause_for_join(clause) for clause in clauses if normalize_clause_for_join(clause)]
+    if not selected:
+        return ""
+    return compact_text(f"{label}：{'；'.join(selected[:limit])}。", text_limit)
+
+
 def build_outline_insights(drafts: dict[str, Any]) -> dict[str, list[str]]:
-    method_section = drafts.get("method_compare") or {}
-    result_section = drafts.get("result_analysis") or {}
-    limit_section = drafts.get("limitations_future") or {}
-    innovation_section = drafts.get("core_innovations") or {}
+    method_clauses = collect_outline_insight_clauses(drafts.get("method_compare") or {}, limit=4)
+    result_clauses = collect_outline_insight_clauses(drafts.get("result_analysis") or {}, limit=4)
+    limit_clauses = collect_outline_insight_clauses(drafts.get("limitations_future") or {}, limit=4)
+    innovation_clauses = collect_outline_insight_clauses(drafts.get("core_innovations") or {}, limit=4)
+    status_clauses = collect_outline_insight_clauses(drafts.get("research_status") or {}, limit=2)
 
-    consensus: list[str] = []
-    divergence: list[str] = []
-    gaps: list[str] = []
+    consensus = [
+        item for item in [
+            outline_insight_line("方法路线", method_clauses, limit=1),
+            outline_insight_line("结果倾向", result_clauses, limit=1),
+        ] if item
+    ]
+    if not consensus and status_clauses:
+        consensus.append(outline_insight_line("研究现状", status_clauses, limit=1))
 
-    method_paragraphs = list(method_section.get("paragraphs") or [])
-    result_paragraphs = list(result_section.get("paragraphs") or [])
-    limit_paragraphs = list(limit_section.get("paragraphs") or [])
-    innovation_paragraphs = list(innovation_section.get("paragraphs") or [])
+    divergence_sources = innovation_clauses[:2]
+    if len(method_clauses) > 1:
+        divergence_sources.extend(method_clauses[1:3])
+    if len(result_clauses) > 1:
+        divergence_sources.extend(result_clauses[1:3])
+    divergence = [
+        item for item in [
+            outline_insight_line("差异线索", divergence_sources, limit=2),
+        ] if item
+    ]
 
-    if method_paragraphs:
-        consensus.append("现有工作已经能够围绕方法路线形成可比框架，可优先按技术路径组织相关工作。")
-    if result_paragraphs:
-        consensus.append("实验结果层面已经积累出一批可归纳的结论，可在综述中单独整理共识判断。")
-    if len(method_paragraphs) > 1 or len(innovation_paragraphs) > 1:
-        divergence.append("不同论文在方法抓手与创新切入点上存在明显分化，适合用“路线 A / 路线 B”方式展开对比。")
-    if len(result_paragraphs) > 1:
-        divergence.append("不同研究的结果表述并不完全一致，正文中应强调比较口径和适用场景，而不是简单并列结论。")
-    if limit_paragraphs:
-        gaps.append("现有文献已经暴露出一批共性局限，后续写作可把这些局限转化为研究空白或选题切入点。")
-    else:
-        gaps.append("当前局限信息仍偏少，正式成文前建议回原文补足研究边界、数据限制和实验条件。")
+    gaps = [
+        item for item in [
+            outline_insight_line("局限与空白", limit_clauses, limit=2),
+        ] if item
+    ]
+
     if not consensus:
-        consensus.append("当前批次的显性共识还不够强，建议先用文献矩阵核对方法路线和核心发现后再写共识段。")
+        consensus.append(OUTLINE_INSUFFICIENT_INSIGHTS["consensus"])
     if not divergence:
-        divergence.append("当前批次尚未抽出足够多的差异点，可补充更多方法或结果字段后再强化分歧分析。")
+        divergence.append(OUTLINE_INSUFFICIENT_INSIGHTS["divergence"])
+    if not gaps:
+        gaps.append(OUTLINE_INSUFFICIENT_INSIGHTS["gaps"])
     return {
         "consensus": consensus[:3],
         "divergence": divergence[:3],
@@ -1530,7 +1728,7 @@ def join_sentences(parts: list[str], *, limit: int = 760) -> str:
     items: list[str] = []
     seen: set[str] = set()
     for part in parts:
-        text = " ".join(str(part or "").split()).strip("；。 ")
+        text = normalize_clause_for_join(part)
         if not text or text in seen:
             continue
         seen.add(text)
@@ -1787,7 +1985,7 @@ def append_section_entry(
     paper_title: str,
     citations: list[dict[str, Any]] | None = None,
 ) -> None:
-    normalized = " ".join(str(text or "").split()).strip("；。;，, ")
+    normalized = normalize_generated_punctuation(text).strip("；。;，, ")
     if not normalized:
         return
     entries.append(
@@ -1839,7 +2037,7 @@ def build_grouped_review_paragraph(
     clauses: list[str] = []
     citations: list[dict[str, Any]] = []
     for group in selected:
-        clause = str(group.get("text") or "").strip("；。;，, ")
+        clause = normalize_clause_for_join(group.get("text"))
         if not clause:
             continue
         clauses.append(clause)
@@ -3221,20 +3419,24 @@ def build_dashboard_snapshot(
             summary_counts[str(summary_type)] = int(count or 0)
 
     summary_total = sum(summary_counts.values())
-    translation_count = db.scalar(
-        select(func.count(PaperFullTranslation.id))
-        .join(Paper, Paper.id == PaperFullTranslation.paper_id)
-        .where(
-            Paper.user_id == user_id,
-            Paper.deleted_at.is_(None),
-            PaperFullTranslation.status == "completed",
-        )
-    ) or 0
-    annotation_count = db.scalar(
-        select(func.count(Annotation.id))
+    translation_count = 0
+    if settings.full_translation_enabled:
+        translation_count = db.scalar(
+            select(func.count(PaperFullTranslation.id))
+            .join(Paper, Paper.id == PaperFullTranslation.paper_id)
+            .where(
+                Paper.user_id == user_id,
+                Paper.deleted_at.is_(None),
+                PaperFullTranslation.status == "completed",
+            )
+        ) or 0
+    annotation_count = count_effective_annotations(
+        db.scalars(
+            select(Annotation)
         .join(Paper, Paper.id == Annotation.paper_id)
         .where(Annotation.user_id == user_id, Paper.deleted_at.is_(None))
-    ) or 0
+        ).all()
+    )
     note_count = db.scalar(
         select(func.count(PaperNoteBlock.id))
         .join(PaperNoteNode, PaperNoteNode.id == PaperNoteBlock.node_id)
@@ -3256,14 +3458,26 @@ def build_dashboard_snapshot(
 
     ready_count = max(0, len(matrix_rows) - len(missing))
     readiness = round((ready_count / len(matrix_rows)) * 100) if matrix_rows else 0
+    resource_mix = [
+        {"name": RESOURCE_LABELS["summary"], "value": summary_total},
+        {"name": RESOURCE_LABELS["annotations"], "value": int(annotation_count or 0)},
+        {"name": RESOURCE_LABELS["notes"], "value": int(note_count or 0)},
+    ]
+    if settings.full_translation_enabled:
+        resource_mix.insert(1, {"name": RESOURCE_LABELS["translation"], "value": int(translation_count or 0)})
+
+    totals = {
+        "paper_count": total_papers,
+        "summary_count": summary_total,
+        "annotation_count": int(annotation_count or 0),
+        "note_count": int(note_count or 0),
+    }
+    if settings.full_translation_enabled:
+        totals["translation_count"] = int(translation_count or 0)
+
     return {
         "reading_trend": reading_trend,
-        "resource_mix": [
-            {"name": RESOURCE_LABELS["summary"], "value": summary_total},
-            {"name": RESOURCE_LABELS["translation"], "value": int(translation_count or 0)},
-            {"name": RESOURCE_LABELS["annotations"], "value": int(annotation_count or 0)},
-            {"name": RESOURCE_LABELS["notes"], "value": int(note_count or 0)},
-        ],
+        "resource_mix": resource_mix,
         "summary_coverage": [
             {
                 "type": key,
@@ -3281,13 +3495,7 @@ def build_dashboard_snapshot(
             "paper_count": len(matrix_rows),
             "rate": readiness,
         },
-        "totals": {
-            "paper_count": total_papers,
-            "summary_count": summary_total,
-            "translation_count": int(translation_count or 0),
-            "annotation_count": int(annotation_count or 0),
-            "note_count": int(note_count or 0),
-        },
+        "totals": totals,
     }
 
 
@@ -3301,6 +3509,15 @@ def load_run_with_papers(db: Session, run_id: int) -> ResearchMatrixRun | None:
         .options(selectinload(ResearchMatrixRun.papers))
         .where(ResearchMatrixRun.id == run_id)
     )
+
+
+def ensure_matrix_run_active(db: Session, run_id: int) -> ResearchMatrixRun | None:
+    run = load_run_with_papers(db, run_id)
+    if not run:
+        return None
+    if run.status == "cancelled":
+        raise MatrixRunCancelled()
+    return run
 
 
 def update_run_progress(run: ResearchMatrixRun) -> None:
@@ -3335,6 +3552,28 @@ def draft_sources_ready(
         item = summaries.get((paper.id, summary_type))
         if not item or item.status != "generated" or is_summary_stale(db, paper, item):
             return False
+    return True
+
+
+def run_dependencies_ready(db: Session, run: ResearchMatrixRun) -> bool:
+    paper_ids = [item.paper_id for item in run.papers if item.paper_id]
+    if not paper_ids:
+        return False
+    papers = {paper.id: paper for paper in get_owned_papers(db, run.user_id, paper_ids)}
+    summaries = get_summaries_by_paper(db, run.user_id, paper_ids)
+    for run_paper in run.papers:
+        if not run_paper.paper_id:
+            continue
+        paper = papers.get(run_paper.paper_id)
+        if not paper:
+            return False
+        for summary_type in DRAFT_REQUIRED_SUMMARY_TYPES:
+            summary = normalize_summary_terminal_state(
+                db,
+                summaries.get((run_paper.paper_id, summary_type)),
+            )
+            if not summary or summary.status != "generated" or is_summary_stale(db, paper, summary):
+                return False
     return True
 
 
@@ -3383,14 +3622,27 @@ def prepare_missing_run_draft_sources(
                     summary_type=summary_type,
                     content_json={},
                 )
-            summary.status = "running"
-            summary.stage = "extracting_context"
-            summary.progress = 3
+            should_start_now = should_start_summary_immediately(db, run.user_id)
+            summary.status = "running" if should_start_now else "queued"
+            summary.stage = "extracting_context" if should_start_now else "queued"
+            summary.progress = 3 if should_start_now else 0
             summary.provider_id = provider_id
             summary.error_message = None
             db.add(summary)
+            if summary_type == "review":
+                run_paper.summary_status = summary.status
+                run_paper.is_missing = True
+                run_paper.is_stale = False
+                run_paper.row_snapshot = build_empty_row(
+                    paper,
+                    paper.folder.name if paper.folder else "未分类",
+                    review_role=run_paper.review_role or "",
+                    batch_note=run_paper.batch_note or "",
+                )
             db.flush()
-            queued_summary_ids.append(int(summary.id))
+            if should_start_now:
+                queued_summary_ids.append(int(summary.id))
+    update_run_progress(run)
     if queued_summary_ids:
         db.commit()
         db.refresh(run)
@@ -3409,6 +3661,9 @@ def prepare_missing_run_draft_sources(
         db.add(run)
         db.commit()
         db.refresh(run)
+    else:
+        db.commit()
+        _start_next_queued_summary_if_possible(db)
     return queued_summary_ids
 
 
@@ -3431,11 +3686,12 @@ def create_initial_run(
         if previous and previous.user_id == user_id:
             version = max(1, int(previous.version or 1) + 1)
     next_config = {"include_reproduction": include_reproduction, **dict(config_json or {})}
+    should_start_now = should_start_matrix_immediately(db, user_id)
     run = ResearchMatrixRun(
         user_id=user_id,
         title=title.strip() or default_run_title(papers),
-        status="queued",
-        stage="queued",
+        status="running" if should_start_now else "queued",
+        stage="preparing_reviews" if should_start_now else "queued",
         paper_count=len(papers),
         total_count=len(papers),
         ready_count=0,
@@ -3483,31 +3739,13 @@ def create_initial_run(
     update_run_progress(run)
     sync_run_matrix_snapshot(db, run, user_id)
     if all_review_ready:
-        run.status = "queued"
-        run.stage = "building_matrix"
+        run.status = "running" if should_start_now else "queued"
+        run.stage = "building_matrix" if should_start_now else "queued"
         run.error_message = None
         update_run_progress(run)
     db.commit()
     db.refresh(run)
     return run
-
-
-def wait_for_summary_to_finish(summary_id: int, *, timeout_seconds: int = 900, interval_seconds: int = 2) -> str:
-    from app.db.session import SessionLocal
-
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        probe_db = SessionLocal()
-        try:
-            summary = probe_db.get(PaperSummary, summary_id)
-            if not summary:
-                return "missing"
-            if summary.status != "running":
-                return summary.status
-        finally:
-            probe_db.close()
-        time.sleep(interval_seconds)
-    return "running"
 
 
 def ensure_summary_ready_for_run(
@@ -3529,19 +3767,24 @@ def ensure_summary_ready_for_run(
     summary = normalize_summary_terminal_state(db, summary)
 
     if summary and summary.status == "running":
-        wait_for_summary_to_finish(summary.id)
-        db.expire_all()
-        refreshed_run = load_run_with_papers(db, run.id)
-        if not refreshed_run:
-            return None
-        summary = db.scalar(
-            select(PaperSummary).where(
-                PaperSummary.paper_id == paper.id,
-                PaperSummary.user_id == run.user_id,
-                PaperSummary.summary_type == summary_type,
-            )
-        )
-        summary = normalize_summary_terminal_state(db, summary)
+        if summary_type == "review":
+            run_paper.summary_status = "running"
+            run_paper.is_missing = True
+            update_run_progress(run)
+            db.add(run_paper)
+            db.add(run)
+            db.commit()
+        return None
+
+    if summary and summary.status == "queued":
+        if summary_type == "review":
+            run_paper.summary_status = "queued"
+            run_paper.is_missing = True
+            update_run_progress(run)
+            db.add(run_paper)
+            db.add(run)
+            db.commit()
+        return None
 
     if summary and summary.status == "generated" and not is_summary_stale(db, paper, summary):
         return summary
@@ -3553,19 +3796,20 @@ def ensure_summary_ready_for_run(
             summary_type=summary_type,
             content_json={},
         )
-    summary.status = "running"
-    summary.stage = "extracting_context"
-    summary.progress = 3
+    should_start_now = should_start_summary_immediately(db, run.user_id)
+    summary.status = "running" if should_start_now else "queued"
+    summary.stage = "extracting_context" if should_start_now else "queued"
+    summary.progress = 3 if should_start_now else 0
     summary.provider_id = provider_id
     summary.error_message = None
     db.add(summary)
     db.commit()
     db.refresh(summary)
 
-    run.status = "running"
+    run.status = "queued"
     run.stage = "generating_reviews" if summary_type == "review" else "building_matrix"
     if summary_type == "review":
-        run_paper.summary_status = "running"
+        run_paper.summary_status = summary.status
         run_paper.is_missing = True
         run_paper.row_snapshot = build_empty_row(
             paper,
@@ -3587,15 +3831,9 @@ def ensure_summary_ready_for_run(
     )
     db.commit()
 
-    run_paper_summary_task(summary.id, provider_id)
-    db.expire_all()
-    return db.scalar(
-        select(PaperSummary).where(
-            PaperSummary.paper_id == paper.id,
-            PaperSummary.user_id == run.user_id,
-            PaperSummary.summary_type == summary_type,
-        )
-    )
+    if should_start_now:
+        spawn_paper_summary_worker(summary.id, provider_id)
+    return None
 
 
 def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
@@ -3603,20 +3841,24 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
 
     db = SessionLocal()
     try:
-        run = load_run_with_papers(db, run_id)
+        run = ensure_matrix_run_active(db, run_id)
         if not run:
             return
         mark_run_worker_started(db, run)
+        run = ensure_matrix_run_active(db, run_id)
+        if not run:
+            return
         run.status = "running"
         run.stage = "preparing_reviews"
         run.error_message = None
         update_run_progress(run)
         db.commit()
 
-        required_summary_types = ("review", "overview", "reproduction")
+        required_summary_types = DRAFT_REQUIRED_SUMMARY_TYPES
+        dependency_pending = False
         for run_paper in run.papers:
             heartbeat_run_worker(db, run)
-            run = load_run_with_papers(db, run_id)
+            run = ensure_matrix_run_active(db, run_id)
             if not run:
                 return
             if not run_paper.paper_id:
@@ -3645,10 +3887,13 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
                     provider_id=provider_id,
                 )
                 if not summary:
-                    return
+                    dependency_pending = True
+                    break
                 summaries_by_type[summary_type] = summary
+            if dependency_pending:
+                break
             db.expire_all()
-            run = load_run_with_papers(db, run_id)
+            run = ensure_matrix_run_active(db, run_id)
             if not run:
                 return
             run_paper = next(item for item in run.papers if item.paper_id == paper.id)
@@ -3672,8 +3917,34 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
             update_run_progress(run)
             db.commit()
 
+        if dependency_pending:
+            run = ensure_matrix_run_active(db, run_id)
+            if run:
+                source_map, counters = build_draft_source_map(db, run)
+                progress_meta = draft_progress_from_counters(counters)
+                set_run_draft_state(
+                    run,
+                    status="running",
+                    stage="generating_sources",
+                    progress=progress_meta["progress"],
+                    ready_count=progress_meta["ready_count"],
+                    total_count=progress_meta["total_count"],
+                    failed_count=progress_meta["failed_count"],
+                    error_message=None,
+                )
+                run.status = "queued"
+                run.stage = "generating_reviews"
+                run.error_message = None
+                run.worker_status = "completed"
+                run.worker_heartbeat_at = utcnow()
+                run.worker_pid = None
+                update_run_progress(run)
+                db.add(run)
+                db.commit()
+            return
+
         db.refresh(run)
-        run = load_run_with_papers(db, run_id)
+        run = ensure_matrix_run_active(db, run_id)
         if not run:
             return
         source_map, _counters = build_draft_source_map(db, run)
@@ -3682,8 +3953,9 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
             run.stage = "building_matrix"
             run.error_message = None
             db.commit()
+            ensure_matrix_run_active(db, run_id)
             sync_run_matrix_snapshot(db, run, run.user_id)
-            run = load_run_with_papers(db, run_id)
+            run = ensure_matrix_run_active(db, run_id)
             if not run:
                 return
             run.drafts_snapshot = {}
@@ -3694,10 +3966,10 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
             run.progress_percent = 100 if run.total_count else 0
             db.add(run)
             db.commit()
-            run = load_run_with_papers(db, run_id)
+            run = ensure_matrix_run_active(db, run_id)
             if run:
                 sync_run_insights_snapshot(db, run)
-                run = load_run_with_papers(db, run_id)
+                run = ensure_matrix_run_active(db, run_id)
             if run:
                 mark_run_worker_finished(db, run)
                 create_notification(
@@ -3714,6 +3986,7 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
             return
 
         failed_titles = [item.title_snapshot for item in run.papers if item.summary_status != "generated" or item.is_missing]
+        ensure_matrix_run_active(db, run_id)
         run.status = "failed"
         run.stage = "failed"
         run.error_message = (
@@ -3734,6 +4007,8 @@ def run_matrix_run_task(run_id: int, provider_id: int | None = None) -> None:
             action_payload={"run_id": run.id},
         )
         mark_run_worker_failed(db, run, run.error_message or "批次生成失败")
+    except MatrixRunCancelled:
+        return
     except Exception as exc:
         run = load_run_with_papers(db, run_id)
         if run:
@@ -3852,6 +4127,12 @@ def retry_pending_run(db: Session, run: ResearchMatrixRun) -> ResearchMatrixRun:
     run.status = "queued"
     run.stage = "queued"
     run.error_message = None
+    run.worker_status = "idle"
+    run.worker_started_at = None
+    run.worker_heartbeat_at = None
+    run.worker_pid = None
+    run.worker_retry_count = 0
+    run.last_worker_error = None
     update_run_progress(run)
     db.add(run)
     db.commit()

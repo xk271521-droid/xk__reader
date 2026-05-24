@@ -6,9 +6,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-NotificationSourceKind = Literal["paper_summary", "full_translation", "research_matrix", "admin_broadcast"]
-NotificationEventKind = Literal["completed", "failed", "broadcast"]
-NotificationActionKind = Literal["open-summary", "open-full-translation", "open-matrix", "none"]
+NotificationSourceKind = Literal["paper_summary", "full_translation", "research_matrix", "admin_broadcast", "membership"]
+NotificationEventKind = Literal["completed", "failed", "broadcast", "expired", "cancelled"]
+NotificationActionKind = Literal["open-summary", "open-full-translation", "open-matrix", "open-membership", "none"]
 
 
 class NotificationItemResponse(BaseModel):

@@ -1,0 +1,3 @@
+cd C:\Users\xk\Desktop\codexwork
+$env:XK_SERVER_PASSWORD='271521Lq..'
+.\deploy.ps1

@@ -6,7 +6,6 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from openai import OpenAI
@@ -20,6 +19,8 @@ from app.schemas.paper_summary import normalize_summary_content
 from app.services.ai_provider_manager import resolve_user_provider
 from app.services.crypto import decrypt_api_key
 from app.services.notification import compact_notification_text, create_notification
+from app.services.membership import get_next_summary_to_start, should_start_summary_immediately
+from app.services.background_task_runner import spawn_paper_summary_worker_process
 
 
 SUMMARY_TYPES: dict[str, dict[str, Any]] = {
@@ -127,6 +128,14 @@ LLM_CALL_MAX_ATTEMPTS = 3
 LLM_JSON_MAX_ATTEMPTS = 2
 LLM_RETRY_BACKOFF_SECONDS = (1.0, 2.2, 4.0)
 DB_OPERATIONAL_RETRY_CODES = {2006, 2013}
+
+
+class SummaryTaskCancelled(Exception):
+    pass
+
+
+def spawn_paper_summary_worker(summary_id: int, provider_id: int | None = None) -> None:
+    spawn_paper_summary_worker_process(summary_id, provider_id)
 
 
 def _normalize_datetime(value: datetime | None) -> datetime | None:
@@ -497,16 +506,30 @@ def build_summary_response_payload(
     }
 
 
-def update_summary_progress(summary_id: int, *, stage: str, progress: int, status: str = "running", error: str | None = None) -> None:
+def ensure_summary_task_active(summary_id: int) -> None:
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        item = db.get(PaperSummary, summary_id)
+        if item and item.status == "cancelled":
+            raise SummaryTaskCancelled()
+    finally:
+        db.close()
+
+
+def update_summary_progress(summary_id: int, *, stage: str, progress: int, status: str = "running", error: str | None = None) -> bool:
     from app.db.session import SessionLocal
 
     db = SessionLocal()
     try:
         item = db.get(PaperSummary, summary_id)
         if not item:
-            return
+            return False
+        if item.status == "cancelled":
+            return False
         if item.status == "generated" and (item.stage == "completed" or int(item.progress or 0) >= 100):
-            return
+            return False
         item.status = status
         item.stage = stage
         item.progress = max(0, min(100, int(progress)))
@@ -516,6 +539,7 @@ def update_summary_progress(summary_id: int, *, stage: str, progress: int, statu
             item.error_message = None
         db.add(item)
         db.commit()
+        return True
     finally:
         db.close()
 
@@ -530,6 +554,16 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
                 item = db.get(PaperSummary, summary_id)
                 if not item:
                     return
+                if item.status == "cancelled":
+                    return
+                if item.status == "queued":
+                    item.status = "running"
+                    item.stage = "extracting_context"
+                    item.progress = max(3, int(item.progress or 0))
+                    item.error_message = None
+                    db.add(item)
+                    db.commit()
+                    db.refresh(item)
                 paper = db.scalar(select(Paper).where(Paper.id == item.paper_id, Paper.user_id == item.user_id))
                 if not paper:
                     _mark_failed(db, item, "论文不存在或已被删除")
@@ -548,10 +582,12 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
 
                 annotations = load_annotation_context(db, paper.id, item.user_id)
                 update_summary_progress(summary_id, stage="extracting_context", progress=10)
+                ensure_summary_task_active(summary_id)
 
                 if item.summary_type == "annotations":
                     source_hash = compute_source_hash(paper, item.summary_type, [], annotations)
                     if len(annotations) < 3:
+                        ensure_summary_task_active(summary_id)
                         content = build_sparse_annotation_summary(item.summary_type, annotations)
                         content = normalize_generated_summary(content, item.summary_type, [], annotations, existing_content=item.content_json)
                         _mark_generated(db, item, content, source_hash, provider)
@@ -559,9 +595,11 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
 
                     api_key = decrypt_api_key(provider.encrypted_api_key)
                     update_summary_progress(summary_id, stage="analyzing_structure", progress=48)
+                    ensure_summary_task_active(summary_id)
                     fact_sheet = build_annotation_fact_sheet(paper, annotations)
 
                     update_summary_progress(summary_id, stage="generating_summary", progress=72)
+                    ensure_summary_task_active(summary_id)
                     content = generate_typed_summary(
                         base_url=provider.base_url,
                         api_key=api_key,
@@ -574,11 +612,13 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
                     )
 
                     update_summary_progress(summary_id, stage="checking_coverage", progress=90)
+                    ensure_summary_task_active(summary_id)
                     content = normalize_generated_summary(content, item.summary_type, [], annotations, existing_content=item.content_json)
                     _mark_generated(db, item, content, source_hash, provider)
                     return
 
                 pages = extract_paper_pages(db, paper)
+                ensure_summary_task_active(summary_id)
                 if item.summary_type != "annotations" and total_chars(pages) < 100:
                     _mark_failed(db, item, "未能提取到足够的 PDF 正文，请检查原文是否可解析")
                     return
@@ -586,6 +626,7 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
                 source_hash = compute_source_hash(paper, item.summary_type, pages, annotations)
                 api_key = decrypt_api_key(provider.encrypted_api_key)
                 update_summary_progress(summary_id, stage="chunking", progress=22)
+                ensure_summary_task_active(summary_id)
                 chunk_digests = build_chunk_digests(
                     base_url=provider.base_url,
                     api_key=api_key,
@@ -596,6 +637,7 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
                 )
 
                 update_summary_progress(summary_id, stage="analyzing_structure", progress=50)
+                ensure_summary_task_active(summary_id)
                 fact_sheet = build_fact_sheet(
                     base_url=provider.base_url,
                     api_key=api_key,
@@ -607,6 +649,7 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
                 )
 
                 update_summary_progress(summary_id, stage="generating_summary", progress=72)
+                ensure_summary_task_active(summary_id)
                 content = generate_typed_summary(
                     base_url=provider.base_url,
                     api_key=api_key,
@@ -619,8 +662,11 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
                 )
 
                 update_summary_progress(summary_id, stage="checking_coverage", progress=90)
+                ensure_summary_task_active(summary_id)
                 content = normalize_generated_summary(content, item.summary_type, pages, annotations, existing_content=item.content_json)
                 _mark_generated(db, item, content, source_hash, provider)
+                return
+            except SummaryTaskCancelled:
                 return
             except Exception as exc:
                 if task_attempt >= LLM_CALL_MAX_ATTEMPTS:
@@ -645,6 +691,8 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
                 sleep_before_retry(task_attempt)
             finally:
                 db.close()
+    except SummaryTaskCancelled:
+        return
     except Exception as exc:
         db = SessionLocal()
         try:
@@ -656,6 +704,9 @@ def run_paper_summary_task(summary_id: int, provider_id: int | None = None) -> N
 
 
 def _mark_generated(db: Session, item: PaperSummary, content: dict[str, Any], source_hash: str, provider: AiProvider) -> None:
+    db.refresh(item)
+    if item.status == "cancelled":
+        return
     item.status = "generated"
     item.stage = "completed"
     item.progress = 100
@@ -678,9 +729,14 @@ def _mark_generated(db: Session, item: PaperSummary, content: dict[str, Any], so
         action_kind="open-summary",
         action_payload={"paper_id": item.paper_id, "summary_type": item.summary_type},
     )
+    _start_next_queued_summary_if_possible(db)
+    _start_waiting_matrix_run_if_possible(db)
 
 
 def _mark_failed(db: Session, item: PaperSummary, message: str) -> None:
+    db.refresh(item)
+    if item.status == "cancelled":
+        return
     next_status = "failed" if not item.content_json else "generated"
     item.status = next_status
     item.stage = "failed"
@@ -701,6 +757,40 @@ def _mark_failed(db: Session, item: PaperSummary, message: str) -> None:
             action_kind="open-summary",
             action_payload={"paper_id": item.paper_id, "summary_type": item.summary_type},
         )
+    _start_next_queued_summary_if_possible(db)
+    _start_waiting_matrix_run_if_possible(db)
+
+
+def _start_next_queued_summary_if_possible(db: Session) -> None:
+    next_item = get_next_summary_to_start(db)
+    if not next_item:
+        return
+    if not should_start_summary_immediately(db, next_item.user_id):
+        return
+    next_item.status = "running"
+    next_item.stage = "extracting_context"
+    next_item.progress = max(3, int(next_item.progress or 0))
+    next_item.error_message = None
+    db.add(next_item)
+    db.commit()
+    try:
+        spawn_paper_summary_worker(next_item.id, next_item.provider_id)
+    except Exception as exc:
+        next_item.status = "queued"
+        next_item.stage = "queued"
+        next_item.progress = 0
+        next_item.error_message = f"启动摘要 worker 失败：{exc}"
+        db.add(next_item)
+        db.commit()
+
+
+def _start_waiting_matrix_run_if_possible(db: Session) -> None:
+    try:
+        from app.services.research_matrix import _start_next_queued_matrix_run_if_possible
+
+        _start_next_queued_matrix_run_if_possible(db)
+    except Exception:
+        return
 
 
 def extract_paper_pages(db: Session, paper: Paper) -> list[PageText]:
@@ -771,6 +861,8 @@ def load_annotation_context(db: Session, paper_id: int, user_id: int) -> list[di
             "end_char": annotation.end_char,
             "type": annotation.type,
             "color": annotation.color or "",
+            "source": annotation.source or "native",
+            "geometry_version": annotation.geometry_version or "v1",
             "quote": clean_text(annotation.quote_text)[:1200],
         }
         for annotation in annotations
@@ -797,12 +889,69 @@ def compute_source_hash(paper: Paper, summary_type: str, pages: list[PageText], 
     return digest.hexdigest()
 
 
-def _annotation_snapshot_from_context(annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    snapshot: list[dict[str, Any]] = []
+def merge_logical_annotations(annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[int, str, str, str, str], list[dict[str, Any]]] = {}
     for annotation in annotations:
         quote = clean_text(annotation.get("quote") or "")[:800]
         if not quote:
             continue
+        key = (
+            int(annotation.get("page") or 0),
+            str(annotation.get("type") or "highlight"),
+            str(annotation.get("color") or ""),
+            str(annotation.get("source") or "native"),
+            str(annotation.get("geometry_version") or "v1"),
+        )
+        grouped.setdefault(key, []).append(annotation)
+
+    merged: list[dict[str, Any]] = []
+    for items in grouped.values():
+        ordered = sorted(
+            items,
+            key=lambda item: (
+                int(item.get("page") or 0),
+                int(item.get("start_char") or 0),
+                int(item.get("end_char") or 0),
+                int(item.get("id") or 0),
+            ),
+        )
+        current: dict[str, Any] | None = None
+        for item in ordered:
+            start_char = int(item.get("start_char") or 0)
+            end_char = int(item.get("end_char") or 0)
+            if current is None or start_char > int(current.get("end_char") or 0):
+                current = {
+                    "id": item.get("id"),
+                    "type": str(item.get("type") or "highlight"),
+                    "page": item.get("page"),
+                    "start_char": start_char,
+                    "end_char": end_char,
+                    "color": str(item.get("color") or ""),
+                    "quote": clean_text(item.get("quote") or "")[:800],
+                    "fragment_count": 1,
+                }
+                merged.append(current)
+                continue
+            current["end_char"] = max(int(current.get("end_char") or 0), end_char)
+            quote = clean_text(item.get("quote") or "")[:800]
+            if quote and quote != current.get("quote"):
+                current["quote"] = f"{current.get('quote') or ''} {quote}".strip()[:800]
+            current["fragment_count"] = int(current.get("fragment_count") or 1) + 1
+
+    return sorted(
+        merged,
+        key=lambda item: (
+            str(item.get("type") or ""),
+            int(item.get("page") or 0),
+            int(item.get("start_char") or 0),
+            int(item.get("id") or 0),
+        ),
+    )
+
+
+def _annotation_snapshot_from_context(annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    snapshot: list[dict[str, Any]] = []
+    for annotation in merge_logical_annotations(annotations):
         snapshot.append(
             {
                 "id": annotation.get("id"),
@@ -811,7 +960,8 @@ def _annotation_snapshot_from_context(annotations: list[dict[str, Any]]) -> list
                 "start_char": annotation.get("start_char"),
                 "end_char": annotation.get("end_char"),
                 "color": str(annotation.get("color") or ""),
-                "quote": quote,
+                "quote": clean_text(annotation.get("quote") or "")[:800],
+                "fragment_count": int(annotation.get("fragment_count") or 1),
             }
         )
     return sorted(
@@ -853,6 +1003,7 @@ def _annotation_snapshot_from_summary(item: PaperSummary) -> list[dict[str, Any]
                     "end_char": annotation.get("end_char"),
                     "color": str(annotation.get("color") or ""),
                     "quote": quote,
+                    "fragment_count": int(annotation.get("fragment_count") or 1),
                 }
             )
     return sorted(
@@ -914,6 +1065,7 @@ def build_chunk_digests(
     for index, chunk in enumerate(chunks, start=1):
         progress = 24 + int(index / max(1, len(chunks)) * 20)
         update_summary_progress(summary_id, stage="chunking", progress=progress)
+        ensure_summary_task_active(summary_id)
         prompt = f"""你是严谨的中文学术阅读助手，请把下面这一段论文内容压缩成可供后续综述使用的事实摘要。
 
 要求：
@@ -928,8 +1080,12 @@ def build_chunk_digests(
 {chunk}"""
         for attempt in range(1, LLM_CALL_MAX_ATTEMPTS + 1):
             try:
+                ensure_summary_task_active(summary_id)
                 digests.append(call_text_completion(base_url=base_url, api_key=api_key, model=model, prompt=prompt, max_tokens=1800))
+                ensure_summary_task_active(summary_id)
                 break
+            except SummaryTaskCancelled:
+                raise
             except Exception as exc:
                 if attempt >= LLM_CALL_MAX_ATTEMPTS:
                     raise
@@ -1360,7 +1516,7 @@ def normalize_sections(
 
 def build_annotation_groups(annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     buckets: dict[str, list[dict[str, Any]]] = {key: [] for key in ANNOTATION_TYPE_LABELS}
-    for annotation in annotations:
+    for annotation in merge_logical_annotations(annotations):
         annotation_type = str(annotation.get("type") or "highlight")
         if annotation_type not in buckets:
             annotation_type = "highlight"
@@ -1386,6 +1542,7 @@ def build_annotation_groups(annotations: list[dict[str, Any]]) -> list[dict[str,
                     "color": str(annotation.get("color") or ""),
                     "start_char": annotation.get("start_char"),
                     "end_char": annotation.get("end_char"),
+                    "fragment_count": int(annotation.get("fragment_count") or 1),
                 }
             )
         groups.append(

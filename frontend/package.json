@@ -5,6 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test \"src/**/*.test.mjs\" vite.config.test.mjs",
+    "lint": "eslint src",
+    "lint:report": "eslint src -f json -o eslint-report.json",
+    "check": "npm run test && npm run build",
+    "check:strict": "npm run lint && npm run test && npm run build",
     "build": "vite build",
     "preview": "vite preview"
   },

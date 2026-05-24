@@ -14,8 +14,12 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.deps import get_current_admin
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import AiProvider, Paper, ReadingRecord, User, UserProfile
+from app.models import AiProvider, MembershipRedeemCode, Paper, ReadingRecord, User, UserProfile
+from app.models.feedback import FeedbackTicket
 from app.schemas.admin import (
+    AdminFeedbackListResponse,
+    AdminFeedbackSummary,
+    AdminFeedbackUpdateRequest,
     AdminOverviewResponse,
     AdminOverviewStats,
     AdminOverviewTrendPoint,
@@ -25,6 +29,25 @@ from app.schemas.admin import (
     AdminUserListResponse,
     AdminUserSummary,
     AdminUserUpdateRequest,
+)
+from app.schemas.membership import (
+    AdminMembershipAssignRequest,
+    AdminMembershipCancelRequest,
+    AdminRedeemCodeCreateRequest,
+    AdminRedeemCodeCreateResponse,
+    AdminRedeemCodeItem,
+    AdminRedeemCodeListResponse,
+    AdminRedeemCodeUpdateRequest,
+)
+from app.services.membership import (
+    assign_membership,
+    build_membership_payload,
+    cancel_active_membership,
+    create_membership_notification,
+    create_redeem_codes,
+    list_redeem_codes,
+    serialize_redeem_code,
+    update_redeem_code,
 )
 from app.services.security import hash_password
 from app.services.upload_mirror import mirror_upload_file, remove_mirrored_upload
@@ -50,6 +73,43 @@ def _empty_metrics_snapshot() -> dict[str, int | str | None]:
         "reading_duration_seconds": 0,
         "latest_reading_at": None,
     }
+
+
+def _get_user_display_name(user: User | None) -> str:
+    if not user:
+        return ""
+    profile = user.profile
+    nickname = (profile.nickname or "").strip() if profile else ""
+    return nickname or user.phone or user.email or user.uid or str(user.id)
+
+
+def _load_redeem_code_users(db: Session, items: list[MembershipRedeemCode]) -> dict[int, User]:
+    user_ids = {int(item.redeemed_by) for item in items if item.redeemed_by is not None}
+    if not user_ids:
+        return {}
+    users = db.scalars(
+        select(User)
+        .options(selectinload(User.profile))
+        .where(User.id.in_(user_ids))
+    ).all()
+    return {int(user.id): user for user in users}
+
+
+def _serialize_redeem_code_item(
+    item: MembershipRedeemCode,
+    redeemed_users: dict[int, User] | None = None,
+) -> dict:
+    payload = serialize_redeem_code(item)
+    user = (redeemed_users or {}).get(int(item.redeemed_by)) if item.redeemed_by is not None else None
+    payload.update(
+        {
+            "redeemed_by_name": _get_user_display_name(user),
+            "redeemed_by_uid": (user.uid or "") if user else "",
+            "redeemed_by_phone": (user.phone or "") if user else "",
+            "redeemed_by_email": (user.email or "") if user else "",
+        }
+    )
+    return payload
 
 
 def _build_user_metrics(
@@ -98,9 +158,28 @@ def _build_user_metrics(
     return metrics
 
 
-def _build_user_summary(user: User, metrics: dict[str, int | str | None] | None = None) -> AdminUserSummary:
+def _load_latest_redeemed_code(db: Session, user_id: int) -> AdminRedeemCodeItem | None:
+    item = db.scalar(
+        select(MembershipRedeemCode)
+        .where(MembershipRedeemCode.redeemed_by == user_id)
+        .order_by(MembershipRedeemCode.redeemed_at.desc(), MembershipRedeemCode.id.desc())
+        .limit(1)
+    )
+    if not item:
+        return None
+    redeemed_users = _load_redeem_code_users(db, [item])
+    return AdminRedeemCodeItem(**_serialize_redeem_code_item(item, redeemed_users))
+
+
+def _build_user_summary(
+    db: Session,
+    user: User,
+    metrics: dict[str, int | str | None] | None = None,
+    redeemed_code: AdminRedeemCodeItem | None = None,
+) -> AdminUserSummary:
     profile = user.profile
     snapshot = metrics or {}
+    membership_payload = build_membership_payload(db, user.id)
     return AdminUserSummary(
         id=user.id,
         uid=user.uid,
@@ -131,6 +210,10 @@ def _build_user_summary(user: User, metrics: dict[str, int | str | None] | None 
         ),
         created_at=_serialize_datetime(user.created_at),
         last_login_at=_serialize_datetime(user.last_login_at),
+        membership=membership_payload["membership"],
+        usage=membership_payload["usage"],
+        features=membership_payload["features"],
+        redeemed_code=redeemed_code,
     )
 
 
@@ -147,6 +230,28 @@ def _build_paper_summary(paper: Paper) -> AdminPaperSummary:
         is_trashed=paper.deleted_at is not None,
         created_at=_serialize_datetime(paper.created_at),
         last_viewed_at=_serialize_datetime(paper.last_viewed_at),
+    )
+
+
+def _build_feedback_summary(item: FeedbackTicket) -> AdminFeedbackSummary:
+    owner = item.user
+    profile = owner.profile if owner else None
+    return AdminFeedbackSummary(
+        id=item.id,
+        user_id=item.user_id,
+        uid=owner.uid if owner else "",
+        nickname=profile.nickname if profile else (owner.uid if owner else ""),
+        phone=owner.phone if owner else "",
+        category=item.category,
+        title=item.title,
+        content=item.content,
+        contact=item.contact,
+        screenshot_url=item.screenshot_url,
+        status=item.status,
+        admin_note=item.admin_note or "",
+        created_at=_serialize_datetime(item.created_at),
+        updated_at=_serialize_datetime(item.updated_at),
+        resolved_at=_serialize_datetime(item.resolved_at),
     )
 
 
@@ -288,7 +393,7 @@ def get_admin_overview(
             user_providers=user_providers,
         ),
         activity_trend=_build_activity_trend(db, activity_trend_start, days=30),
-        recent_users=[_build_user_summary(user, metrics_map.get(user.id)) for user in recent_users],
+        recent_users=[_build_user_summary(db, user, metrics_map.get(user.id)) for user in recent_users],
         recent_papers=[_build_paper_summary(paper) for paper in recent_papers],
     )
 
@@ -302,6 +407,7 @@ def list_admin_users(
     q: str = Query(default=""),
     status: str = Query(default=""),
     is_admin: str = Query(default=""),
+    membership: str = Query(default=""),
     education_verified: str = Query(default=""),
     created_from: str = Query(default=""),
     created_to: str = Query(default=""),
@@ -351,9 +457,22 @@ def list_admin_users(
     )
 
     users = db.scalars(stmt).all()
+    if membership in {"free", "vip", "expired"}:
+        filtered_users: list[User] = []
+        for user in users:
+            info = build_membership_payload(db, user.id)["membership"]
+            if membership == "free" and not info.is_vip and info.status in {"inactive", "cancelled"}:
+                filtered_users.append(user)
+            elif membership == "vip" and info.is_vip and info.status == "active":
+                filtered_users.append(user)
+            elif membership == "expired" and info.status == "expired":
+                filtered_users.append(user)
+        users = filtered_users
+        total = len(users)
+        total_pages = 1
     metrics_map = _build_user_metrics(db, [user.id for user in users])
     return AdminUserListResponse(
-        items=[_build_user_summary(user, metrics_map.get(user.id)) for user in users],
+        items=[_build_user_summary(db, user, metrics_map.get(user.id)) for user in users],
         page=page,
         page_size=page_size,
         total=total,
@@ -376,7 +495,8 @@ def get_admin_user_detail(
         raise HTTPException(status_code=404, detail="用户不存在。")
 
     metrics_map = _build_user_metrics(db, [user.id])
-    return AdminUserDetailResponse(user=_build_user_summary(user, metrics_map.get(user.id)))
+    redeemed_code = _load_latest_redeemed_code(db, user.id)
+    return AdminUserDetailResponse(user=_build_user_summary(db, user, metrics_map.get(user.id), redeemed_code))
 
 
 @router.patch("/users/{user_id}", response_model=AdminUserSummary)
@@ -459,7 +579,131 @@ def update_admin_user(
     db.refresh(user, attribute_names=["profile"])
 
     metrics_map = _build_user_metrics(db, [user.id])
-    return _build_user_summary(user, metrics_map.get(user.id))
+    return _build_user_summary(db, user, metrics_map.get(user.id))
+
+
+@router.post("/users/{user_id}/membership/assign", response_model=AdminUserSummary)
+def assign_admin_user_membership(
+    user_id: int,
+    payload: AdminMembershipAssignRequest,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AdminUserSummary:
+    user = db.scalar(
+        select(User)
+        .options(selectinload(User.profile))
+        .where(User.id == user_id)
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在。")
+    membership = assign_membership(
+        db,
+        user_id=user.id,
+        plan_code=payload.plan_code,
+        duration_days=payload.duration_days,
+        activated_by=current_admin.id,
+        activation_source="admin_assign",
+        note=payload.note,
+        stack_on_existing=payload.stack_on_existing,
+    )
+    create_membership_notification(
+        db,
+        user_id=user.id,
+        event_kind="completed",
+        title="VIP 已开通",
+        message=f"管理员已为你开通 {membership.plan_code}，有效期已更新。",
+        payload={"source": "admin_assign"},
+    )
+    metrics_map = _build_user_metrics(db, [user.id])
+    db.refresh(user, attribute_names=["profile"])
+    return _build_user_summary(db, user, metrics_map.get(user.id))
+
+
+@router.post("/users/{user_id}/membership/cancel", response_model=AdminUserSummary)
+def cancel_admin_user_membership(
+    user_id: int,
+    payload: AdminMembershipCancelRequest,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AdminUserSummary:
+    user = db.scalar(
+        select(User)
+        .options(selectinload(User.profile))
+        .where(User.id == user_id)
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在。")
+    cancelled = cancel_active_membership(
+        db,
+        user_id=user.id,
+        activated_by=current_admin.id,
+        note=payload.note,
+    )
+    if cancelled:
+        create_membership_notification(
+            db,
+            user_id=user.id,
+            event_kind="cancelled",
+            title="VIP 已取消",
+            message="管理员已取消你的 VIP 状态，如需继续使用可重新兑换开通。",
+            payload={"source": "admin_cancel"},
+        )
+    metrics_map = _build_user_metrics(db, [user.id])
+    db.refresh(user, attribute_names=["profile"])
+    return _build_user_summary(db, user, metrics_map.get(user.id))
+
+
+@router.get("/membership/codes", response_model=AdminRedeemCodeListResponse)
+def get_admin_membership_codes(
+    _admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AdminRedeemCodeListResponse:
+    items = list_redeem_codes(db)
+    redeemed_users = _load_redeem_code_users(db, items)
+    return AdminRedeemCodeListResponse(
+        items=[AdminRedeemCodeItem(**_serialize_redeem_code_item(item, redeemed_users)) for item in items]
+    )
+
+
+@router.post("/membership/codes", response_model=AdminRedeemCodeCreateResponse)
+def create_admin_membership_codes(
+    payload: AdminRedeemCodeCreateRequest,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AdminRedeemCodeCreateResponse:
+    items = create_redeem_codes(
+        db,
+        plan_code=payload.plan_code,
+        quantity=payload.quantity,
+        duration_days=payload.duration_days,
+        created_by=current_admin.id,
+        batch_label=payload.batch_label,
+        note=payload.note,
+    )
+    return AdminRedeemCodeCreateResponse(
+        items=[AdminRedeemCodeItem(**_serialize_redeem_code_item(item)) for item in items]
+    )
+
+
+@router.patch("/membership/codes/{code_id}", response_model=AdminRedeemCodeItem)
+def update_admin_membership_code(
+    code_id: int,
+    payload: AdminRedeemCodeUpdateRequest,
+    _admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AdminRedeemCodeItem:
+    item = update_redeem_code(
+        db,
+        code_id=code_id,
+        status_value=payload.status,
+        batch_label=payload.batch_label,
+        note=payload.note,
+        expires_at=payload.expires_at,
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="兑换码不存在。")
+    redeemed_users = _load_redeem_code_users(db, [item])
+    return AdminRedeemCodeItem(**_serialize_redeem_code_item(item, redeemed_users))
 
 
 @router.post("/users/{user_id}/avatar", response_model=AdminUserSummary)
@@ -524,7 +768,7 @@ async def upload_admin_user_avatar(
             pass
 
     metrics_map = _build_user_metrics(db, [user.id])
-    return _build_user_summary(user, metrics_map.get(user.id))
+    return _build_user_summary(db, user, metrics_map.get(user.id))
 
 
 @router.get("/papers", response_model=AdminPaperListResponse)
@@ -539,3 +783,97 @@ def list_admin_papers(
         .limit(200)
     ).all()
     return AdminPaperListResponse(papers=[_build_paper_summary(paper) for paper in papers])
+
+
+@router.get("/feedback", response_model=AdminFeedbackListResponse)
+def list_admin_feedback(
+    _admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=12, ge=1, le=100),
+    q: str = Query(default=""),
+    status: str = Query(default=""),
+    category: str = Query(default=""),
+) -> AdminFeedbackListResponse:
+    conditions = []
+    query_text = q.strip()
+
+    if query_text:
+        pattern = f"%{query_text}%"
+        conditions.append(
+            or_(
+                FeedbackTicket.title.like(pattern),
+                FeedbackTicket.content.like(pattern),
+                FeedbackTicket.contact.like(pattern),
+                FeedbackTicket.user.has(User.uid.like(pattern)),
+                FeedbackTicket.user.has(User.phone.like(pattern)),
+                FeedbackTicket.user.has(User.profile.has(UserProfile.nickname.like(pattern))),
+            )
+        )
+    if status in {"open", "in_progress", "resolved", "closed"}:
+        conditions.append(FeedbackTicket.status == status)
+    if category in {"bug", "feature", "question", "other"}:
+        conditions.append(FeedbackTicket.category == category)
+
+    base_stmt = select(FeedbackTicket).options(selectinload(FeedbackTicket.user).selectinload(User.profile))
+    count_stmt = select(func.count(FeedbackTicket.id))
+    if conditions:
+        filter_clause = and_(*conditions)
+        base_stmt = base_stmt.where(filter_clause)
+        count_stmt = count_stmt.where(filter_clause)
+
+    total = int(db.scalar(count_stmt) or 0)
+    total_pages = max(1, math.ceil(total / page_size)) if total else 1
+    items = db.scalars(
+        base_stmt
+        .order_by(FeedbackTicket.created_at.desc(), FeedbackTicket.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+
+    return AdminFeedbackListResponse(
+        items=[_build_feedback_summary(item) for item in items],
+        page=page,
+        page_size=page_size,
+        total=total,
+        total_pages=total_pages,
+    )
+
+
+@router.patch("/feedback/{ticket_id}", response_model=AdminFeedbackSummary)
+def update_admin_feedback(
+    ticket_id: int,
+    payload: AdminFeedbackUpdateRequest,
+    _admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AdminFeedbackSummary:
+    item = db.scalar(
+        select(FeedbackTicket)
+        .options(selectinload(FeedbackTicket.user).selectinload(User.profile))
+        .where(FeedbackTicket.id == ticket_id)
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="问题反馈不存在。")
+
+    if payload.status is not None:
+        item.status = payload.status
+        if payload.status in {"resolved", "closed"}:
+            item.resolved_at = datetime.utcnow()
+        elif payload.status in {"open", "in_progress"}:
+            item.resolved_at = None
+    if payload.admin_note is not None:
+        item.admin_note = payload.admin_note
+
+    db.add(item)
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="反馈处理更新失败，请稍后重试。") from exc
+    db.refresh(item)
+    item = db.scalar(
+        select(FeedbackTicket)
+        .options(selectinload(FeedbackTicket.user).selectinload(User.profile))
+        .where(FeedbackTicket.id == ticket_id)
+    )
+    return _build_feedback_summary(item)

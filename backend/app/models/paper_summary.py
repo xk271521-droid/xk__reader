@@ -40,4 +40,5 @@ class PaperSummary(Base):
     __table_args__ = (
         UniqueConstraint("paper_id", "user_id", "summary_type", name="uq_paper_summary_user_type"),
         Index("ix_paper_summaries_lookup", "paper_id", "user_id", "summary_type"),
+        Index("ix_paper_summaries_user_status_updated", "user_id", "status", "updated_at"),
     )

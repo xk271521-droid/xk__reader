@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, JSON, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -49,6 +49,7 @@ class Paper(Base):
     creation_date: Mapped[str | None] = mapped_column(String(50), nullable=True)
     modification_date: Mapped[str | None] = mapped_column(String(50), nullable=True)
     doi: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    arxiv_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     page_count: Mapped[int] = mapped_column(Integer, default=0)
     last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
@@ -101,4 +102,27 @@ class Paper(Base):
     __table_args__ = (
         # 同一用户下，文件名+大小联合唯一，防止重复导入
         # {"name": "uq_user_file"},
+    )
+
+
+class PaperLiteratureCache(Base):
+    __tablename__ = "paper_literature_caches"
+
+    id: Mapped[int] = mapped_column(PrimaryKeyType, primary_key=True, autoincrement=True)
+    result_kind: Mapped[str] = mapped_column(String(24))
+    lookup_key: Mapped[str] = mapped_column(String(240))
+    source: Mapped[str] = mapped_column(String(160), default="")
+    payload_json: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        Index("ix_paper_literature_cache_lookup", "result_kind", "lookup_key", unique=True),
     )

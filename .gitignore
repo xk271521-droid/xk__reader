@@ -20,17 +20,24 @@ backend/uploads/
 # Local environment files
 .env
 .env.*
+backend/.env
+backend/.env.*
 !.env.example
 !backend/.env.example
 .venv/
 venv/
 
 # Generated backend logs
+*.log
+*.err.log
+*.out.log
 backend/*.log
 
 # Deployment artifacts and server snapshots
 deploy-*.tar.gz
+deploy-*.zip
 server-backups/
+tmp/
 
 # Local Claude worktrees
 .claude/worktrees/

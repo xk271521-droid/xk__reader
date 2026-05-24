@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import {
   BookCopy,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Clock3,
+  FileCheck2,
   FilePlus2,
   FileText,
   FolderClosed,
@@ -22,15 +25,39 @@ import {
   TimerReset,
   Trash2,
 } from 'lucide-react'
-import { LiteratureSearchPage } from './LiteratureSearchPage'
-import { ReadingInsightSection } from './ReadingInsightSection'
-import { ResearchMatrixPage } from './ResearchMatrixPage'
 import { fetchResearchMatrixRuns } from '../../services/paperReaderApi'
+import {
+  DEFAULT_RESOURCE_BRANCH_ORIGIN,
+  buildResourceBranchPath,
+  getResourceBranchOrigin,
+} from './resourceMapGeometry'
+import { loadHomeSectionComponent, preloadHomeSection } from './homeSectionPreload'
+import {
+  buildLibraryBulkSummary,
+  createBulkOperationPlan,
+  getLibraryAdvancedFilterOptions,
+  matchesLibraryAdvancedFilters,
+} from './libraryWorkflowModel'
+import '../../styles/home-library.css'
+
+const LiteratureSearchPage = lazy(() =>
+  loadHomeSectionComponent('literature-search').then((component) => ({ default: component })),
+)
+const PaperFormatPage = lazy(() =>
+  loadHomeSectionComponent('paper-format').then((component) => ({ default: component })),
+)
+const ReadingInsightSection = lazy(() =>
+  loadHomeSectionComponent('insights').then((component) => ({ default: component })),
+)
+const ResearchMatrixPage = lazy(() =>
+  loadHomeSectionComponent('matrix').then((component) => ({ default: component })),
+)
 
 const homeSections = [
   { id: 'recent', label: '阅读记录', icon: Clock3 },
   { id: 'library', label: '我的文献', icon: LibraryBig },
   { id: 'literature-search', label: '文献检索', icon: SearchCheck },
+  { id: 'paper-format', label: '格式正规化', icon: FileCheck2 },
   { id: 'insights', label: '阅读信息站', icon: Radar },
   { id: 'matrix', label: '文献矩阵', icon: Network },
   { id: 'trash', label: '回收站', icon: Trash2 },
@@ -54,6 +81,11 @@ const PENDING_TASK_ORDER = [
   'matrix-pending',
   'trash-soon',
 ]
+const HOME_PENDING_VISIBLE_COUNT = 5
+
+function SectionFallback({ message }) {
+  return <div className="reader-empty">{message}</div>
+}
 
 function formatDateTime(timestamp) {
   return new Intl.DateTimeFormat('zh-CN', {
@@ -338,11 +370,12 @@ function buildPendingTasks({
     const leftOrder = PENDING_TASK_ORDER.indexOf(left.id)
     const rightOrder = PENDING_TASK_ORDER.indexOf(right.id)
     return (leftOrder >= 0 ? leftOrder : 99) - (rightOrder >= 0 ? rightOrder : 99)
-  }).slice(0, 6)
+  })
 }
 
 const RESOURCE_MAP_VIEWBOX_SIZE = 100
 const RESOURCE_DRAG_THRESHOLD = 5
+const RESOURCE_BRANCH_ORIGIN_EPSILON = 0.1
 const RESOURCE_LEAF_MIN_X = 15
 const RESOURCE_LEAF_MAX_X = 88
 const RESOURCE_LEAF_MIN_Y = 14
@@ -399,19 +432,6 @@ function getResourceMapHeight(count) {
   return Math.max(292, Math.min(420, 260 + Math.ceil(Math.max(1, count) / 3) * 38))
 }
 
-function buildResourceBranchPath(layout, index, count) {
-  const startX = 4
-  const startY = 51 + (count % 2 === 0 ? -2 : 1)
-  const endX = layout.x_pct
-  const endY = layout.y_pct
-  const curl = ((index % 5) - 2) * 3.2
-  const c1x = 13 + (index % 4) * 2.4
-  const c1y = startY + (endY - startY) * 0.22 + curl
-  const c2x = endX - 18 - (index % 3) * 4
-  const c2y = endY + (index % 2 === 0 ? 7 : -8) - curl * 0.18
-  return `M ${startX} ${startY} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${endX} ${endY}`
-}
-
 function PaperResourceMap({ paper, resources = [], onOpenResource, onSaveResourceLayout }) {
   const mapRef = useRef(null)
   const dragStateRef = useRef(null)
@@ -420,6 +440,7 @@ function PaperResourceMap({ paper, resources = [], onOpenResource, onSaveResourc
   const [draggingType, setDraggingType] = useState('')
   const [saveError, setSaveError] = useState('')
   const [leafLayouts, setLeafLayouts] = useState({})
+  const [branchOrigin, setBranchOrigin] = useState(DEFAULT_RESOURCE_BRANCH_ORIGIN)
   const height = getResourceMapHeight(resources.length)
   const paperId = paper?.id ?? paper?.paper_id
 
@@ -436,6 +457,55 @@ function PaperResourceMap({ paper, resources = [], onOpenResource, onSaveResourc
     })
   }, [resources])
 
+  useEffect(() => {
+    const mapNode = mapRef.current
+    const rowNode = mapNode?.closest('.home-category-table__row')
+    if (!mapNode || !rowNode) return undefined
+
+    let frameId = 0
+    let resizeObserver = null
+
+    function updateBranchOrigin() {
+      window.cancelAnimationFrame(frameId)
+      frameId = window.requestAnimationFrame(() => {
+        const mapRect = mapNode.getBoundingClientRect()
+        const rowRect = rowNode.getBoundingClientRect()
+        const contentBottom = Array.from(rowNode.children)
+          .filter((child) => child !== mapNode && !child.classList.contains('paper-resource-map'))
+          .reduce((bottom, child) => Math.max(bottom, child.getBoundingClientRect().bottom), rowRect.top)
+        const nextOrigin = getResourceBranchOrigin({
+          rowLeft: rowRect.left,
+          rowWidth: rowRect.width,
+          contentBottom,
+          mapLeft: mapRect.left,
+          mapTop: mapRect.top,
+          mapWidth: mapRect.width,
+          mapHeight: mapRect.height,
+        })
+
+        setBranchOrigin((current) => {
+          const sameX = Math.abs(current.x_pct - nextOrigin.x_pct) < RESOURCE_BRANCH_ORIGIN_EPSILON
+          const sameY = Math.abs(current.y_pct - nextOrigin.y_pct) < RESOURCE_BRANCH_ORIGIN_EPSILON
+          return sameX && sameY ? current : nextOrigin
+        })
+      })
+    }
+
+    updateBranchOrigin()
+    window.addEventListener('resize', updateBranchOrigin)
+    if (window.ResizeObserver) {
+      resizeObserver = new window.ResizeObserver(updateBranchOrigin)
+      resizeObserver.observe(mapNode)
+      resizeObserver.observe(rowNode)
+    }
+
+    return () => {
+      window.cancelAnimationFrame(frameId)
+      window.removeEventListener('resize', updateBranchOrigin)
+      resizeObserver?.disconnect()
+    }
+  }, [resources.length])
+
   if (!resources.length) return null
 
   const layout = resources.map((resource, index) => {
@@ -444,7 +514,7 @@ function PaperResourceMap({ paper, resources = [], onOpenResource, onSaveResourc
     return {
       resource,
       layout: itemLayout,
-      d: buildResourceBranchPath(itemLayout, index, resources.length),
+      d: buildResourceBranchPath(itemLayout, index, resources.length, branchOrigin),
       delay: `${(index % 6) * 0.34}s`,
       float: `${4 + (index % 3)}px`,
     }
@@ -734,18 +804,17 @@ function ContinueWorkSection({ item, onBrowseLibrary, onOpenPaper, onOpenResourc
             {paper.folderName || '未分类'}
             {paper.metadata?.author ? ` / ${paper.metadata.author}` : ''}
           </p>
-          <div className="home-continue-card__status">
-            <span className="home-paper-pill is-open">{item.statusLabel}</span>
-            <time>{formatDateTime(paper.lastViewedAt)}</time>
+          <div className="home-continue-card__meta-row" aria-label="阅读状态">
+            <span className="home-continue-card__meta-chip is-status">{item.statusLabel}</span>
+            <time className="home-continue-card__meta-chip is-time">
+              {formatDateTime(paper.lastViewedAt)}
+            </time>
+            {[item.statusHint, ...item.statusTags].filter(Boolean).map((tag, index) => (
+              <span key={`${tag}-${index}`} className="home-continue-card__meta-chip">
+                {tag}
+              </span>
+            ))}
           </div>
-          <p className="home-continue-card__hint">{item.statusHint}</p>
-          {item.statusTags.length ? (
-            <div className="home-continue-card__tags">
-              {item.statusTags.map((tag) => (
-                <span key={tag} className="home-continue-card__tag">{tag}</span>
-              ))}
-            </div>
-          ) : null}
         </div>
 
         <div className="home-continue-card__actions">
@@ -773,34 +842,101 @@ function ContinueWorkSection({ item, onBrowseLibrary, onOpenPaper, onOpenResourc
   )
 }
 
-function PendingTaskSection({ tasks, onTaskClick }) {
+function PendingTaskSection({ tasks, onTaskClick, searchSlot = null }) {
+  const [isExpanded, setIsExpanded] = useState(false)
+  const visibleTasks = isExpanded ? tasks : tasks.slice(0, HOME_PENDING_VISIBLE_COUNT)
+  const hiddenTaskCount = Math.max(tasks.length - HOME_PENDING_VISIBLE_COUNT, 0)
+
   return (
     <section className="home-pending-panel">
-      <div className="home-section-head home-section-head--compact">
-        <h3>现在最值得处理的事</h3>
-        <span>点一下直接跳到对应文献或工作区</span>
+      <div className="home-section-head home-section-head--compact home-section-head--with-search">
+        <div className="home-section-head__copy">
+          <h3>现在最值得处理的事</h3>
+          <span>点一下直接跳到对应文献或工作区</span>
+        </div>
+        {searchSlot ? <div className="home-pending-panel__search">{searchSlot}</div> : null}
       </div>
 
       {tasks.length ? (
-        <div className="home-pending-grid">
-          {tasks.map((task) => (
+        <div className="home-pending-list" id="home-pending-task-list">
+          {visibleTasks.map((task, index) => (
             <button
               key={task.id}
               type="button"
-              className={`home-pending-card home-pending-card--${task.tone || 'slate'}`}
+              className={`home-pending-item home-pending-item--${task.tone || 'slate'}`}
               onClick={() => onTaskClick(task)}
             >
-              <strong>{task.count}</strong>
-              <span>{task.title}</span>
-              <small>{task.helper}</small>
-              {task.label ? <em>{task.label}</em> : null}
+              <span className="home-pending-item__rank">{String(index + 1).padStart(2, '0')}</span>
+              <strong className="home-pending-item__count">{task.count}</strong>
+              <span className="home-pending-item__body">
+                <span className="home-pending-item__title">{task.title}</span>
+                <small>{task.helper}</small>
+                {task.label ? <em>{task.label}</em> : null}
+              </span>
+              <ChevronRight className="home-pending-item__arrow" aria-hidden="true" />
             </button>
           ))}
+          {hiddenTaskCount > 0 ? (
+            <button
+              type="button"
+              className="home-pending-more"
+              aria-controls="home-pending-task-list"
+              aria-expanded={isExpanded}
+              onClick={() => setIsExpanded((value) => !value)}
+            >
+              <span>{isExpanded ? '收起列表' : `还有 ${hiddenTaskCount} 项`}</span>
+              {isExpanded ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />}
+            </button>
+          ) : null}
         </div>
       ) : (
         <div className="home-inline-message">当前没有堆着不处理就会耽误的事，可以直接回到你的阅读列表继续推进。</div>
       )}
     </section>
+  )
+}
+
+function HomeSearchControl({
+  activeSection,
+  searchTerm,
+  onSearchChange,
+  searchResults,
+  onResultClick,
+  className = '',
+}) {
+  const placeholder =
+    activeSection === 'library'
+      ? '搜索当前文件夹标题、作者、关键词'
+      : '搜索当前工作区文献'
+
+  return (
+    <div className={`home-search-wrap${className ? ` ${className}` : ''}`}>
+      <label className="home-search">
+        <Search />
+        <input
+          type="search"
+          placeholder={placeholder}
+          value={searchTerm}
+          onChange={(event) => onSearchChange(event.target.value)}
+        />
+      </label>
+
+      {searchResults.length > 0 ? (
+        <div className="home-search-results">
+          {searchResults.map((paper) => (
+            <button
+              key={paper.id}
+              type="button"
+              className="home-search-results__item"
+              onClick={() => onResultClick(paper)}
+            >
+              <span className="home-search-results__title">{paper.title}</span>
+              <span className="home-search-results__folder">{paper._folderName}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -813,8 +949,10 @@ function CategorySection({
   onMovePaper,
   onOpenPaper,
   onOpenResource,
+  onRefreshPaperMetadata,
   onSaveResourceLayout,
   paperResourcesById = {},
+  advancedFilters = {},
   statusFilter = 'all',
   recentPapers,
   searchTerm,
@@ -823,6 +961,8 @@ function CategorySection({
 }) {
   const [menuPaperId, setMenuPaperId] = useState('')
   const [expandedResourcePaperId, setExpandedResourcePaperId] = useState('')
+  const [selectedPaperIds, setSelectedPaperIds] = useState(() => new Set())
+  const [bulkTargetFolderId, setBulkTargetFolderId] = useState('')
   const keyword = searchTerm.trim().toLowerCase()
   const currentCategoryName =
     selectedFolderId === uncategorizedFolderId
@@ -838,16 +978,13 @@ function CategorySection({
       return false
     }
 
-    if (!keyword) {
-      return true
-    }
-
-    return [paper.title, paper.fileName, paper.metadata.author]
-      .filter(Boolean)
-      .some((field) => field.toLowerCase().includes(keyword))
+    return matchesLibraryAdvancedFilters(paper, {
+      ...advancedFilters,
+      keyword,
+    })
   })
 
-  const PAGE_SIZE = 15
+  const PAGE_SIZE = 10
   const [currentPage, setCurrentPage] = useState(1)
   const totalPages = Math.max(1, Math.ceil(papersInCategory.length / PAGE_SIZE))
 
@@ -855,7 +992,9 @@ function CategorySection({
     setCurrentPage(1)
     setMenuPaperId('')
     setExpandedResourcePaperId('')
-  }, [selectedFolderId, searchTerm, statusFilter])
+    setSelectedPaperIds(new Set())
+    setBulkTargetFolderId('')
+  }, [selectedFolderId, searchTerm, statusFilter, advancedFilters.author, advancedFilters.year])
 
   // Jump to paper and auto-scroll page
   const jumpTargetIndex = useMemo(() => {
@@ -880,14 +1019,48 @@ function CategorySection({
 
   const pageStart = (currentPage - 1) * PAGE_SIZE
   const pagePapers = papersInCategory.slice(pageStart, pageStart + PAGE_SIZE)
-  // Pad to PAGE_SIZE rows to maintain fixed height
-  const paddedRows = [
-    ...pagePapers,
-    ...Array.from({ length: Math.max(0, PAGE_SIZE - pagePapers.length) }, (_, i) => ({
-      _empty: true,
-      _key: `empty-${i}`,
-    })),
-  ]
+  const bulkSummary = buildLibraryBulkSummary(selectedPaperIds, papersInCategory)
+  const allPageSelected = pagePapers.length > 0 && pagePapers.every((paper) => selectedPaperIds.has(String(paper.id)))
+
+  function togglePaperSelection(paperId) {
+    setSelectedPaperIds((previous) => {
+      const next = new Set(previous)
+      const id = String(paperId)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function togglePageSelection() {
+    setSelectedPaperIds((previous) => {
+      const next = new Set(previous)
+      if (allPageSelected) {
+        pagePapers.forEach((paper) => next.delete(String(paper.id)))
+      } else {
+        pagePapers.forEach((paper) => next.add(String(paper.id)))
+      }
+      return next
+    })
+  }
+
+  function refreshPaperMetadataQuietly(paperId) {
+    if (!onRefreshPaperMetadata) return
+    Promise.resolve(onRefreshPaperMetadata(paperId)).catch(() => {})
+  }
+
+  function runBulkAction(action, value = '') {
+    const plan = createBulkOperationPlan(action, selectedPaperIds, value)
+    if (!plan.canRun) return
+    plan.paperIds.forEach((paperId) => {
+      if (action === 'move') onMovePaper(paperId, value)
+      if (action === 'delete') onDeletePaper(paperId)
+      if (action === 'refresh-metadata') refreshPaperMetadataQuietly(paperId)
+    })
+    setSelectedPaperIds(new Set())
+    setBulkTargetFolderId('')
+    setMenuPaperId('')
+  }
 
   function handlePrevPage() {
     setCurrentPage((p) => Math.max(1, p - 1))
@@ -913,8 +1086,45 @@ function CategorySection({
         <span className="home-category-panel__count">{papersInCategory.length} 篇</span>
       </div>
 
+      {bulkSummary.hasSelection ? (
+        <div className="home-library-bulkbar">
+          <strong>已选 {bulkSummary.count} 篇</strong>
+          <select
+            value={bulkTargetFolderId}
+            onChange={(event) => setBulkTargetFolderId(event.target.value)}
+            aria-label="批量移动目标分类"
+          >
+            <option value="">选择目标分类</option>
+            <option value={uncategorizedFolderId}>未分类</option>
+            {folders.map((folder) => (
+              <option key={folder.id} value={folder.id}>{folder.name}</option>
+            ))}
+          </select>
+          <button type="button" onClick={() => runBulkAction('move', bulkTargetFolderId)} disabled={!bulkTargetFolderId}>
+            移动
+          </button>
+          <button type="button" onClick={() => runBulkAction('refresh-metadata')} disabled={!onRefreshPaperMetadata}>
+            重新识别
+          </button>
+          <button type="button" className="is-danger" onClick={() => runBulkAction('delete')}>
+            删除
+          </button>
+          <button type="button" onClick={() => setSelectedPaperIds(new Set())}>
+            取消选择
+          </button>
+        </div>
+      ) : null}
+
       <div className="home-category-table">
         <div className="home-category-table__head">
+          <span>
+            <input
+              type="checkbox"
+              checked={allPageSelected}
+              onChange={togglePageSelection}
+              aria-label="选择当前页文献"
+            />
+          </span>
           <span>原文标题</span>
           <span>译文标题</span>
           <span>作者</span>
@@ -923,21 +1133,26 @@ function CategorySection({
         </div>
 
         {papersInCategory.length > 0 ? (
-          paddedRows.map((paper) => {
-            if (paper._empty) {
-              return <div key={paper._key} className="home-category-table__row home-category-table__row--empty" />
-            }
-
+          pagePapers.map((paper) => {
             const resourceRecord = paperResourcesById[String(paper.id)]
             const resources = resourceRecord?.resources || []
             const flags = getPaperStatusFlags(paper, resources)
             const isResourceExpanded = expandedResourcePaperId === paper.id && resources.length > 0
+            const isSelected = selectedPaperIds.has(String(paper.id))
 
             return (
               <div
                 key={paper.id}
-                className={`home-category-table__row${highlightPaperId === paper.id ? ' is-highlight' : ''}${isResourceExpanded ? ' is-resource-expanded' : ''}`}
+                className={`home-category-table__row${highlightPaperId === paper.id ? ' is-highlight' : ''}${isResourceExpanded ? ' is-resource-expanded' : ''}${isSelected ? ' is-selected' : ''}`}
               >
+                <label className="home-category-select">
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => togglePaperSelection(paper.id)}
+                    aria-label={`选择 ${paper.title}`}
+                  />
+                </label>
                 <button
                   type="button"
                   className="home-category-paper"
@@ -988,9 +1203,9 @@ function CategorySection({
                           type="button"
                           className="home-row-menu__item"
                           onClick={() => setMenuPaperId('')}
-                        >
-                          移入...
-                        </button>
+                      >
+                        移入...
+                      </button>
                         <div className="home-row-submenu">
                           {folders
                             .filter((f) => String(f.id) !== String(paper.folderId))
@@ -1021,6 +1236,17 @@ function CategorySection({
                           ) : null}
                         </div>
                       </div>
+                      <button
+                        type="button"
+                        className="home-row-menu__item"
+                        onClick={() => {
+                          setMenuPaperId('')
+                          refreshPaperMetadataQuietly(paper.id)
+                        }}
+                        disabled={!onRefreshPaperMetadata}
+                      >
+                        重新识别元数据
+                      </button>
                       <button
                         type="button"
                         className="home-row-menu__item home-row-menu__item--danger"
@@ -1204,6 +1430,7 @@ export function HomePage({
   currentUser,
   folders,
   importConflict,
+  importStatus = null,
   isImporting,
   onCancelImportConflict,
   onCreateFolder,
@@ -1216,12 +1443,14 @@ export function HomePage({
   onJumpToPaperEvidence,
   onOpenResource,
   onPermanentlyDeletePaper,
+  onRefreshPaperMetadata,
   onRefreshResources,
   onRefreshTrash,
   onRestorePaper,
   onSaveResourceLayout,
   onRenameFolder,
   onResolveImportConflict,
+  onRetryImportConflict,
   recentPapers,
   readingDashboard = null,
   insightTimeframe = 'month',
@@ -1240,8 +1469,12 @@ export function HomePage({
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedFolderId, setSelectedFolderId] = useState(uncategorizedFolderId)
   const [libraryStatusFilter, setLibraryStatusFilter] = useState('all')
+  const [libraryAuthorFilter, setLibraryAuthorFilter] = useState('')
+  const [libraryYearFilter, setLibraryYearFilter] = useState('')
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
+  const [isSubmittingFolder, setIsSubmittingFolder] = useState(false)
   const [folderName, setFolderName] = useState('')
+  const [folderError, setFolderError] = useState('')
   const [showImportMenu, setShowImportMenu] = useState(false)
   const [editingFolderId, setEditingFolderId] = useState('')
   const [editFolderName, setEditFolderName] = useState('')
@@ -1249,6 +1482,9 @@ export function HomePage({
   const [jumpPaperId, setJumpPaperId] = useState('')
   const [matrixRuns, setMatrixRuns] = useState([])
   const visibleHomeSections = homeSections
+  const deferredSearchTerm = useDeferredValue(searchTerm)
+  const effectiveSearchTerm = searchTerm.trim() ? deferredSearchTerm : ''
+  const importProgressMessage = importStatus?.message || '导入中...'
 
   useEffect(() => {
     if (uncategorizedFolderId && selectedFolderId === '') {
@@ -1261,6 +1497,12 @@ export function HomePage({
       setActiveSection(initialSection)
     }
   }, [initialSection])
+
+  useEffect(() => {
+    if (activeSection !== 'library') {
+      setShowImportMenu(false)
+    }
+  }, [activeSection])
 
   useEffect(() => {
     let cancelled = false
@@ -1285,8 +1527,8 @@ export function HomePage({
   }, [])
 
   const groupedPapers = useMemo(
-    () => buildGroupedPapers(recentPapers, searchTerm),
-    [recentPapers, searchTerm],
+    () => buildGroupedPapers(recentPapers, effectiveSearchTerm),
+    [effectiveSearchTerm, recentPapers],
   )
   const hasImportedPapers = recentPapers.length > 0
   const showRecentWorkspaceEmpty = activeSection === 'recent' && !hasImportedPapers
@@ -1314,9 +1556,9 @@ export function HomePage({
         metadata: { author: r.author },
         isOpen: false,
       })),
-      searchTerm,
+      effectiveSearchTerm,
     )
-  }, [recentReadings, searchTerm])
+  }, [effectiveSearchTerm, recentReadings])
 
   const paperResourcesById = useMemo(
     () => getPaperResourceMap(resourceOverview),
@@ -1343,6 +1585,11 @@ export function HomePage({
     () => LIBRARY_STATUS_FILTERS.find((item) => item.id === libraryStatusFilter)?.label || '全部',
     [libraryStatusFilter],
   )
+  const libraryAdvancedOptions = useMemo(
+    () => getLibraryAdvancedFilterOptions(recentPapers, selectedFolderId),
+    [recentPapers, selectedFolderId],
+  )
+  const activeAdvancedFilterCount = Number(Boolean(libraryAuthorFilter)) + Number(Boolean(libraryYearFilter))
 
   function requireLogin(featureLabel = '该功能') {
     if (!isGuest) return false
@@ -1403,8 +1650,8 @@ export function HomePage({
   }, [readingStats])
 
   const globalSearchResults = useMemo(() => {
-    if ((activeSection !== 'library' && activeSection !== 'recent') || !searchTerm.trim()) return []
-    const kw = searchTerm.trim().toLowerCase()
+    if ((activeSection !== 'library' && activeSection !== 'recent') || !effectiveSearchTerm.trim()) return []
+    const kw = effectiveSearchTerm.trim().toLowerCase()
     return recentPapers
       .filter((p) =>
         [p.title, p.fileName, p.metadata?.author, p.metadata?.subject, p.metadata?.keywords]
@@ -1418,13 +1665,15 @@ export function HomePage({
             ? '未分类'
             : folders.find((f) => f.id === paper.folderId)?.name || '未分类',
       }))
-  }, [activeSection, searchTerm, recentPapers, folders, uncategorizedFolderId])
+  }, [activeSection, effectiveSearchTerm, recentPapers, folders, uncategorizedFolderId])
 
   function handleGlobalSearchClick(paper) {
     if (requireLogin('打开文献')) return
     setSearchTerm('')
     setSelectedFolderId(paper.folderId)
     setLibraryStatusFilter('all')
+    setLibraryAuthorFilter('')
+    setLibraryYearFilter('')
     setActiveSection('library')
     setHighlightPaperId(paper.id)
     setJumpPaperId(paper.id)
@@ -1436,13 +1685,33 @@ export function HomePage({
   }
 
   async function handleCreateFolder() {
+    if (isSubmittingFolder) return
     if (requireLogin('新建分类')) return
-    const result = await onCreateFolder(folderName)
-    if (result.ok) {
+
+    const normalizedName = folderName.trim()
+    if (!normalizedName) {
+      setFolderError('请输入文件夹名称')
+      return
+    }
+
+    setIsSubmittingFolder(true)
+    setFolderError('')
+
+    try {
+      const result = await onCreateFolder(normalizedName)
+      if (!result?.ok) {
+        setFolderError(result?.message || '创建失败，请稍后重试')
+        return
+      }
+
       setFolderName('')
       setSelectedFolderId(result.folder.id)
       setIsCreatingFolder(false)
       setActiveSection('library')
+    } catch (error) {
+      setFolderError(error instanceof Error ? error.message : '创建失败，请稍后重试')
+    } finally {
+      setIsSubmittingFolder(false)
     }
   }
 
@@ -1461,7 +1730,7 @@ export function HomePage({
   }
 
   function handleSelectSection(sectionId) {
-    if (isGuest && ['library', 'insights', 'matrix', 'trash'].includes(sectionId)) {
+    if (isGuest && ['library', 'paper-format', 'insights', 'matrix', 'trash'].includes(sectionId)) {
       requireLogin(homeSections.find((item) => item.id === sectionId)?.label || '该功能')
       return
     }
@@ -1480,6 +1749,8 @@ export function HomePage({
     if (requireLogin('我的文献')) return
     setActiveSection('library')
     setLibraryStatusFilter('all')
+    setLibraryAuthorFilter('')
+    setLibraryYearFilter('')
     setSearchTerm('')
   }
 
@@ -1498,6 +1769,8 @@ export function HomePage({
 
     setActiveSection('library')
     setLibraryStatusFilter(task.id === 'notes' ? 'notes' : task.id)
+    setLibraryAuthorFilter('')
+    setLibraryYearFilter('')
     setSearchTerm('')
   }
 
@@ -1516,6 +1789,8 @@ export function HomePage({
                   <button
                     type="button"
                     className={`home-sidebar__item${isActive ? ' is-active' : ''}`}
+                    onFocus={() => preloadHomeSection(item.id)}
+                    onMouseEnter={() => preloadHomeSection(item.id)}
                     onClick={() => handleSelectSection(item.id)}
                   >
                     <Icon />
@@ -1531,7 +1806,12 @@ export function HomePage({
                       onClick={(event) => {
                         event.stopPropagation()
                         setActiveSection('library')
-                        setIsCreatingFolder((current) => !current)
+                        setIsCreatingFolder((current) => {
+                          if (!current) {
+                            setFolderError('')
+                          }
+                          return !current
+                        })
                       }}
                     >
                       <FolderPlus />
@@ -1547,11 +1827,33 @@ export function HomePage({
                           type="text"
                           value={folderName}
                           placeholder="新建分类"
-                          onChange={(event) => setFolderName(event.target.value)}
+                          onChange={(event) => {
+                            setFolderName(event.target.value)
+                            if (folderError) setFolderError('')
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.preventDefault()
+                              handleCreateFolder()
+                            } else if (event.key === 'Escape') {
+                              setIsCreatingFolder(false)
+                              setFolderError('')
+                            }
+                          }}
+                          disabled={isSubmittingFolder}
                         />
-                        <button type="button" onClick={handleCreateFolder}>
-                          添加
+                        <button
+                          type="button"
+                          onClick={handleCreateFolder}
+                          disabled={isSubmittingFolder || !folderName.trim()}
+                        >
+                          {isSubmittingFolder ? '添加中' : '添加'}
                         </button>
+                        {folderError ? (
+                          <p className="home-sidebar-create__error" role="alert">
+                            {folderError}
+                          </p>
+                        ) : null}
                       </div>
                     ) : null}
 
@@ -1642,10 +1944,11 @@ export function HomePage({
         </div>
       </aside>
 
-      <div className={`home-content${activeSection === 'matrix' ? ' is-matrix' : ''}${activeSection === 'literature-search' ? ' is-literature-search' : ''}`}>
-        {activeSection !== 'trash' && activeSection !== 'matrix' && activeSection !== 'insights' && activeSection !== 'literature-search' ? (
+      <div className={`home-content${activeSection === 'library' ? ' is-library' : ''}${activeSection === 'matrix' ? ' is-matrix' : ''}${activeSection === 'literature-search' ? ' is-literature-search' : ''}${activeSection === 'paper-format' ? ' is-paper-format' : ''}`}>
+        {activeSection === 'library' ? (
         <div className={`home-toolbar${activeSection === 'library' ? ' is-library' : ''}`}>
-          <div className="home-toolbar__actions">
+          {activeSection === 'library' ? (
+            <div className="home-toolbar__actions">
             <button
               type="button"
               className="home-primary-button"
@@ -1676,9 +1979,10 @@ export function HomePage({
                 ))}
               </div>
             ) : null}
-          </div>
+            </div>
+          ) : null}
 
-          {!showRecentWorkspaceEmpty ? (
+          {activeSection === 'library' ? (
             <div className="home-search-wrap">
               <label className="home-search">
                 <Search />
@@ -1729,7 +2033,20 @@ export function HomePage({
                   paperResourcesById={paperResourcesById}
                 />
 
-                <PendingTaskSection tasks={pendingTasks} onTaskClick={handlePendingTaskClick} />
+                <PendingTaskSection
+                  tasks={pendingTasks}
+                  onTaskClick={handlePendingTaskClick}
+                  searchSlot={
+                    <HomeSearchControl
+                      activeSection={activeSection}
+                      searchTerm={searchTerm}
+                      onSearchChange={setSearchTerm}
+                      searchResults={globalSearchResults}
+                      onResultClick={handleGlobalSearchClick}
+                      className="home-search-wrap--pending"
+                    />
+                  }
+                />
               </>
             ) : null}
 
@@ -1788,19 +2105,29 @@ export function HomePage({
         ) : null}
 
         {activeSection === 'insights' ? (
-          <ReadingInsightSection
-            dashboard={readingDashboard}
-            timeframe={insightTimeframe}
-            uiFontScale={uiFontScale}
-            onTimeframeChange={onInsightTimeframeChange}
-          />
+          <Suspense fallback={<SectionFallback message="正在加载阅读洞察..." />}>
+            <ReadingInsightSection
+              dashboard={readingDashboard}
+              timeframe={insightTimeframe}
+              uiFontScale={uiFontScale}
+              onTimeframeChange={onInsightTimeframeChange}
+            />
+          </Suspense>
         ) : null}
 
         {activeSection === 'literature-search' ? (
-          <LiteratureSearchPage />
+          <Suspense fallback={<SectionFallback message="正在加载文献检索..." />}>
+            <LiteratureSearchPage />
+          </Suspense>
         ) : null}
 
-        {activeSection !== 'matrix' && activeSection !== 'insights' && activeSection !== 'literature-search' && !showRecentWorkspaceEmpty ? (
+        {activeSection === 'paper-format' ? (
+          <Suspense fallback={<SectionFallback message="正在加载格式正规化工具..." />}>
+            <PaperFormatPage />
+          </Suspense>
+        ) : null}
+
+        {activeSection !== 'matrix' && activeSection !== 'insights' && activeSection !== 'literature-search' && activeSection !== 'paper-format' && !showRecentWorkspaceEmpty ? (
         <div className={`home-section-head${activeSection === 'library' ? ' is-library' : ''}`}>
           <h3>
             {activeSection === 'recent' && '阅读记录'}
@@ -1843,8 +2170,53 @@ export function HomePage({
               ))}
             </div>
 
+            <div className="home-library-advanced-filter">
+              <label>
+                <span>作者</span>
+                <input
+                  type="search"
+                  list="library-author-options"
+                  value={libraryAuthorFilter}
+                  onChange={(event) => setLibraryAuthorFilter(event.target.value)}
+                  placeholder="输入作者"
+                />
+              </label>
+              <datalist id="library-author-options">
+                {libraryAdvancedOptions.authors.map((author) => (
+                  <option key={author} value={author} />
+                ))}
+              </datalist>
+              <label>
+                <span>年份</span>
+                <select
+                  value={libraryYearFilter}
+                  onChange={(event) => setLibraryYearFilter(event.target.value)}
+                >
+                  <option value="">全部年份</option>
+                  {libraryAdvancedOptions.years.map((year) => (
+                    <option key={year} value={year}>{year}</option>
+                  ))}
+                </select>
+              </label>
+              {activeAdvancedFilterCount ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLibraryAuthorFilter('')
+                    setLibraryYearFilter('')
+                  }}
+                >
+                  清除筛选
+                </button>
+              ) : null}
+            </div>
+
             <CategorySection
               folders={folders}
+              advancedFilters={{
+                author: libraryAuthorFilter,
+                year: libraryYearFilter,
+              }}
               highlightPaperId={highlightPaperId}
               jumpPaperId={jumpPaperId}
               onClearHighlight={handleClearHighlight}
@@ -1858,10 +2230,11 @@ export function HomePage({
                 if (requireLogin('查看资源')) return
                 handleOpenResource(paper, resource, trigger)
               }}
+              onRefreshPaperMetadata={onRefreshPaperMetadata}
               onSaveResourceLayout={onSaveResourceLayout}
               paperResourcesById={paperResourcesById}
               recentPapers={recentPapers}
-              searchTerm={searchTerm}
+              searchTerm={effectiveSearchTerm}
               selectedFolderId={selectedFolderId}
               statusFilter={libraryStatusFilter}
               uncategorizedFolderId={uncategorizedFolderId}
@@ -1870,15 +2243,17 @@ export function HomePage({
         ) : null}
 
         {activeSection === 'matrix' ? (
-          <ResearchMatrixPage
-            folders={folders}
+          <Suspense fallback={<SectionFallback message="正在加载文献矩阵..." />}>
+            <ResearchMatrixPage
+              folders={folders}
             onJumpToPaperEvidence={(...args) => {
               if (requireLogin('文献矩阵')) return
               onJumpToPaperEvidence(...args)
             }}
             recentPapers={recentPapers}
-            uncategorizedFolderId={uncategorizedFolderId}
-          />
+              uncategorizedFolderId={uncategorizedFolderId}
+            />
+          </Suspense>
         ) : null}
 
         {activeSection === 'trash' ? (
@@ -1897,7 +2272,41 @@ export function HomePage({
             <div className="home-conflict-dialog">
               <p>{importConflict.message}</p>
               <div className="home-conflict-dialog__actions">
-                {importConflict.conflictType === 'other_folder' ? (
+                {importConflict.conflictType === 'failed_import' ? (
+                  <>
+                    <button
+                      type="button"
+                      className="home-primary-button"
+                      onClick={onRetryImportConflict}
+                    >
+                      重试导入
+                    </button>
+                    <button
+                      type="button"
+                      className="home-secondary-button"
+                      onClick={onCancelImportConflict}
+                    >
+                      取消
+                    </button>
+                  </>
+                ) : importConflict.conflictType === 'same_file' ? (
+                  <>
+                    <button
+                      type="button"
+                      className="home-primary-button"
+                      onClick={onResolveImportConflict}
+                    >
+                      打开已有文献
+                    </button>
+                    <button
+                      type="button"
+                      className="home-secondary-button"
+                      onClick={onCancelImportConflict}
+                    >
+                      取消
+                    </button>
+                  </>
+                ) : importConflict.conflictType === 'other_folder' ? (
                   <>
                     <button
                       type="button"
@@ -1928,7 +2337,7 @@ export function HomePage({
           ) : (
             <div className="home-import-spinner">
               <div className="home-import-spinner__ring" />
-              <p>导入中...</p>
+              <p>{importProgressMessage}</p>
             </div>
           )}
         </div>

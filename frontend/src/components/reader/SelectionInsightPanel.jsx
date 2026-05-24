@@ -98,9 +98,6 @@ export function SelectionInsightPanel({ selectionCard, width, aiEnabled, onToggl
               <p className="muted">选中 5 个以上单词可启用 AI 上下文理解</p>
             ) : null}
           </div>
-          {selectionCard.source ? (
-            <p className="card-footnote">结果来源：{selectionCard.source}</p>
-          ) : null}
         </div>
       ) : null}
     </aside>

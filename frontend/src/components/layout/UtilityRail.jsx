@@ -14,7 +14,7 @@ const railItems = [
   { id: 'summary', label: '文献总结', icon: Sparkles },
 ]
 
-export function UtilityRail({ activeItem, collapsed = false, onSelect, onToggleCollapsed }) {
+export function UtilityRail({ activeItem, collapsed = false, onSelect, onItemIntent, onToggleCollapsed }) {
   return (
     <aside className={`utility-rail${collapsed ? ' is-collapsed' : ''}`}>
       <div className="utility-rail__items">
@@ -27,7 +27,12 @@ export function UtilityRail({ activeItem, collapsed = false, onSelect, onToggleC
               key={item.id}
               title={item.label}
               aria-label={item.label}
-              onClick={() => onSelect((current) => (current === item.id ? '' : item.id))}
+              onPointerEnter={() => onItemIntent?.(item.id)}
+              onFocus={() => onItemIntent?.(item.id)}
+              onClick={() => {
+                onItemIntent?.(item.id)
+                onSelect((current) => (current === item.id ? '' : item.id))
+              }}
             >
               <Icon />
               <span>{item.label}</span>

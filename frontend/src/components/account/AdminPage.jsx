@@ -3,17 +3,19 @@ import {
   Activity,
   ArrowLeft,
   Bell,
+  Bug,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  ImagePlus,
+  Copy,
+  Download,
+  KeyRound,
   LayoutDashboard,
   RefreshCw,
   RotateCcw,
   Save,
   Search,
   Shield,
-  Undo2,
   Users,
 } from 'lucide-react'
 import {
@@ -27,9 +29,15 @@ import {
 } from 'recharts'
 import {
   broadcastAdminNotification,
+  createAdminMembershipCodes,
+  fetchAdminFeedback,
+  fetchAdminMembershipCodes,
   fetchAdminOverview,
   fetchAdminUserDetail,
   fetchAdminUsers,
+  fetchSystemHealth,
+  updateAdminMembershipCode,
+  updateAdminFeedback,
   updateAdminUser,
   uploadAdminUserAvatar,
 } from '../../services/adminApi'
@@ -48,6 +56,14 @@ const DEFAULT_FILTERS = {
   created_to: '',
 }
 
+const DEFAULT_FEEDBACK_FILTERS = {
+  q: '',
+  status: '',
+  category: '',
+  page: 1,
+  page_size: PAGE_SIZE,
+}
+
 const DEFAULT_PROFILE_DRAFT = {
   nickname: '',
   phone: '',
@@ -63,10 +79,28 @@ const DEFAULT_BROADCAST_DRAFT = {
   message: '',
 }
 
+const DEFAULT_CODE_FILTERS = {
+  q: '',
+  status: '',
+  note_state: '',
+  batch_label: '',
+}
+
+const DEFAULT_CODE_DRAFT = {
+  plan_code: 'vip_monthly',
+  quantity: 10,
+  duration_days: 30,
+  batch_label: '',
+  note: '',
+}
+
 const NAV_ITEMS = [
+  { id: 'codes', label: '兑换码', description: '批量生成、筛选、复制与导出', icon: KeyRound },
   { id: 'overview', label: '总览', description: '整体数据与最近动态', icon: LayoutDashboard },
   { id: 'users', label: '用户', description: '搜索、编辑、查看行为', icon: Users },
+  { id: 'feedback', label: '问题箱', description: '查看用户反馈与处理进度', icon: Bug },
   { id: 'broadcast', label: '通知', description: '向所有用户发送通知', icon: Bell },
+  { id: 'health', label: '监控', description: '查看后端健康、任务积压与恢复情况', icon: Activity },
 ]
 
 const DETAIL_TABS = [
@@ -104,19 +138,27 @@ function formatDuration(seconds) {
 
 function getDisplayName(user, fallback = '未命名用户') {
   const nickname = String(user?.nickname || '').trim()
-  if (nickname && !/^[?\s]+$/.test(nickname)) return nickname
+  if (nickname) return nickname
   const uid = String(user?.uid || '').trim()
   return uid ? `UID ${uid}` : fallback
 }
 
-function getUserInitials(user) {
-  return getDisplayName(user, 'U').replace(/^UID\s+/i, '').slice(0, 2).toUpperCase()
+function getRedeemedUserDisplay(item) {
+  const candidates = [
+    item?.redeemed_by_name,
+    item?.redeemed_by_phone,
+    item?.redeemed_by_email,
+    item?.redeemed_by_uid ? `UID ${item.redeemed_by_uid}` : '',
+  ]
+  const display = candidates.map((value) => String(value || '').trim()).find(Boolean)
+  if (display) return display
+  return item?.redeemed_by ? `用户 #${item.redeemed_by}` : '--'
 }
 
 function getIdentityLine(user) {
   const values = [user?.organization, user?.discipline]
     .map((item) => String(item || '').trim())
-    .filter((item) => item && !/^[?\s]+$/.test(item))
+    .filter(Boolean)
   if (!values.length) return '未填写单位与学科'
   return values.join(' / ')
 }
@@ -129,9 +171,7 @@ function buildPagination(page, totalPages) {
   let previous = null
 
   sorted.forEach((value) => {
-    if (previous !== null && value - previous > 1) {
-      pages.push(`ellipsis-${previous}-${value}`)
-    }
+    if (previous !== null && value - previous > 1) pages.push(`ellipsis-${previous}-${value}`)
     pages.push(value)
     previous = value
   })
@@ -139,7 +179,7 @@ function buildPagination(page, totalPages) {
   return pages
 }
 
-function normalizePagedUsers(payload) {
+function normalizePagedPayload(payload) {
   return {
     items: Array.isArray(payload?.items) ? payload.items : [],
     page: Number(payload?.page || 1),
@@ -150,19 +190,14 @@ function normalizePagedUsers(payload) {
 }
 
 function buildProfileDraft(user) {
-  function normalizeField(value) {
-    const text = String(value || '').trim()
-    return /^[?\s]+$/.test(text) ? '' : text
-  }
-
   return {
-    nickname: normalizeField(user?.nickname),
-    phone: normalizeField(user?.phone),
-    email: normalizeField(user?.email),
-    education: normalizeField(user?.education),
-    occupation: normalizeField(user?.occupation),
-    organization: normalizeField(user?.organization),
-    discipline: normalizeField(user?.discipline),
+    nickname: String(user?.nickname || '').trim(),
+    phone: String(user?.phone || '').trim(),
+    email: String(user?.email || '').trim(),
+    education: String(user?.education || '').trim(),
+    occupation: String(user?.occupation || '').trim(),
+    organization: String(user?.organization || '').trim(),
+    discipline: String(user?.discipline || '').trim(),
   }
 }
 
@@ -190,6 +225,31 @@ function buildProfileUpdatePayload(currentDraft, baseDraft) {
   return payload
 }
 
+function UserAvatar({ user, className = '' }) {
+  const avatarSrc = resolveAssetUrl(user?.avatar_url)
+  const initials = getDisplayName(user, 'U').replace(/^UID\s+/i, '').slice(0, 2).toUpperCase()
+
+  return (
+    <div className={`adminx-avatar ${className}`.trim()}>
+      {avatarSrc ? <img src={avatarSrc} alt={getDisplayName(user)} /> : <span>{initials}</span>}
+    </div>
+  )
+}
+
+function EmptyState({ title, description, action = null }) {
+  return (
+    <div className="adminx-empty-state">
+      <strong>{title}</strong>
+      <span>{description}</span>
+      {action}
+    </div>
+  )
+}
+
+function StatusBadge({ tone = 'slate', children }) {
+  return <span className={`adminx-badge adminx-badge--${tone}`}>{children}</span>
+}
+
 function StatCard({ icon: Icon, label, value, detail, tone = 'blue' }) {
   return (
     <article className={`adminx-stat-card adminx-stat-card--${tone}`}>
@@ -205,82 +265,150 @@ function StatCard({ icon: Icon, label, value, detail, tone = 'blue' }) {
   )
 }
 
-function EmptyState({ title, description, action }) {
-  return (
-    <div className="adminx-empty-state">
-      <strong>{title}</strong>
-      <span>{description}</span>
-      {action || null}
-    </div>
-  )
-}
-
-function StatusBadge({ tone = 'slate', children }) {
-  return <span className={`adminx-badge adminx-badge--${tone}`}>{children}</span>
-}
-
-function MetaItem({ label, value, emphasis = false }) {
-  return (
-    <div className="adminx-meta-item">
-      <span>{label}</span>
-      <strong className={emphasis ? 'is-emphasis' : ''}>{value || '暂无'}</strong>
-    </div>
-  )
-}
-
-function UserAvatar({ user, className = '', large = false }) {
-  const avatarSrc = resolveAssetUrl(user?.avatar_url)
-  const classes = `${className} ${large ? 'is-large' : ''}`.trim()
-
-  if (avatarSrc) {
-    return (
-      <div className={classes}>
-        <img src={avatarSrc} alt={getDisplayName(user)} />
-      </div>
-    )
-  }
-
-  return <div className={classes}>{getUserInitials(user)}</div>
-}
-
 function AdminToast({ flash, onClose }) {
-  if (!flash?.message) return null
+  if (!flash) return null
   return (
-    <div className={`adminx-floating-alert adminx-floating-alert--${flash.tone || 'error'}`}>
+    <div className={`adminx-toast adminx-toast--${flash.tone || 'error'}`}>
       <span>{flash.message}</span>
       <button type="button" onClick={onClose} aria-label="关闭提示">知道了</button>
     </div>
   )
 }
 
-export function AdminPage({ currentUser, onBack }) {
-  const [activeSection, setActiveSection] = useState('overview')
+function getFeedbackStatusLabel(value) {
+  if (value === 'in_progress') return '处理中'
+  if (value === 'resolved') return '已解决'
+  if (value === 'closed') return '已关闭'
+  return '待处理'
+}
+
+function getCodeStatusLabel(value) {
+  if (value === 'active') return '可用'
+  if (value === 'disabled') return '已禁用'
+  if (value === 'expired') return '已过期'
+  if (value === 'redeemed') return '已兑换'
+  return value || '未知'
+}
+
+function getCodeStatusTone(value) {
+  if (value === 'active') return 'green'
+  if (value === 'disabled') return 'red'
+  if (value === 'expired') return 'gold'
+  if (value === 'redeemed') return 'slate'
+  return 'slate'
+}
+
+function getHealthStatusLabel(value) {
+  if (value === 'ok') return '正常'
+  if (value === 'degraded') return '需关注'
+  if (value === 'error') return '异常'
+  return value ? String(value) : '未知'
+}
+
+function getHealthStatusTone(value) {
+  if (value === 'ok' || value === true) return 'green'
+  if (value === 'degraded') return 'gold'
+  if (value === 'error' || value === false) return 'red'
+  return 'slate'
+}
+
+function formatFeatureEnabled(value) {
+  return value ? '已启用' : '未启用'
+}
+
+function getStatusCount(counts, key) {
+  return Number(counts?.[key] || 0)
+}
+
+function normalizeCodeDraft(draft) {
+  return {
+    plan_code: String(draft?.plan_code || 'vip_monthly').trim() || 'vip_monthly',
+    quantity: Math.max(1, Math.min(200, Number(draft?.quantity || 1) || 1)),
+    duration_days: Math.max(1, Math.min(3650, Number(draft?.duration_days || 30) || 30)),
+    batch_label: String(draft?.batch_label || '').trim().toUpperCase(),
+    note: String(draft?.note || '').trim(),
+  }
+}
+
+async function copyPlainText(text) {
+  const value = String(text || '')
+  if (!value) return false
+
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value)
+      return true
+    }
+  } catch {}
+
+  try {
+    const textarea = document.createElement('textarea')
+    textarea.value = value
+    textarea.setAttribute('readonly', 'true')
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(textarea)
+    return ok
+  } catch {
+    return false
+  }
+}
+
+function downloadTextFile(filename, content, mimeType = 'text/plain;charset=utf-8') {
+  const blob = new Blob([content], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+export function AdminPage({ currentUser, onBack, initialSection = 'overview' }) {
+  const [activeSection, setActiveSection] = useState(initialSection)
   const [detailTab, setDetailTab] = useState('profile')
   const [overview, setOverview] = useState(null)
   const [filters, setFilters] = useState(DEFAULT_FILTERS)
   const [searchInput, setSearchInput] = useState('')
   const [query, setQuery] = useState({ ...DEFAULT_FILTERS, page: 1, page_size: PAGE_SIZE })
-  const [pageData, setPageData] = useState({
-    items: [],
-    page: 1,
-    page_size: PAGE_SIZE,
-    total: 0,
-    total_pages: 1,
-  })
+  const [pageData, setPageData] = useState({ items: [], page: 1, page_size: PAGE_SIZE, total: 0, total_pages: 1 })
+  const [feedbackQuery, setFeedbackQuery] = useState(DEFAULT_FEEDBACK_FILTERS)
+  const [feedbackSearchInput, setFeedbackSearchInput] = useState('')
+  const [feedbackPageData, setFeedbackPageData] = useState({ items: [], page: 1, page_size: PAGE_SIZE, total: 0, total_pages: 1 })
   const [selectedUserId, setSelectedUserId] = useState(null)
   const [selectedUser, setSelectedUser] = useState(null)
+  const [selectedFeedbackId, setSelectedFeedbackId] = useState(null)
   const [profileDraft, setProfileDraft] = useState(DEFAULT_PROFILE_DRAFT)
+  const [feedbackNoteDraft, setFeedbackNoteDraft] = useState('')
   const [broadcastDraft, setBroadcastDraft] = useState(DEFAULT_BROADCAST_DRAFT)
+  const [codeDraft, setCodeDraft] = useState(DEFAULT_CODE_DRAFT)
+  const [codeFilters, setCodeFilters] = useState(DEFAULT_CODE_FILTERS)
+  const [codeSearchInput, setCodeSearchInput] = useState('')
+  const [membershipCodes, setMembershipCodes] = useState([])
+  const [lastCreatedCodes, setLastCreatedCodes] = useState([])
+  const [healthReport, setHealthReport] = useState(null)
   const [overviewLoading, setOverviewLoading] = useState(true)
   const [listLoading, setListLoading] = useState(true)
+  const [feedbackLoading, setFeedbackLoading] = useState(false)
+  const [codeLoading, setCodeLoading] = useState(false)
+  const [healthLoading, setHealthLoading] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [profileSaving, setProfileSaving] = useState(false)
   const [avatarUploading, setAvatarUploading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [broadcastSending, setBroadcastSending] = useState(false)
+  const [feedbackSaving, setFeedbackSaving] = useState(false)
+  const [codeCreating, setCodeCreating] = useState(false)
+  const [codeUpdatingId, setCodeUpdatingId] = useState(null)
   const [flash, setFlash] = useState(null)
 
   const usersRequestRef = useRef(0)
+  const feedbackRequestRef = useRef(0)
+  const codesRequestRef = useRef(0)
+  const healthRequestRef = useRef(0)
   const detailRequestRef = useRef(0)
   const avatarInputRef = useRef(null)
   const flashTimerRef = useRef(null)
@@ -288,6 +416,7 @@ export function AdminPage({ currentUser, onBack }) {
   const stats = overview?.stats || {}
   const adminDisplayName = getDisplayName(currentUser, '管理员')
   const selectedDisplayName = getDisplayName(selectedUser, '未选中用户')
+  const selectedFeedback = feedbackPageData.items.find((item) => item.id === selectedFeedbackId) || feedbackPageData.items[0] || null
   const normalizedProfileDraft = useMemo(
     () => ({
       nickname: profileDraft.nickname.trim(),
@@ -310,17 +439,104 @@ export function AdminPage({ currentUser, onBack }) {
       imports: Number(item.imports || 0),
     }))
   }, [overview])
+  const normalizedCodeDraft = useMemo(() => normalizeCodeDraft(codeDraft), [codeDraft])
+  const filteredMembershipCodes = useMemo(() => {
+    const keyword = String(codeFilters.q || '').trim().toLowerCase()
+    const batchKeyword = String(codeFilters.batch_label || '').trim().toLowerCase()
+    return membershipCodes.filter((item) => {
+      const statusValue = String(item?.status || '')
+      const noteValue = String(item?.notes || '').trim()
+      const haystack = [
+        item?.code,
+        item?.code_prefix,
+        item?.batch_label,
+        item?.notes,
+        item?.plan_code,
+        item?.redeemed_by,
+        item?.redeemed_by_name,
+        item?.redeemed_by_uid,
+        item?.redeemed_by_phone,
+        item?.redeemed_by_email,
+        getRedeemedUserDisplay(item),
+      ].join(' ').toLowerCase()
+
+      if (keyword && !haystack.includes(keyword)) return false
+      if (batchKeyword && !String(item?.batch_label || '').toLowerCase().includes(batchKeyword)) return false
+      if (codeFilters.status && statusValue !== codeFilters.status) return false
+      if (codeFilters.note_state === 'with' && !noteValue) return false
+      if (codeFilters.note_state === 'without' && noteValue) return false
+      return true
+    })
+  }, [codeFilters, membershipCodes])
+  const codeStatusSummary = useMemo(() => {
+    return membershipCodes.reduce((summary, item) => {
+      const key = String(item?.status || 'unknown')
+      summary[key] = Number(summary[key] || 0) + 1
+      return summary
+    }, {})
+  }, [membershipCodes])
 
   useEffect(() => () => {
-    if (flashTimerRef.current) {
-      window.clearTimeout(flashTimerRef.current)
-    }
+    if (flashTimerRef.current) window.clearTimeout(flashTimerRef.current)
   }, [])
 
-  function showFlash(message, tone = 'error') {
-    if (flashTimerRef.current) {
-      window.clearTimeout(flashTimerRef.current)
+  useEffect(() => {
+    void loadOverviewData()
+  }, [])
+
+  useEffect(() => {
+    void loadUsersPage(query)
+  }, [query])
+
+  useEffect(() => {
+    if (activeSection !== 'feedback') return
+    void loadFeedbackPage(feedbackQuery)
+  }, [activeSection, feedbackQuery])
+
+  useEffect(() => {
+    if (activeSection !== 'codes') return
+    void loadMembershipCodes()
+  }, [activeSection])
+
+  useEffect(() => {
+    if (activeSection !== 'health') return
+    void loadSystemHealth()
+  }, [activeSection])
+
+  useEffect(() => {
+    if (!selectedUserId) {
+      setSelectedUser(null)
+      return
     }
+
+    const matchingUser = pageData.items.find((item) => item.id === selectedUserId)
+    if (matchingUser) {
+      setSelectedUser((previous) => {
+        if (previous?.id !== matchingUser.id) return matchingUser
+        return { ...previous, ...matchingUser, avatar_url: previous?.avatar_url || matchingUser.avatar_url || '' }
+      })
+    }
+
+    void loadUserDetail(selectedUserId)
+  }, [pageData.items, selectedUserId])
+
+  useEffect(() => {
+    setProfileDraft(buildProfileDraft(selectedUser))
+  }, [selectedUser])
+
+  useEffect(() => {
+    setFeedbackNoteDraft(selectedFeedback?.admin_note || '')
+  }, [selectedFeedback?.id, selectedFeedback?.admin_note])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void handleRefreshData()
+    }, AUTO_REFRESH_MS)
+    return () => window.clearInterval(timer)
+  }, [query, selectedUserId, activeSection, feedbackQuery])
+
+  function showFlash(message, tone = 'error') {
+    if (flashTimerRef.current) window.clearTimeout(flashTimerRef.current)
     setFlash({ message, tone })
     flashTimerRef.current = window.setTimeout(() => {
       setFlash(null)
@@ -337,9 +553,7 @@ export function AdminPage({ currentUser, onBack }) {
       setOverview(payload || null)
       return payload || null
     } catch (error) {
-      if (!suppressErrors) {
-        showFlash(error instanceof Error ? error.message : '总览数据加载失败')
-      }
+      if (!suppressErrors) showFlash(error instanceof Error ? error.message : '总览数据加载失败')
       return null
     } finally {
       if (!silent) setOverviewLoading(false)
@@ -353,8 +567,7 @@ export function AdminPage({ currentUser, onBack }) {
     try {
       const payload = await fetchAdminUsers(nextQuery)
       if (requestId !== usersRequestRef.current) return null
-
-      const normalized = normalizePagedUsers(payload)
+      const normalized = normalizePagedPayload(payload)
       setPageData(normalized)
 
       if (!selectedUserId && normalized.items[0]) {
@@ -365,14 +578,70 @@ export function AdminPage({ currentUser, onBack }) {
 
       return normalized
     } catch (error) {
-      if (!options.suppressErrors) {
-        showFlash(error instanceof Error ? error.message : '用户列表加载失败')
-      }
+      if (!options.suppressErrors) showFlash(error instanceof Error ? error.message : '用户列表加载失败')
       return null
     } finally {
-      if (!options.silent && requestId === usersRequestRef.current) {
-        setListLoading(false)
+      if (!options.silent && requestId === usersRequestRef.current) setListLoading(false)
+    }
+  }
+
+  async function loadFeedbackPage(nextQuery = feedbackQuery, options = {}) {
+    const requestId = ++feedbackRequestRef.current
+    if (!options.silent) setFeedbackLoading(true)
+
+    try {
+      const payload = await fetchAdminFeedback(nextQuery)
+      if (requestId !== feedbackRequestRef.current) return null
+      const normalized = normalizePagedPayload(payload)
+      setFeedbackPageData(normalized)
+
+      if (!selectedFeedbackId && normalized.items[0]) {
+        setSelectedFeedbackId(normalized.items[0].id)
+      } else if (normalized.items.length && !normalized.items.some((item) => item.id === selectedFeedbackId)) {
+        setSelectedFeedbackId(normalized.items[0].id)
       }
+
+      return normalized
+    } catch (error) {
+      if (!options.suppressErrors) showFlash(error instanceof Error ? error.message : '问题反馈加载失败')
+      return null
+    } finally {
+      if (!options.silent && requestId === feedbackRequestRef.current) setFeedbackLoading(false)
+    }
+  }
+
+  async function loadMembershipCodes(options = {}) {
+    const requestId = ++codesRequestRef.current
+    if (!options.silent) setCodeLoading(true)
+
+    try {
+      const payload = await fetchAdminMembershipCodes()
+      if (requestId !== codesRequestRef.current) return null
+      const items = Array.isArray(payload?.items) ? payload.items : []
+      setMembershipCodes(items)
+      return items
+    } catch (error) {
+      if (!options.suppressErrors) showFlash(error instanceof Error ? error.message : '兑换码加载失败')
+      return null
+    } finally {
+      if (!options.silent && requestId === codesRequestRef.current) setCodeLoading(false)
+    }
+  }
+
+  async function loadSystemHealth(options = {}) {
+    const requestId = ++healthRequestRef.current
+    if (!options.silent) setHealthLoading(true)
+
+    try {
+      const payload = await fetchSystemHealth()
+      if (requestId !== healthRequestRef.current) return null
+      setHealthReport(payload || null)
+      return payload || null
+    } catch (error) {
+      if (!options.suppressErrors) showFlash(error instanceof Error ? error.message : '系统监控加载失败')
+      return null
+    } finally {
+      if (!options.silent && requestId === healthRequestRef.current) setHealthLoading(false)
     }
   }
 
@@ -390,14 +659,10 @@ export function AdminPage({ currentUser, onBack }) {
       setSelectedUser(nextUser)
       return nextUser
     } catch (error) {
-      if (!suppressErrors) {
-        showFlash(error instanceof Error ? error.message : '用户详情加载失败')
-      }
+      if (!suppressErrors) showFlash(error instanceof Error ? error.message : '用户详情加载失败')
       return null
     } finally {
-      if (!silent && requestId === detailRequestRef.current) {
-        setDetailLoading(false)
-      }
+      if (!silent && requestId === detailRequestRef.current) setDetailLoading(false)
     }
   }
 
@@ -407,6 +672,9 @@ export function AdminPage({ currentUser, onBack }) {
       await Promise.all([
         loadOverviewData({ silent: true, suppressErrors: true }),
         loadUsersPage(query, { silent: true, suppressErrors: true }),
+        activeSection === 'feedback' ? loadFeedbackPage(feedbackQuery, { silent: true, suppressErrors: true }) : Promise.resolve(null),
+        activeSection === 'codes' ? loadMembershipCodes({ silent: true, suppressErrors: true }) : Promise.resolve(null),
+        activeSection === 'health' ? loadSystemHealth({ silent: true, suppressErrors: true }) : Promise.resolve(null),
         selectedUserId ? loadUserDetail(selectedUserId, { silent: true, suppressErrors: true }) : Promise.resolve(null),
       ])
     } finally {
@@ -414,51 +682,18 @@ export function AdminPage({ currentUser, onBack }) {
     }
   }
 
-  useEffect(() => {
-    void loadOverviewData()
-  }, [])
-
-  useEffect(() => {
-    void loadUsersPage(query)
-  }, [query])
-
-  useEffect(() => {
-    if (!selectedUserId) {
-      setSelectedUser(null)
-      return
-    }
-
-    const matchingUser = pageData.items.find((item) => item.id === selectedUserId)
-    if (matchingUser) {
-      setSelectedUser((previous) => {
-        if (previous?.id !== matchingUser.id) return matchingUser
-        return {
-          ...previous,
-          ...matchingUser,
-          avatar_url: previous?.avatar_url || matchingUser.avatar_url || '',
-        }
-      })
-    }
-
-    void loadUserDetail(selectedUserId)
-  }, [pageData.items, selectedUserId])
-
-  useEffect(() => {
-    setProfileDraft(buildProfileDraft(selectedUser))
-  }, [selectedUser])
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void handleRefreshData()
-    }, AUTO_REFRESH_MS)
-    return () => window.clearInterval(timer)
-  }, [query, selectedUserId])
-
   function patchUserEverywhere(updatedUser) {
     setSelectedUser(updatedUser)
     setPageData((previous) => ({
       ...previous,
       items: previous.items.map((item) => (item.id === updatedUser.id ? { ...item, ...updatedUser } : item)),
+    }))
+  }
+
+  function patchFeedbackEverywhere(updatedItem) {
+    setFeedbackPageData((previous) => ({
+      ...previous,
+      items: previous.items.map((item) => (item.id === updatedItem.id ? updatedItem : item)),
     }))
   }
 
@@ -475,6 +710,79 @@ export function AdminPage({ currentUser, onBack }) {
     setFilters(DEFAULT_FILTERS)
     setSearchInput('')
     setQuery({ ...DEFAULT_FILTERS, page: 1, page_size: PAGE_SIZE })
+  }
+
+  function applyFeedbackSearch() {
+    setFeedbackQuery((previous) => ({ ...previous, q: feedbackSearchInput.trim(), page: 1 }))
+  }
+
+  function updateFeedbackFilter(key, value) {
+    setFeedbackQuery((previous) => ({ ...previous, [key]: value, page: 1 }))
+  }
+
+  function clearFeedbackFilters() {
+    setFeedbackSearchInput('')
+    setFeedbackQuery(DEFAULT_FEEDBACK_FILTERS)
+  }
+
+  function updateCodeDraftField(key, value) {
+    setCodeDraft((previous) => ({ ...previous, [key]: value }))
+  }
+
+  function updateCodeFilter(key, value) {
+    setCodeFilters((previous) => ({ ...previous, [key]: value }))
+  }
+
+  function applyCodeSearch() {
+    setCodeFilters((previous) => ({ ...previous, q: codeSearchInput.trim() }))
+  }
+
+  function clearCodeFilters() {
+    setCodeSearchInput('')
+    setCodeFilters(DEFAULT_CODE_FILTERS)
+  }
+
+  function patchMembershipCode(updatedItem) {
+    setMembershipCodes((previous) => previous.map((item) => (item.id === updatedItem.id ? updatedItem : item)))
+    setLastCreatedCodes((previous) => previous.map((item) => (item.id === updatedItem.id ? updatedItem : item)))
+  }
+
+  async function handleCopyCodes(items, onlyCodes = false) {
+    const list = Array.isArray(items) ? items : []
+    if (!list.length) {
+      showFlash('当前没有可复制的兑换码')
+      return
+    }
+
+    const text = onlyCodes
+      ? list.map((item) => item.code).join('\n')
+      : list.map((item) => [
+        item.code,
+        item.status,
+        item.plan_code,
+        item.duration_days,
+        item.batch_label || '',
+        item.notes || '',
+      ].join('\t')).join('\n')
+
+    const copied = await copyPlainText(text)
+    showFlash(copied ? `已复制 ${list.length} 条兑换码` : '复制失败，请重试', copied ? 'success' : 'error')
+  }
+
+  function handleExportCodes(items) {
+    const list = Array.isArray(items) ? items : []
+    if (!list.length) {
+      showFlash('当前没有可导出的兑换码')
+      return
+    }
+
+    const header = ['code', 'status', 'plan_code', 'duration_days', 'batch_label', 'notes', 'redeemed_user', 'redeemed_by', 'redeemed_at', 'expires_at', 'created_at']
+    const rows = list.map((item) => header.map((key) => {
+      const value = key === 'redeemed_user' ? getRedeemedUserDisplay(item) : item?.[key]
+      return `"${String(value ?? '').replaceAll('"', '""')}"`
+    }).join(','))
+    downloadTextFile(`membership-codes-${Date.now()}.csv`, [header.join(','), ...rows].join('\n'), 'text/csv;charset=utf-8')
+    showFlash(`已导出 ${list.length} 条兑换码`, 'success')
   }
 
   function handleSelectUser(userId, nextSection = null) {
@@ -531,10 +839,6 @@ export function AdminPage({ currentUser, onBack }) {
     }
   }
 
-  function openAvatarPicker() {
-    avatarInputRef.current?.click()
-  }
-
   async function handleAvatarChange(event) {
     const file = event.target.files?.[0]
     event.target.value = ''
@@ -557,14 +861,9 @@ export function AdminPage({ currentUser, onBack }) {
   async function submitBroadcastNotification() {
     const title = String(broadcastDraft.title || '').trim()
     const message = String(broadcastDraft.message || '').trim()
-    if (!title) {
-      showFlash('通知标题不能为空')
-      return
-    }
-    if (!message) {
-      showFlash('通知内容不能为空')
-      return
-    }
+    if (!title) return showFlash('通知标题不能为空')
+    if (!message) return showFlash('通知内容不能为空')
+    if (!window.confirm('确定发送给所有用户吗？发送后用户会立即收到通知。')) return
 
     setBroadcastSending(true)
     try {
@@ -592,6 +891,69 @@ export function AdminPage({ currentUser, onBack }) {
     }
   }
 
+  async function updateFeedbackStatus(status) {
+    if (!selectedFeedback) return
+    setFeedbackSaving(true)
+    try {
+      const updated = await updateAdminFeedback(selectedFeedback.id, { status, admin_note: feedbackNoteDraft })
+      patchFeedbackEverywhere(updated)
+      showFlash('反馈状态已更新', 'success')
+    } catch (error) {
+      showFlash(error instanceof Error ? error.message : '反馈状态更新失败')
+    } finally {
+      setFeedbackSaving(false)
+    }
+  }
+
+  async function saveFeedbackNote() {
+    if (!selectedFeedback) return
+    setFeedbackSaving(true)
+    try {
+      const updated = await updateAdminFeedback(selectedFeedback.id, { admin_note: feedbackNoteDraft })
+      patchFeedbackEverywhere(updated)
+      showFlash('管理员备注已保存', 'success')
+    } catch (error) {
+      showFlash(error instanceof Error ? error.message : '备注保存失败')
+    } finally {
+      setFeedbackSaving(false)
+    }
+  }
+
+  async function submitCodeBatch() {
+    setCodeCreating(true)
+    try {
+      const payload = await createAdminMembershipCodes(normalizedCodeDraft)
+      const items = Array.isArray(payload?.items) ? payload.items : []
+      setMembershipCodes((previous) => [...items, ...previous])
+      setLastCreatedCodes(items)
+      setCodeDraft((previous) => ({
+        ...DEFAULT_CODE_DRAFT,
+        batch_label: previous.batch_label,
+        note: previous.note,
+      }))
+      showFlash(`已生成 ${items.length} 条兑换码`, 'success')
+    } catch (error) {
+      showFlash(error instanceof Error ? error.message : '兑换码生成失败')
+    } finally {
+      setCodeCreating(false)
+    }
+  }
+
+  async function toggleMembershipCode(item) {
+    if (!item?.id) return
+    const nextStatus = item.status === 'active' ? 'disabled' : 'active'
+    setCodeUpdatingId(item.id)
+    try {
+      const updated = await updateAdminMembershipCode(item.id, { status: nextStatus })
+      patchMembershipCode(updated)
+      showFlash(nextStatus === 'active' ? '兑换码已重新启用' : '兑换码已禁用', 'success')
+    } catch (error) {
+      showFlash(error instanceof Error ? error.message : '兑换码状态更新失败')
+    } finally {
+      setCodeUpdatingId(null)
+    }
+  }
+
   function renderSectionHeader(title, description) {
     return (
       <div className="adminx-section-header">
@@ -615,7 +977,7 @@ export function AdminPage({ currentUser, onBack }) {
 
         <div className="adminx-overview-grid">
           <section className="adminx-card">
-            {renderSectionHeader('近 30 天新增趋势', '不会再被顶部提示挤压，图表区域固定展示。')}
+            {renderSectionHeader('近 30 天新增趋势', '图表展示近期注册与导入变化。')}
             <div className="adminx-chart-card">
               {registrationTrend.length ? (
                 <ResponsiveContainer width="100%" height="100%">
@@ -645,7 +1007,7 @@ export function AdminPage({ currentUser, onBack }) {
           </section>
 
           <section className="adminx-card">
-            {renderSectionHeader('最近注册用户', '点一下就会切到用户模块并选中对应账号。')}
+            {renderSectionHeader('最近注册用户', '点击可直接切到用户模块并选中对应账号。')}
             <div className="adminx-list-card">
               {(overview?.recent_users || []).length ? (
                 (overview?.recent_users || []).map((user) => (
@@ -663,7 +1025,7 @@ export function AdminPage({ currentUser, onBack }) {
                   </button>
                 ))
               ) : (
-                <EmptyState title="暂无最近用户" description="这里会展示最近 7 天注册的账号。" />
+                <EmptyState title="暂无最近用户" description="这里会展示最近注册的账号。" />
               )}
             </div>
           </section>
@@ -673,168 +1035,113 @@ export function AdminPage({ currentUser, onBack }) {
   }
 
   function renderProfileTab() {
-    if (!selectedUser) {
-      return <EmptyState title="还没有选中用户" description="先在左侧列表里点一个用户。" />
-    }
+    if (!selectedUser) return <EmptyState title="还没有选中用户" description="先在列表里点一个用户。" />
 
     return (
       <div className="adminx-detail-stack">
-        <div className="adminx-profile-toolbar">
-          <div>
-            <strong>用户资料</strong>
-          </div>
-          <div className="adminx-action-row">
-            <button type="button" className="adminx-action-button" onClick={resetProfileDraft} disabled={!isProfileDirty || profileSaving}>
-              <Undo2 size={14} strokeWidth={1.65} />
-              <span>还原</span>
-            </button>
-            <button type="button" className="adminx-primary-button" onClick={() => void saveProfileDraft()} disabled={!isProfileDirty || profileSaving}>
-              <Save size={14} strokeWidth={1.65} />
-              <span>{profileSaving ? '保存中' : '保存资料'}</span>
-            </button>
+        <div className="adminx-profile-head">
+          <UserAvatar user={selectedUser} className="adminx-profile-head__avatar" />
+          <div className="adminx-profile-head__copy">
+            <strong>{getDisplayName(selectedUser)}</strong>
+            <span>{selectedUser.uid}</span>
+            <small>{getIdentityLine(selectedUser)}</small>
           </div>
         </div>
 
-        <div className="adminx-profile-grid">
-          <div className="adminx-avatar-editor">
-            <strong>头像</strong>
-            <UserAvatar user={selectedUser} className="adminx-avatar-editor__preview" large />
-            <input
-              ref={avatarInputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              className="adminx-file-input"
-              onChange={(event) => void handleAvatarChange(event)}
-            />
-            <button type="button" className="adminx-action-button" onClick={openAvatarPicker} disabled={avatarUploading}>
-              <ImagePlus size={15} />
-              <span>{avatarUploading ? '上传中' : '更换头像'}</span>
-            </button>
-          </div>
+        <input ref={avatarInputRef} className="hidden-input" type="file" accept="image/png,image/jpeg,image/webp" onChange={handleAvatarChange} />
 
-          <label className="adminx-form-field">
-            <span>昵称</span>
-            <input value={profileDraft.nickname} onChange={(event) => updateProfileField('nickname', event.target.value)} />
-          </label>
-          <label className="adminx-form-field">
-            <span>手机号</span>
-            <input value={profileDraft.phone} onChange={(event) => updateProfileField('phone', event.target.value)} />
-          </label>
-          <label className="adminx-form-field">
-            <span>邮箱</span>
-            <input value={profileDraft.email} onChange={(event) => updateProfileField('email', event.target.value)} />
-          </label>
-          <label className="adminx-form-field">
-            <span>学历</span>
-            <input value={profileDraft.education} onChange={(event) => updateProfileField('education', event.target.value)} />
-          </label>
-          <label className="adminx-form-field">
-            <span>职业</span>
-            <input value={profileDraft.occupation} onChange={(event) => updateProfileField('occupation', event.target.value)} />
-          </label>
-          <label className="adminx-form-field">
-            <span>单位</span>
-            <input value={profileDraft.organization} onChange={(event) => updateProfileField('organization', event.target.value)} />
-          </label>
-          <label className="adminx-form-field">
-            <span>学科</span>
-            <input value={profileDraft.discipline} onChange={(event) => updateProfileField('discipline', event.target.value)} />
-          </label>
+        <div className="adminx-action-row">
+          <button type="button" className="adminx-action-button" onClick={() => avatarInputRef.current?.click()} disabled={avatarUploading}>
+            {avatarUploading ? '上传中' : '更新头像'}
+          </button>
+          <button type="button" className="adminx-ghost-button" onClick={resetProfileDraft} disabled={!isProfileDirty || profileSaving}>重置</button>
+          <button type="button" className="adminx-primary-button" onClick={() => void saveProfileDraft()} disabled={!isProfileDirty || profileSaving}>
+            <Save size={16} />
+            <span>{profileSaving ? '保存中' : '保存资料'}</span>
+          </button>
         </div>
 
-        <div className="adminx-meta-grid">
-          <MetaItem label="UID" value={selectedUser.uid} />
-          <MetaItem label="注册时间" value={formatDateTime(selectedUser.created_at)} />
-          <MetaItem label="最后登录" value={formatDateTime(selectedUser.last_login_at)} />
-          <MetaItem label="当前身份" value={selectedUser.is_admin ? '管理员' : '普通用户'} />
-        </div>
+        {[
+          ['nickname', '昵称'],
+          ['phone', '手机号'],
+          ['email', '邮箱'],
+          ['education', '学历'],
+          ['occupation', '职业'],
+          ['organization', '学校或单位'],
+          ['discipline', '学科领域'],
+        ].map(([key, label]) => (
+          <label key={key} className="adminx-form-field">
+            <span>{label}</span>
+            <input value={profileDraft[key]} onChange={(event) => updateProfileField(key, event.target.value)} />
+          </label>
+        ))}
       </div>
     )
   }
 
   function renderActivityTab() {
-    if (!selectedUser) {
-      return <EmptyState title="还没有选中用户" description="先在左侧列表里点一个用户。" />
-    }
+    if (!selectedUser) return <EmptyState title="还没有选中用户" description="先在列表里点一个用户。" />
 
     return (
       <div className="adminx-detail-stack">
-        <div className="adminx-inline-stats">
-          <MetaItem label="导入文献数" value={formatNumber(selectedUser.import_count)} emphasis />
-          <MetaItem label="阅读记录数" value={formatNumber(selectedUser.reading_record_count)} emphasis />
-          <MetaItem label="阅读时长" value={formatDuration(selectedUser.reading_duration_seconds)} emphasis />
-        </div>
-        <div className="adminx-meta-grid">
-          <MetaItem label="最近导入" value={formatDateTime(selectedUser.latest_imported_at)} />
-          <MetaItem label="最近阅读" value={formatDateTime(selectedUser.latest_reading_at)} />
-          <MetaItem label="单位 / 学科" value={getIdentityLine(selectedUser)} />
-          <MetaItem label="学历认证" value={selectedUser.education_verified ? '已认证' : '未认证'} />
+        <div className="adminx-metric-grid">
+          <div className="adminx-metric-card">
+            <span>累计导入</span>
+            <strong>{formatNumber(selectedUser.import_count)}</strong>
+            <small>最近导入：{formatDateTime(selectedUser.latest_imported_at)}</small>
+          </div>
+          <div className="adminx-metric-card">
+            <span>阅读记录</span>
+            <strong>{formatNumber(selectedUser.reading_record_count)}</strong>
+            <small>最近阅读：{formatDateTime(selectedUser.latest_reading_at)}</small>
+          </div>
+          <div className="adminx-metric-card">
+            <span>阅读时长</span>
+            <strong>{formatDuration(selectedUser.reading_duration_seconds)}</strong>
+            <small>最近登录：{formatDateTime(selectedUser.last_login_at)}</small>
+          </div>
         </div>
       </div>
     )
   }
 
   function renderPermissionsTab() {
-    if (!selectedUser) {
-      return <EmptyState title="还没有选中用户" description="先在左侧列表里点一个用户。" />
-    }
+    if (!selectedUser) return <EmptyState title="还没有选中用户" description="先在列表里点一个用户。" />
 
     return (
       <div className="adminx-detail-stack">
-        <div className="adminx-note">
-          这里只保留真正有用的权限操作，不再放重复的上方大块信息。
+        <div className="adminx-action-panel__row">
+          <div>
+            <strong>账号状态</strong>
+            <span>{selectedUser.status === 'active' ? '当前可登录' : '当前已停用'}</span>
+          </div>
+          <button
+            type="button"
+            className={`adminx-action-button ${selectedUser.status === 'active' ? 'adminx-action-button--danger-lite' : 'adminx-action-button--confirm-lite'}`}
+            onClick={() => void handlePermissionAction(
+              { status: selectedUser.status === 'active' ? 'disabled' : 'active' },
+              selectedUser.status === 'active' ? '账号已停用' : '账号已启用',
+            )}
+          >
+            {selectedUser.status === 'active' ? '停用账号' : '启用账号'}
+          </button>
         </div>
-        <div className="adminx-action-panel">
-          <div className="adminx-action-panel__row">
-            <div>
-              <strong>账号状态</strong>
-              <span>{selectedUser.status === 'active' ? '当前可正常登录' : '当前已停用'}</span>
-            </div>
-            <button
-              type="button"
-              className={selectedUser.status === 'active' ? 'adminx-danger-button' : 'adminx-primary-button'}
-              onClick={() => void handlePermissionAction(
-                { status: selectedUser.status === 'active' ? 'disabled' : 'active' },
-                selectedUser.status === 'active' ? '账号已停用' : '账号已启用',
-              )}
-            >
-              {selectedUser.status === 'active' ? '停用账号' : '启用账号'}
-            </button>
-          </div>
 
-          <div className="adminx-action-panel__row">
-            <div>
-              <strong>管理员权限</strong>
-              <span>{selectedUser.is_admin ? '当前拥有后台权限' : '当前为普通用户'}</span>
-            </div>
-            <button
-              type="button"
-              className={selectedUser.is_admin ? 'adminx-action-button' : 'adminx-primary-button'}
-              onClick={() => void handlePermissionAction(
-                { is_admin: !selectedUser.is_admin },
-                selectedUser.is_admin ? '已移除管理员权限' : '已授予管理员权限',
-              )}
-            >
-              {selectedUser.is_admin ? '取消管理员' : '设为管理员'}
-            </button>
+        <div className="adminx-action-panel__row">
+          <div>
+            <strong>学历认证</strong>
+            <span>{selectedUser.education_verified ? '当前已认证' : '当前未认证'}</span>
           </div>
-
-          <div className="adminx-action-panel__row">
-            <div>
-              <strong>学历认证</strong>
-              <span>{selectedUser.education_verified ? '当前已认证' : '当前未认证'}</span>
-            </div>
-            <button
-              type="button"
-              className="adminx-action-button"
-              onClick={() => void handlePermissionAction(
-                { education_verified: !selectedUser.education_verified },
-                selectedUser.education_verified ? '已取消学历认证' : '已通过学历认证',
-              )}
-            >
-              {selectedUser.education_verified ? '取消认证' : '通过认证'}
-            </button>
-          </div>
+          <button
+            type="button"
+            className="adminx-action-button adminx-action-button--confirm-lite"
+            onClick={() => void handlePermissionAction(
+              { education_verified: !selectedUser.education_verified },
+              selectedUser.education_verified ? '已取消学历认证' : '已通过学历认证',
+            )}
+          >
+            {selectedUser.education_verified ? '取消认证' : '通过认证'}
+          </button>
         </div>
       </div>
     )
@@ -982,12 +1289,7 @@ export function AdminPage({ currentUser, onBack }) {
                 <div className="adminx-page-list">
                   {buildPagination(pageData.page, pageData.total_pages).map((value) => (
                     typeof value === 'number' ? (
-                      <button
-                        key={value}
-                        type="button"
-                        className={`adminx-page-button${value === pageData.page ? ' is-active' : ''}`}
-                        onClick={() => setQuery((previous) => ({ ...previous, page: value }))}
-                      >
+                      <button key={value} type="button" className={`adminx-page-button${value === pageData.page ? ' is-active' : ''}`} onClick={() => setQuery((previous) => ({ ...previous, page: value }))}>
                         {value}
                       </button>
                     ) : (
@@ -1005,12 +1307,7 @@ export function AdminPage({ currentUser, onBack }) {
           <aside className="adminx-card adminx-card--detail">
             <div className="adminx-detail-tabs">
               {DETAIL_TABS.map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  className={`adminx-detail-tab${detailTab === tab.id ? ' is-active' : ''}`}
-                  onClick={() => setDetailTab(tab.id)}
-                >
+                <button key={tab.id} type="button" className={`adminx-detail-tab${detailTab === tab.id ? ' is-active' : ''}`} onClick={() => setDetailTab(tab.id)}>
                   {tab.label}
                 </button>
               ))}
@@ -1022,7 +1319,393 @@ export function AdminPage({ currentUser, onBack }) {
     )
   }
 
+  function renderCodesSection() {
+    return (
+      <div className="adminx-surface adminx-codes">
+        <div className="adminx-codes-grid">
+          <section className="adminx-card adminx-card--focused">
+            {renderSectionHeader('批量生成兑换码', '支持批次前缀、备注和一次性批量发码，生成后可立即复制或导出。')}
+            <div className="adminx-detail-stack">
+              <div className="adminx-metric-grid adminx-metric-grid--codes">
+                <div className="adminx-metric-card">
+                  <span>可用</span>
+                  <strong>{formatNumber(codeStatusSummary.active)}</strong>
+                  <small>当前可直接发放</small>
+                </div>
+                <div className="adminx-metric-card">
+                  <span>已兑换</span>
+                  <strong>{formatNumber(codeStatusSummary.redeemed)}</strong>
+                  <small>已被用户使用</small>
+                </div>
+                <div className="adminx-metric-card">
+                  <span>异常状态</span>
+                  <strong>{formatNumber((codeStatusSummary.disabled || 0) + (codeStatusSummary.expired || 0))}</strong>
+                  <small>禁用或过期</small>
+                </div>
+              </div>
+
+              <div className="adminx-form-grid">
+                <label className="adminx-form-field">
+                  <span>套餐</span>
+                  <select value={codeDraft.plan_code} onChange={(event) => updateCodeDraftField('plan_code', event.target.value)}>
+                    <option value="vip_monthly">VIP 月卡</option>
+                  </select>
+                </label>
+                <label className="adminx-form-field">
+                  <span>数量</span>
+                  <input type="number" min="1" max="200" value={codeDraft.quantity} onChange={(event) => updateCodeDraftField('quantity', event.target.value)} />
+                </label>
+                <label className="adminx-form-field">
+                  <span>有效天数</span>
+                  <input type="number" min="1" max="3650" value={codeDraft.duration_days} onChange={(event) => updateCodeDraftField('duration_days', event.target.value)} />
+                </label>
+                <label className="adminx-form-field">
+                  <span>批次前缀</span>
+                  <input value={codeDraft.batch_label} placeholder="如 MAY20 / VIPA" onChange={(event) => updateCodeDraftField('batch_label', event.target.value.toUpperCase())} />
+                </label>
+              </div>
+
+              <label className="adminx-form-field adminx-form-field--textarea">
+                <span>备注</span>
+                <textarea
+                  value={codeDraft.note}
+                  rows={4}
+                  maxLength={500}
+                  placeholder="例如：公众号 5 月活动、渠道 A、客服补发"
+                  onChange={(event) => updateCodeDraftField('note', event.target.value)}
+                />
+              </label>
+
+              <div className="adminx-action-row adminx-action-row--wrap">
+                <button type="button" className="adminx-action-button" onClick={() => setCodeDraft(DEFAULT_CODE_DRAFT)} disabled={codeCreating}>
+                  清空表单
+                </button>
+                <button type="button" className="adminx-primary-button" onClick={() => void submitCodeBatch()} disabled={codeCreating}>
+                  {codeCreating ? '生成中' : `生成 ${normalizedCodeDraft.quantity} 条兑换码`}
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section className="adminx-card adminx-card--detail adminx-card--codes-list">
+            <div className="adminx-toolbar-head adminx-toolbar-head--codes-list">
+              <div className="adminx-toolbar-head__title">
+                <strong>兑换码列表</strong>
+                <span>生成后新兑换码会显示在最上方。</span>
+              </div>
+              <div className="adminx-toolbar-actions">
+                <div className="adminx-search-field">
+                  <Search size={16} />
+                  <input
+                    type="text"
+                    value={codeSearchInput}
+                    placeholder="搜索兑换码 / 前缀 / 备注"
+                    onChange={(event) => setCodeSearchInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        applyCodeSearch()
+                      }
+                    }}
+                  />
+                </div>
+                <button type="button" className="adminx-toolbar-icon-button adminx-toolbar-icon-button--primary" onClick={applyCodeSearch} aria-label="搜索兑换码">
+                  <Search size={16} />
+                </button>
+              </div>
+            </div>
+
+            <div className="adminx-filter-row adminx-filter-row--codes">
+              <label className="adminx-select-field">
+                <span>状态</span>
+                <select value={codeFilters.status} onChange={(event) => updateCodeFilter('status', event.target.value)}>
+                  <option value="">全部状态</option>
+                  <option value="active">可用</option>
+                  <option value="disabled">已禁用</option>
+                  <option value="expired">已过期</option>
+                  <option value="redeemed">已兑换</option>
+                </select>
+              </label>
+              <label className="adminx-select-field">
+                <span>备注</span>
+                <select value={codeFilters.note_state} onChange={(event) => updateCodeFilter('note_state', event.target.value)}>
+                  <option value="">全部</option>
+                  <option value="with">仅有备注</option>
+                  <option value="without">仅无备注</option>
+                </select>
+              </label>
+              <label className="adminx-select-field">
+                <span>批次前缀</span>
+                <input value={codeFilters.batch_label} placeholder="如 MAY20" onChange={(event) => updateCodeFilter('batch_label', event.target.value)} />
+              </label>
+              <div className="adminx-filter-row__actions">
+                <button type="button" className="adminx-toolbar-icon-button" onClick={clearCodeFilters} aria-label="清空兑换码筛选">
+                  <RotateCcw size={16} />
+                </button>
+              </div>
+            </div>
+
+            <div className="adminx-action-row adminx-action-row--wrap adminx-code-list-actions">
+              <button type="button" className="adminx-action-button" onClick={() => void handleCopyCodes(filteredMembershipCodes, true)} disabled={!filteredMembershipCodes.length}>
+                <Copy size={16} />
+                <span>复制筛选结果</span>
+              </button>
+              <button type="button" className="adminx-ghost-button" onClick={() => handleExportCodes(filteredMembershipCodes)} disabled={!filteredMembershipCodes.length}>
+                <Download size={16} />
+                <span>导出筛选结果</span>
+              </button>
+            </div>
+
+            <div className="adminx-table-wrap adminx-code-list-wrap">
+              <table className="adminx-user-table adminx-code-table">
+                <thead>
+                  <tr>
+                    <th>兑换码</th>
+                    <th>状态</th>
+                    <th>套餐</th>
+                    <th>时长</th>
+                    <th>批次</th>
+                    <th>备注</th>
+                    <th>兑换用户</th>
+                    <th>过期时间</th>
+                    <th>创建时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredMembershipCodes.length ? (
+                    filteredMembershipCodes.map((item) => (
+                      <tr key={item.id}>
+                        <td>
+                          <div className="adminx-code-cell">
+                            <strong>{item.code}</strong>
+                            <span>{item.code_prefix || '无前缀'}</span>
+                          </div>
+                        </td>
+                        <td>
+                          <StatusBadge tone={getCodeStatusTone(item.status)}>
+                            {getCodeStatusLabel(item.status)}
+                          </StatusBadge>
+                        </td>
+                        <td>{item.plan_code}</td>
+                        <td>{item.duration_days} 天</td>
+                        <td>{item.batch_label || '--'}</td>
+                        <td>{item.notes || '--'}</td>
+                        <td>{getRedeemedUserDisplay(item)}</td>
+                        <td>{formatDateTime(item.expires_at)}</td>
+                        <td>{formatDateTime(item.created_at)}</td>
+                        <td>
+                          <div className="adminx-inline-actions">
+                            <button type="button" className="adminx-icon-button" onClick={() => void handleCopyCodes([item], true)} aria-label="复制兑换码">
+                              <Copy size={15} />
+                            </button>
+                            {item.status === 'active' || item.status === 'disabled' ? (
+                              <button
+                                type="button"
+                                className={item.status === 'active' ? 'adminx-danger-button' : 'adminx-action-button'}
+                                onClick={() => void toggleMembershipCode(item)}
+                                disabled={codeUpdatingId === item.id}
+                              >
+                                {codeUpdatingId === item.id ? '处理中' : item.status === 'active' ? '禁用' : '启用'}
+                              </button>
+                            ) : (
+                              <span className="adminx-table-muted">不可变更</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan="10">
+                        <EmptyState title={codeLoading ? '正在加载兑换码' : '没有匹配结果'} description={codeLoading ? '请稍等，后台正在同步兑换码列表。' : '换个筛选条件试试，或者先生成一批新的兑换码。'} />
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </div>
+    )
+  }
+
+  function renderFeedbackSection() {
+    return (
+      <div className="adminx-surface adminx-users">
+        <section className="adminx-card adminx-card--toolbar">
+          <div className="adminx-toolbar-head">
+            <div className="adminx-toolbar-head__title">
+              <strong>问题反馈箱</strong>
+            </div>
+            <div className="adminx-toolbar-actions">
+              <div className="adminx-search-field">
+                <Search size={16} />
+                <input
+                  type="text"
+                  value={feedbackSearchInput}
+                  placeholder="搜索标题 / 内容 / UID / 手机号"
+                  onChange={(event) => setFeedbackSearchInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      applyFeedbackSearch()
+                    }
+                  }}
+                />
+              </div>
+              <button type="button" className="adminx-toolbar-icon-button adminx-toolbar-icon-button--primary" onClick={applyFeedbackSearch} aria-label="搜索反馈">
+                <Search size={16} />
+              </button>
+            </div>
+          </div>
+
+          <div className="adminx-filter-row">
+            <label className="adminx-select-field">
+              <span>状态</span>
+              <select value={feedbackQuery.status} onChange={(event) => updateFeedbackFilter('status', event.target.value)}>
+                <option value="">全部状态</option>
+                <option value="open">待处理</option>
+                <option value="in_progress">处理中</option>
+                <option value="resolved">已解决</option>
+                <option value="closed">已关闭</option>
+              </select>
+            </label>
+            <label className="adminx-select-field">
+              <span>类型</span>
+              <select value={feedbackQuery.category} onChange={(event) => updateFeedbackFilter('category', event.target.value)}>
+                <option value="">全部类型</option>
+                <option value="bug">Bug</option>
+                <option value="feature">功能建议</option>
+                <option value="question">使用问题</option>
+                <option value="other">其他</option>
+              </select>
+            </label>
+            <div className="adminx-filter-row__actions">
+              <button type="button" className="adminx-toolbar-icon-button" onClick={clearFeedbackFilters} aria-label="清空反馈筛选">
+                <RotateCcw size={16} />
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <div className="adminx-users-layout">
+          <section className="adminx-card adminx-card--table">
+            <div className="adminx-table-wrap">
+              <table className="adminx-user-table">
+                <thead>
+                  <tr>
+                    <th>标题</th>
+                    <th>用户</th>
+                    <th>类型</th>
+                    <th>状态</th>
+                    <th>联系方式</th>
+                    <th>提交时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {feedbackPageData.items.length ? (
+                    feedbackPageData.items.map((item) => (
+                      <tr key={item.id} className={selectedFeedbackId === item.id ? 'is-selected' : ''} onClick={() => setSelectedFeedbackId(item.id)}>
+                        <td>{item.title}</td>
+                        <td>{item.nickname || item.uid}</td>
+                        <td>{item.category}</td>
+                        <td>{getFeedbackStatusLabel(item.status)}</td>
+                        <td>{item.contact || item.phone || '--'}</td>
+                        <td>{formatDateTime(item.created_at)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan="6">
+                        <EmptyState title="还没有反馈记录" description="等用户提交问题后，这里会自动出现。" />
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="adminx-pagination">
+              <div className="adminx-pagination__summary">
+                当前第 {feedbackPageData.page} / {feedbackPageData.total_pages} 页，共 {formatNumber(feedbackPageData.total)} 条反馈
+              </div>
+              <div className="adminx-pagination__controls">
+                <button type="button" className="adminx-page-arrow" disabled={feedbackPageData.page <= 1} onClick={() => setFeedbackQuery((previous) => ({ ...previous, page: previous.page - 1 }))}>
+                  <ChevronLeft size={16} />
+                </button>
+                <div className="adminx-page-list">
+                  {buildPagination(feedbackPageData.page, feedbackPageData.total_pages).map((value) => (
+                    typeof value === 'number' ? (
+                      <button key={value} type="button" className={`adminx-page-button${value === feedbackPageData.page ? ' is-active' : ''}`} onClick={() => setFeedbackQuery((previous) => ({ ...previous, page: value }))}>
+                        {value}
+                      </button>
+                    ) : (
+                      <span key={value} className="adminx-page-ellipsis">...</span>
+                    )
+                  ))}
+                </div>
+                <button type="button" className="adminx-page-arrow" disabled={feedbackPageData.page >= feedbackPageData.total_pages} onClick={() => setFeedbackQuery((previous) => ({ ...previous, page: previous.page + 1 }))}>
+                  <ChevronRight size={16} />
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <aside className="adminx-card adminx-card--detail">
+            {selectedFeedback ? (
+              <div className="adminx-detail-stack">
+                <div className="adminx-feedback-head">
+                  <strong>{selectedFeedback.title}</strong>
+                  <span>{selectedFeedback.nickname || selectedFeedback.uid}</span>
+                </div>
+                <div className="adminx-feedback-meta">
+                  <span>类型：{selectedFeedback.category}</span>
+                  <span>状态：{getFeedbackStatusLabel(selectedFeedback.status)}</span>
+                  <span>联系方式：{selectedFeedback.contact || selectedFeedback.phone || '--'}</span>
+                </div>
+                <div className="adminx-feedback-body">
+                  <p>{selectedFeedback.content}</p>
+                </div>
+                {selectedFeedback.screenshot_url ? (
+                  <a className="adminx-feedback-link" href={resolveAssetUrl(selectedFeedback.screenshot_url)} target="_blank" rel="noreferrer">
+                    查看用户截图
+                  </a>
+                ) : null}
+                <label className="adminx-form-field adminx-form-field--textarea">
+                  <span>管理员备注</span>
+                  <textarea
+                    value={feedbackNoteDraft}
+                    maxLength={2000}
+                    rows={8}
+                    placeholder="记录排查结论、处理进度或回访结果"
+                    onChange={(event) => setFeedbackNoteDraft(event.target.value)}
+                  />
+                </label>
+                <div className="adminx-action-row adminx-action-row--wrap">
+                  <button type="button" className="adminx-action-button" disabled={feedbackSaving} onClick={() => void updateFeedbackStatus('in_progress')}>标记处理中</button>
+                  <button type="button" className="adminx-action-button" disabled={feedbackSaving} onClick={() => void updateFeedbackStatus('resolved')}>标记已解决</button>
+                  <button type="button" className="adminx-ghost-button" disabled={feedbackSaving} onClick={() => void updateFeedbackStatus('closed')}>关闭问题</button>
+                  <button type="button" className="adminx-primary-button" disabled={feedbackSaving} onClick={() => void saveFeedbackNote()}>
+                    {feedbackSaving ? '保存中' : '保存备注'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <EmptyState title="还没有选中反馈" description="先在左侧列表里点开一条用户反馈。" />
+            )}
+          </aside>
+        </div>
+      </div>
+    )
+  }
+
   function renderBroadcastSection() {
+    const previewTitle = String(broadcastDraft.title || '').trim() || '系统通知'
+    const previewMessage = String(broadcastDraft.message || '').trim() || '通知正文会在这里预览，发送前可以先检查标题和换行。'
+    const hasDraftContent = Boolean(String(broadcastDraft.title || '').trim() || String(broadcastDraft.message || '').trim())
+
     return (
       <div className="adminx-surface">
         <section className="adminx-card adminx-card--focused">
@@ -1049,8 +1732,24 @@ export function AdminPage({ currentUser, onBack }) {
               />
             </label>
 
+            <aside className="adminx-broadcast-preview" aria-label="通知预览">
+              <span>发送预览</span>
+              <strong>{previewTitle}</strong>
+              <p>{previewMessage}</p>
+              <small>用户会在通知中心和顶部提醒里看到这条消息。</small>
+            </aside>
+
             <div className="adminx-action-row">
-              <button type="button" className="adminx-action-button" onClick={() => setBroadcastDraft(DEFAULT_BROADCAST_DRAFT)} disabled={broadcastSending}>
+              <button
+                type="button"
+                className="adminx-action-button"
+                onClick={() => {
+                  if (!hasDraftContent || window.confirm('确定清空当前通知草稿吗？')) {
+                    setBroadcastDraft(DEFAULT_BROADCAST_DRAFT)
+                  }
+                }}
+                disabled={broadcastSending}
+              >
                 清空内容
               </button>
               <button type="button" className="adminx-primary-button" onClick={() => void submitBroadcastNotification()} disabled={broadcastSending}>
@@ -1063,9 +1762,166 @@ export function AdminPage({ currentUser, onBack }) {
     )
   }
 
+  function renderHealthSection() {
+    const tasks = healthReport?.tasks || {}
+    const totals = tasks.totals || {}
+    const recovered = tasks.recovered || {}
+    const recentFailures = Array.isArray(tasks.recent_failures) ? tasks.recent_failures : []
+    const features = healthReport?.features || {}
+    const databaseStatus = healthReport?.database || 'unknown'
+    const statusRows = [
+      ['paper_summaries', '摘要任务', tasks.paper_summaries || {}],
+      ['research_matrix_runs', '文献矩阵', tasks.research_matrix_runs || {}],
+      ['full_translations', '全文翻译', tasks.full_translations || {}],
+    ]
+    const featureRows = [
+      ['AI 生成', features.ai_enabled],
+      ['OSS 文件存储', features.oss_available],
+      ['文档解析', features.aliyun_docmind_available],
+      ['机器翻译', features.tencent_mt_available],
+      ['邮件服务', features.smtp_available],
+    ]
+
+    if (healthLoading && !healthReport) {
+      return (
+        <div className="adminx-surface">
+          <section className="adminx-card adminx-card--focused">
+            <EmptyState title="正在读取系统状态" description="正在检查数据库和后台任务状态。" />
+          </section>
+        </div>
+      )
+    }
+
+    return (
+      <div className="adminx-surface adminx-health">
+        <section className="adminx-stat-grid">
+          <StatCard
+            icon={Activity}
+            label="系统状态"
+            value={getHealthStatusLabel(healthReport?.status)}
+            detail={`数据库：${getHealthStatusLabel(databaseStatus)}`}
+            tone={healthReport?.status === 'ok' ? 'green' : 'gold'}
+          />
+          <StatCard
+            icon={RefreshCw}
+            label="进行中"
+            value={formatNumber(totals.active)}
+            detail="排队和运行中的任务"
+            tone="blue"
+          />
+          <StatCard
+            icon={Bug}
+            label="异常"
+            value={formatNumber(totals.failed)}
+            detail="失败、取消或中断任务"
+            tone={Number(totals.failed || 0) ? 'gold' : 'green'}
+          />
+          <StatCard
+            icon={CheckCircle2}
+            label="已完成"
+            value={formatNumber(totals.completed)}
+            detail="摘要、矩阵和全文翻译"
+            tone="slate"
+          />
+        </section>
+
+        <div className="adminx-health-grid">
+          <section className="adminx-card adminx-card--focused">
+            {renderSectionHeader('任务队列', '长任务积压、失败与自动恢复结果。')}
+            <div className="adminx-health-table">
+              {statusRows.map(([key, label, counts]) => (
+                <div className="adminx-health-row" key={key}>
+                  <div>
+                    <strong>{label}</strong>
+                    <span>
+                      排队 {formatNumber(getStatusCount(counts, 'queued'))}
+                      {' / '}
+                      运行 {formatNumber(getStatusCount(counts, 'running'))}
+                      {' / '}
+                      完成 {formatNumber(getStatusCount(counts, key === 'paper_summaries' ? 'generated' : 'completed'))}
+                    </span>
+                  </div>
+                  <StatusBadge tone={getStatusCount(counts, 'failed') + getStatusCount(counts, 'error') ? 'red' : 'green'}>
+                    异常 {formatNumber(getStatusCount(counts, 'failed') + getStatusCount(counts, 'error') + getStatusCount(counts, 'cancelled'))}
+                  </StatusBadge>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="adminx-card adminx-card--focused">
+            {renderSectionHeader('运行能力', '关键后端能力开关与服务依赖。')}
+            <div className="adminx-health-table">
+              <div className="adminx-health-row">
+                <div>
+                  <strong>数据库</strong>
+                  <span>接口请求会先做一次轻量连通性检查</span>
+                </div>
+                <StatusBadge tone={getHealthStatusTone(databaseStatus)}>{getHealthStatusLabel(databaseStatus)}</StatusBadge>
+              </div>
+              {featureRows.map(([label, enabled]) => (
+                <div className="adminx-health-row" key={label}>
+                  <div>
+                    <strong>{label}</strong>
+                    <span>{enabled ? '当前可用' : '未配置或关闭'}</span>
+                  </div>
+                  <StatusBadge tone={getHealthStatusTone(Boolean(enabled))}>{formatFeatureEnabled(enabled)}</StatusBadge>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="adminx-card adminx-card--focused">
+            {renderSectionHeader('自动恢复', '页面打开时会顺手整理卡住的任务。')}
+            <div className="adminx-metric-grid">
+              <div className="adminx-metric-card">
+                <span>摘要中断整理</span>
+                <strong>{formatNumber(recovered.summaries_interrupted)}</strong>
+                <small>卡住的运行中摘要会转为可重试</small>
+              </div>
+              <div className="adminx-metric-card">
+                <span>矩阵重排队</span>
+                <strong>{formatNumber(recovered.matrix_requeued)}</strong>
+                <small>卡住的矩阵任务会被归一化</small>
+              </div>
+              <div className="adminx-metric-card">
+                <span>翻译中断整理</span>
+                <strong>{formatNumber(recovered.translations_interrupted)}</strong>
+                <small>长时间无进度会转为失败可重试</small>
+              </div>
+            </div>
+          </section>
+
+          <section className="adminx-card adminx-card--focused adminx-card--wide">
+            {renderSectionHeader('最近失败任务', '用于快速判断是摘要、矩阵还是翻译链路出问题。')}
+            {recentFailures.length ? (
+              <div className="adminx-health-table adminx-health-failures">
+                {recentFailures.map((item) => (
+                  <div className="adminx-health-row adminx-health-row--failure" key={item.id}>
+                    <div>
+                      <strong>{item.title || '未命名任务'}</strong>
+                      <span>{item.label || '后台任务'} · {item.subtitle || item.status || 'failed'} · {formatDateTime(item.updated_at)}</span>
+                      <p>{item.error_message || '未记录错误原因。'}</p>
+                    </div>
+                    <StatusBadge tone="red">{item.status || 'failed'}</StatusBadge>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState title="最近没有失败任务" description="当前后台任务队列看起来很干净。" />
+            )}
+          </section>
+        </div>
+      </div>
+    )
+  }
+
   function renderActiveSection() {
     if (activeSection === 'users') return renderUsersSection()
+    if (activeSection === 'codes') return renderCodesSection()
+    if (activeSection === 'feedback') return renderFeedbackSection()
     if (activeSection === 'broadcast') return renderBroadcastSection()
+    if (activeSection === 'health') return renderHealthSection()
     return renderOverviewSection()
   }
 
@@ -1164,6 +2020,19 @@ export function AdminPage({ currentUser, onBack }) {
                   <StatusBadge tone={selectedUser.is_admin ? 'gold' : 'slate'}>
                     {selectedUser.is_admin ? '管理员' : '普通用户'}
                   </StatusBadge>
+                </div>
+              ) : activeSection === 'codes' ? (
+                <div className="adminx-main__status">
+                  <StatusBadge tone="green">可用 {formatNumber(codeStatusSummary.active)}</StatusBadge>
+                  <StatusBadge tone="slate">已兑换 {formatNumber(codeStatusSummary.redeemed)}</StatusBadge>
+                  <StatusBadge tone="gold">筛选结果 {formatNumber(filteredMembershipCodes.length)}</StatusBadge>
+                </div>
+              ) : activeSection === 'health' ? (
+                <div className="adminx-main__status">
+                  <StatusBadge tone={getHealthStatusTone(healthReport?.status)}>
+                    {getHealthStatusLabel(healthReport?.status)}
+                  </StatusBadge>
+                  <StatusBadge tone={healthLoading ? 'gold' : 'slate'}>{healthLoading ? '检查中' : '已同步'}</StatusBadge>
                 </div>
               ) : null}
             </div>

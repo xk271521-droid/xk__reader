@@ -21,6 +21,11 @@ from app.schemas.selection import (
 )
 from app.services.ai_provider_manager import resolve_user_provider
 from app.services.crypto import decrypt_api_key
+from app.services.membership import (
+    QUOTA_SELECTION_CONTEXT_DAILY,
+    QUOTA_SELECTION_EXPLAIN_DAILY,
+    consume_quota,
+)
 from app.services.selection_insight import _ai_explanation_or_fallback  # type: ignore[reportPrivateUsage]
 from app.services.selection_insight import build_selection_insight
 
@@ -170,11 +175,17 @@ def _load_provider_for_user(
 @router.post("/selection-insight", response_model=SelectionInsightResponse)
 def selection_insight(
     payload: SelectionInsightRequest,
-    _current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> SelectionInsightResponse:
     text = payload.text.strip()
     if len(text) < 2:
         raise HTTPException(status_code=400, detail="Selected text is too short.")
+    consume_quota(
+        db,
+        user_id=current_user.id,
+        quota_key=QUOTA_SELECTION_CONTEXT_DAILY,
+    )
 
     return build_selection_insight(
         text=text,
@@ -195,6 +206,11 @@ def selection_insight_explain(
     text = payload.text.strip()
     if len(text) < 2:
         raise HTTPException(status_code=400, detail="Selected text is too short.")
+    consume_quota(
+        db,
+        user_id=current_user.id,
+        quota_key=QUOTA_SELECTION_EXPLAIN_DAILY,
+    )
 
     provider, api_key = _load_provider_for_user(db, current_user.id, payload.provider_id)
     explanation = _ai_explanation_or_fallback(
@@ -219,6 +235,11 @@ def selection_insight_explain_stream(
     text = payload.text.strip()
     if len(text) < 2:
         raise HTTPException(status_code=400, detail="Selected text is too short.")
+    consume_quota(
+        db,
+        user_id=current_user.id,
+        quota_key=QUOTA_SELECTION_EXPLAIN_DAILY,
+    )
 
     provider, api_key = _load_provider_for_user(db, current_user.id, payload.provider_id)
     if not provider or not api_key:

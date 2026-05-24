@@ -30,7 +30,7 @@ class PaperNoteNodePayload(BaseModel):
 class PaperNotebookPayload(BaseModel):
     id: int | str | None = None
     title: str = Field(default="New notebook", max_length=200)
-    template_type: str = Field(default="blank", pattern=r"^(blank|default)$")
+    template_type: str = Field(default="blank", pattern=r"^[A-Za-z0-9:_-]{1,64}$")
     sort_order: int = Field(default=0, ge=0)
     collapsed: bool = True
     nodes: list[PaperNoteNodePayload] = Field(default_factory=list)

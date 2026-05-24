@@ -6,13 +6,13 @@ from time import time_ns
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import Folder, User, UserAgreement, UserProfile
+from app.models import AiProvider, FeedbackTicket, Folder, Notification, ResearchMatrixRun, User, UserAgreement, UserProfile, VerificationCode
 from app.schemas.auth import (
     AuthResponse,
     CaptchaChallengeResponse,
@@ -25,9 +25,16 @@ from app.schemas.auth import (
     UpdateProfileRequest,
     UserResponse,
 )
+from app.services.membership import build_membership_payload
 from app.services.auth_guard import auth_guard
 from app.services.ai_provider_manager import ensure_user_default_providers
 from app.services.security import create_access_token, create_uid, hash_password, verify_password
+from app.services.oss_storage import (
+    delete_object as delete_oss_object,
+    delete_prefix as delete_oss_prefix,
+    page_image_prefix,
+    paper_object_key,
+)
 from app.services.upload_mirror import mirror_upload_file, remove_mirrored_upload
 from app.services.verification import (
     EMAIL_CHANNEL,
@@ -94,13 +101,15 @@ def generate_unique_uid(db: Session) -> str:
     return uid
 
 
-def build_user_response(user: User) -> UserResponse:
+def build_user_response(db: Session, user: User) -> UserResponse:
     profile = user.profile
     if profile is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="用户资料缺失，请联系管理员。",
         )
+
+    membership_payload = build_membership_payload(db, user.id)
 
     return UserResponse(
         uid=user.uid,
@@ -114,29 +123,14 @@ def build_user_response(user: User) -> UserResponse:
         discipline=profile.discipline,
         education_verified=profile.education_verified,
         is_admin=user.is_admin,
+        membership=membership_payload["membership"],
+        usage=membership_payload["usage"],
+        features=membership_payload["features"],
     )
 
 
 def resolve_old_avatar_path(avatar_url: str | None) -> Path | None:
-    if not avatar_url:
-        return None
-
-    file_name = Path(avatar_url).name
-    if not file_name:
-        return None
-
-    avatar_path = Path(settings.avatar_upload_dir) / file_name
-    avatar_root = Path(settings.avatar_upload_dir).resolve()
-
-    try:
-        resolved = avatar_path.resolve()
-    except OSError:
-        return None
-
-    if avatar_root not in resolved.parents:
-        return None
-
-    return resolved
+    return resolve_upload_path(avatar_url, settings.avatar_upload_dir)
 
 
 def build_avatar_public_url(file_name: str) -> str:
@@ -150,6 +144,67 @@ def normalize_avatar_url(avatar_url: str | None) -> str | None:
     if not file_name:
         return avatar_url
     return build_avatar_public_url(file_name)
+
+
+def resolve_upload_path(file_url: str | None, root_dir: str) -> Path | None:
+    if not file_url:
+        return None
+
+    file_name = Path(file_url).name
+    if not file_name:
+        return None
+
+    upload_root = Path(root_dir).resolve()
+    upload_path = upload_root / file_name
+
+    try:
+        resolved = upload_path.resolve()
+    except OSError:
+        return None
+
+    if resolved != upload_root and upload_root not in resolved.parents:
+        return None
+
+    return resolved
+
+
+def resolve_feedback_screenshot_path(screenshot_url: str | None) -> Path | None:
+    return resolve_upload_path(screenshot_url, settings.feedback_image_upload_dir)
+
+
+def remove_upload_file(local_path: Path | None, mirrored_relative_path: str | None = None) -> None:
+    if local_path and local_path.exists():
+        try:
+            local_path.unlink()
+        except OSError:
+            pass
+
+    if mirrored_relative_path:
+        remove_mirrored_upload(mirrored_relative_path)
+
+
+def remove_paper_assets(file_url: str | None) -> None:
+    paper_path = resolve_upload_path(file_url, settings.papers_upload_dir)
+    if paper_path is not None:
+        remove_upload_file(paper_path, f"papers/{paper_path.name}")
+    delete_oss_object(paper_object_key(file_url))
+    delete_oss_prefix(page_image_prefix(file_url))
+
+
+def delete_user_owned_files(current_user: User) -> None:
+    profile = current_user.profile
+    if profile is not None:
+        avatar_path = resolve_old_avatar_path(profile.avatar_url)
+        if avatar_path is not None:
+            remove_upload_file(avatar_path, f"avatars/{avatar_path.name}")
+
+    for ticket in list(current_user.feedback_tickets or []):
+        screenshot_path = resolve_feedback_screenshot_path(ticket.screenshot_url)
+        if screenshot_path is not None:
+            remove_upload_file(screenshot_path, f"feedback/{screenshot_path.name}")
+
+    for paper in list(current_user.papers or []):
+        remove_paper_assets(paper.file_path)
 
 
 def find_user_by_account(db: Session, account: str) -> User | None:
@@ -250,6 +305,7 @@ def reset_password(
     )
 
     user.password_hash = hash_password(payload.password)
+    user.token_version = int(user.token_version or 0) + 1
     db.add(user)
     db.commit()
     auth_guard.record_success("login", account_keys=[normalized_account])
@@ -307,6 +363,7 @@ def register(
         email=payload.email,
         password_hash=hash_password(payload.password),
         status="active",
+        token_version=1,
         last_login_at=datetime.now(timezone.utc),
     )
     db.add(user)
@@ -346,7 +403,7 @@ def register(
     auth_guard.record_success("register", account_keys=account_keys)
     return AuthResponse(
         access_token=create_access_token(created_user.uid, created_user.token_version),
-        user=build_user_response(created_user),
+        user=build_user_response(db, created_user),
     )
 
 
@@ -369,23 +426,37 @@ def login(
             detail="账号或密码错误。",
         )
 
-    if user.status != "active":
+    locked_user = db.scalar(
+        select(User)
+        .where(User.id == user.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not locked_user or not verify_password(payload.password, locked_user.password_hash):
+        auth_guard.record_failure("login", client_ip, account_keys=[normalized_account])
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="账号或密码错误。",
+        )
+
+    if locked_user.status != "active":
         auth_guard.record_failure("login", client_ip, account_keys=[normalized_account])
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="该账号当前不可用。",
         )
 
-    user.last_login_at = datetime.now(timezone.utc)
-    db.add(user)
+    locked_user.token_version = int(locked_user.token_version or 0) + 1
+    locked_user.last_login_at = datetime.now(timezone.utc)
+    db.add(locked_user)
     db.commit()
-    ensure_user_default_providers(db, user.id, commit=True)
-    db.refresh(user, attribute_names=["profile"])
+    ensure_user_default_providers(db, locked_user.id, commit=True)
+    db.refresh(locked_user, attribute_names=["profile"])
 
     auth_guard.record_success("login", account_keys=[normalized_account])
     return AuthResponse(
-        access_token=create_access_token(user.uid, user.token_version),
-        user=build_user_response(user),
+        access_token=create_access_token(locked_user.uid, locked_user.token_version),
+        user=build_user_response(db, locked_user),
     )
 
 
@@ -395,7 +466,7 @@ def me(
     db: Annotated[Session, Depends(get_db)],
 ) -> UserResponse:
     ensure_user_default_providers(db, current_user.id, commit=True)
-    return build_user_response(current_user)
+    return build_user_response(db, current_user)
 
 
 @router.patch("/me", response_model=UserResponse)
@@ -420,7 +491,7 @@ def update_me(
     db.add(profile)
     db.commit()
     db.refresh(current_user, attribute_names=["profile"])
-    return build_user_response(current_user)
+    return build_user_response(db, current_user)
 
 
 @router.post("/me/avatar", response_model=UserResponse)
@@ -478,4 +549,33 @@ async def upload_avatar(
         except OSError:
             pass
 
-    return build_user_response(current_user)
+    return build_user_response(db, current_user)
+
+
+@router.delete("/me")
+def delete_me(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, str]:
+    if current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="管理员账户暂不支持自助注销，请联系系统维护者处理。",
+        )
+
+    db.refresh(current_user, attribute_names=["profile", "papers", "feedback_tickets"])
+    delete_user_owned_files(current_user)
+
+    targets = [current_user.phone]
+    if current_user.email:
+        targets.append(current_user.email)
+
+    db.execute(delete(Notification).where(Notification.user_id == current_user.id))
+    db.execute(delete(AiProvider).where(AiProvider.user_id == current_user.id))
+    db.execute(delete(ResearchMatrixRun).where(ResearchMatrixRun.user_id == current_user.id))
+    if targets:
+        db.execute(delete(VerificationCode).where(VerificationCode.target.in_(targets)))
+
+    db.delete(current_user)
+    db.commit()
+    return {"message": "账号已注销，相关数据已删除。"}

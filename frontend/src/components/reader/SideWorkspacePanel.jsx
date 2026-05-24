@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronUp,
   ClipboardCopy,
+  Crown,
   Download,
   FileText,
   FlaskConical,
@@ -17,6 +18,7 @@ import {
   Minus,
   NotebookPen,
   Palette,
+  Pencil,
   Plus,
   Presentation,
   RefreshCw,
@@ -24,9 +26,11 @@ import {
   Sparkles,
   Trash2,
   Type,
+  X,
 } from 'lucide-react'
 import { getStoredAuthToken } from '../../services/authApi'
 import {
+  checkNotesExportAllowed,
   fetchPaperSummaries,
   fetchPaperSummaryStatus,
   generatePaperSummary,
@@ -73,6 +77,11 @@ import {
   TabsTrigger,
 } from '../ui/tabs'
 import { resolveAssetUrl } from '../../utils/assetUrl'
+import { resolveApiErrorMessage } from '../../utils/errorMessage'
+import {
+  buildAnnotationSummaryGroupsFromAnnotations,
+  countLogicalAnnotations,
+} from '../../utils/annotationAggregation'
 
 function buildPaperTitle(fileName) {
   if (!fileName) return 'Untitled paper'
@@ -92,6 +101,14 @@ const NOTEBOOK_TEMPLATE_ICON_MAP = {
   figure_deep_read: ImageIcon,
   writing_citation: Type,
 }
+
+const FREE_NOTE_TEMPLATE_IDS = new Set([
+  'blank',
+  'default',
+  'review_writing',
+  'paper_reproduction',
+  'writing_citation',
+])
 
 const CUSTOM_TEMPLATE_STORAGE_KEY = 'xk:note-custom-templates:v1'
 
@@ -153,51 +170,168 @@ const infoTabs = [
   { id: 'citations', label: '被引文献' },
 ]
 
+function createMetadataDraft(metadata = {}) {
+  return {
+    title: metadata.title || '',
+    doi: metadata.doi || '',
+    arxivId: metadata.arxivId || '',
+    author: metadata.author || '',
+    subject: metadata.subject || '',
+    keywords: metadata.keywords || '',
+  }
+}
+
 function displayValue(value) {
   return value || 'PDF 元数据中未识别'
 }
 
-async function fetchReferences(doi) {
-  const token = getStoredAuthToken()
-  const response = await fetch(`/api/papers/references?doi=${encodeURIComponent(doi)}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  })
-  return response.json()
+function buildLiteratureLookupQuery(doi, arxivId, title) {
+  const params = new URLSearchParams()
+  if (doi) params.set('doi', doi)
+  if (arxivId) params.set('arxiv_id', arxivId)
+  if (title) params.set('title', title)
+  return params.toString()
 }
 
-async function fetchCitations(doi) {
-  const token = getStoredAuthToken()
-  const response = await fetch(`/api/papers/citations?doi=${encodeURIComponent(doi)}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  })
-  return response.json()
+async function parseLiteratureResponse(response) {
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw new Error(resolveApiErrorMessage(payload, '外部文献数据加载失败，请稍后重试。'))
+  }
+  return payload
 }
 
-function InfoPanel({ fileName, metadata }) {
+async function fetchReferences(doi, arxivId, title) {
+  const token = getStoredAuthToken()
+  const response = await fetch(`/api/papers/references?${buildLiteratureLookupQuery(doi, arxivId, title)}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  return parseLiteratureResponse(response)
+}
+
+async function fetchCitations(doi, arxivId, title) {
+  const token = getStoredAuthToken()
+  const response = await fetch(`/api/papers/citations?${buildLiteratureLookupQuery(doi, arxivId, title)}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  return parseLiteratureResponse(response)
+}
+
+function renderLiteratureTitle(item) {
+  const title = item.title || 'Untitled'
+  if (item.doi) {
+    return (
+      <a href={`https://doi.org/${item.doi}`} target="_blank" rel="noopener" className="ref-link">
+        {title}
+      </a>
+    )
+  }
+  if (item.arxiv_id) {
+    return (
+      <a href={`https://arxiv.org/abs/${item.arxiv_id}`} target="_blank" rel="noopener" className="ref-link">
+        {title}
+      </a>
+    )
+  }
+  return title
+}
+
+function InfoPanel({ fileName, metadata, onRefreshMetadata, onSaveMetadata, paperId }) {
   const [activeTab, setActiveTab] = useState('basic')
   const [cache, setCache] = useState({})
+  const [isEditing, setIsEditing] = useState(false)
+  const [draft, setDraft] = useState(() => createMetadataDraft(metadata))
+  const [refreshingMetadata, setRefreshingMetadata] = useState(false)
+  const [refreshError, setRefreshError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
   const doi = metadata.doi || ''
-  const refs = cache[`${doi}:refs`]
-  const cites = cache[`${doi}:cites`]
+  const arxivId = metadata.arxivId || ''
   const paperTitle = useMemo(() => metadata.title || buildPaperTitle(fileName), [fileName, metadata.title])
+  const lookupMode = doi ? 'DOI' : (arxivId ? 'arXiv' : (paperTitle ? '标题' : ''))
+  const lookupKey = doi || (arxivId ? `arxiv:${arxivId}` : (paperTitle ? `title:${paperTitle}` : ''))
+  const refs = cache[`${lookupKey}:refs`]
+  const cites = cache[`${lookupKey}:cites`]
 
-  const updateCache = (suffix, value) => setCache((previous) => ({ ...previous, [`${doi}${suffix}`]: value }))
+  const updateCache = (suffix, value) => setCache((previous) => ({ ...previous, [`${lookupKey}${suffix}`]: value }))
+
+  const updateDraft = (field, value) => {
+    setDraft((previous) => ({ ...previous, [field]: value }))
+  }
+
+  function loadLiterature(kind) {
+    if (!lookupKey) return
+    const suffix = kind === 'references' ? ':refs' : ':cites'
+    const request = kind === 'references' ? fetchReferences : fetchCitations
+    const resultKey = kind === 'references' ? 'references' : 'citations'
+    const fallback = kind === 'references' ? '参考文献加载失败' : '被引文献加载失败'
+
+    updateCache(suffix, { loading: true, data: [], source: '' })
+    request(doi, arxivId, paperTitle)
+      .then((data) => updateCache(suffix, {
+        loading: false,
+        data: data?.[resultKey] || [],
+        source: data?.source || '',
+      }))
+      .catch((error) => updateCache(suffix, {
+        loading: false,
+        data: [],
+        source: error?.message || fallback,
+      }))
+  }
+
+  async function handleSaveMetadata(event) {
+    event?.preventDefault()
+    if (saving) return
+    setSaving(true)
+    setSaveError('')
+    try {
+      if (onSaveMetadata) {
+        await onSaveMetadata(paperId, draft)
+      }
+      setCache({})
+      setIsEditing(false)
+    } catch (error) {
+      setSaveError(error?.message || '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleRefreshMetadata() {
+    if (refreshingMetadata || !onRefreshMetadata) return
+    setRefreshingMetadata(true)
+    setRefreshError('')
+    setSaveError('')
+    try {
+      const result = await onRefreshMetadata(paperId)
+      if (result?.metadata) {
+        setDraft(createMetadataDraft(result.metadata))
+      }
+      setCache({})
+      setIsEditing(false)
+    } catch (error) {
+      setRefreshError(error?.message || '重新识别失败')
+    } finally {
+      setRefreshingMetadata(false)
+    }
+  }
 
   useEffect(() => {
-    if (activeTab !== 'references' || !doi || refs) return
-    updateCache(':refs', { loading: true })
-    fetchReferences(doi)
-      .then((data) => updateCache(':refs', { loading: false, data: data?.references || [], source: data?.source || '' }))
-      .catch(() => updateCache(':refs', { loading: false, data: [], source: 'Load failed' }))
-  }, [activeTab, doi, refs])
+    if (!isEditing) {
+      setDraft(createMetadataDraft(metadata))
+    }
+  }, [isEditing, metadata])
 
   useEffect(() => {
-    if (activeTab !== 'citations' || !doi || cites) return
-    updateCache(':cites', { loading: true })
-    fetchCitations(doi)
-      .then((data) => updateCache(':cites', { loading: false, data: data?.citations || [], source: data?.source || '' }))
-      .catch(() => updateCache(':cites', { loading: false, data: [], source: 'Load failed' }))
-  }, [activeTab, cites, doi])
+    if (activeTab !== 'references' || !lookupKey || refs) return
+    loadLiterature('references')
+  }, [activeTab, arxivId, doi, lookupKey, paperTitle, refs])
+
+  useEffect(() => {
+    if (activeTab !== 'citations' || !lookupKey || cites) return
+    loadLiterature('citations')
+  }, [activeTab, arxivId, cites, doi, lookupKey, paperTitle])
 
   return (
     <div className="workspace-panel__content">
@@ -216,39 +350,132 @@ function InfoPanel({ fileName, metadata }) {
 
       {activeTab === 'basic' ? (
         <div className="workspace-card-list">
-          <div className="workspace-title-card">
-            <h3>{paperTitle}</h3>
-            <p>主题摘要：{displayValue(metadata.subject)}</p>
-          </div>
-          <div className="workspace-info-grid">
-            <div><span>DOI</span><p>{displayValue(metadata.doi)}</p></div>
-            <div><span>作者</span><p>{displayValue(metadata.author)}</p></div>
-            <div><span>关键词</span><p>{displayValue(metadata.keywords)}</p></div>
-            <div><span>页数 / 大小</span><p>{metadata.pageCount || '-'} 页{metadata.fileSize ? ` / ${metadata.fileSize}` : ''}</p></div>
-            <div><span>生成工具</span><p>{displayValue(metadata.creator || metadata.producer)}</p></div>
-            <div><span>创建 / 修改</span><p>{displayValue([metadata.creationDate, metadata.modificationDate].filter(Boolean).join(' / '))}</p></div>
-          </div>
+          {isEditing ? (
+            <form className="workspace-metadata-editor" onSubmit={handleSaveMetadata}>
+              <div className="workspace-metadata-editor__header">
+                <h3>编辑基本信息</h3>
+                <div className="workspace-metadata-editor__actions">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDraft(createMetadataDraft(metadata))
+                      setSaveError('')
+                      setRefreshError('')
+                      setIsEditing(false)
+                    }}
+                    disabled={saving}
+                    aria-label="取消"
+                    title="取消"
+                  >
+                    <X size={14} />
+                  </button>
+                  <button type="submit" disabled={saving} aria-label="保存" title="保存">
+                    {saving ? <Loader2 size={14} className="is-spinning" /> : <Save size={14} />}
+                  </button>
+                </div>
+              </div>
+              <label>
+                <span>标题</span>
+                <input value={draft.title} onChange={(event) => updateDraft('title', event.target.value)} />
+              </label>
+              <label>
+                <span>DOI</span>
+                <input value={draft.doi} onChange={(event) => updateDraft('doi', event.target.value)} />
+              </label>
+              <label>
+                <span>arXiv ID</span>
+                <input value={draft.arxivId} onChange={(event) => updateDraft('arxivId', event.target.value)} />
+              </label>
+              <label>
+                <span>作者</span>
+                <input value={draft.author} onChange={(event) => updateDraft('author', event.target.value)} />
+              </label>
+              <label>
+                <span>主题摘要</span>
+                <textarea value={draft.subject} onChange={(event) => updateDraft('subject', event.target.value)} rows={4} />
+              </label>
+              <label>
+                <span>关键词</span>
+                <input value={draft.keywords} onChange={(event) => updateDraft('keywords', event.target.value)} />
+              </label>
+              {saveError ? <p className="workspace-metadata-editor__error">{saveError}</p> : null}
+            </form>
+          ) : (
+            <>
+              <div className="workspace-title-card">
+                <div className="workspace-title-card__header">
+                  <h3>{paperTitle}</h3>
+                  <div className="workspace-title-card__actions">
+                    {onRefreshMetadata ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleRefreshMetadata()}
+                        disabled={refreshingMetadata}
+                        aria-label="重新识别元数据"
+                        title="重新识别元数据"
+                      >
+                        {refreshingMetadata ? <Loader2 size={14} className="is-spinning" /> : <RefreshCw size={14} />}
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDraft(createMetadataDraft(metadata))
+                        setSaveError('')
+                        setRefreshError('')
+                        setIsEditing(true)
+                      }}
+                      aria-label="编辑基本信息"
+                      title="编辑基本信息"
+                    >
+                      <Pencil size={14} />
+                    </button>
+                  </div>
+                </div>
+                <p>主题摘要：{displayValue(metadata.subject)}</p>
+                {refreshError ? <p className="workspace-metadata-editor__error">{refreshError}</p> : null}
+              </div>
+              <div className="workspace-info-grid">
+                <div><span>DOI / arXiv</span><p>{displayValue(metadata.doi || metadata.arxivId)}</p></div>
+                <div><span>作者</span><p>{displayValue(metadata.author)}</p></div>
+                <div><span>关键词</span><p>{displayValue(metadata.keywords)}</p></div>
+                <div><span>页数 / 大小</span><p>{metadata.pageCount || '-'} 页{metadata.fileSize ? ` / ${metadata.fileSize}` : ''}</p></div>
+                <div><span>生成工具</span><p>{displayValue(metadata.creator || metadata.producer)}</p></div>
+                <div><span>创建 / 修改</span><p>{displayValue([metadata.creationDate, metadata.modificationDate].filter(Boolean).join(' / '))}</p></div>
+              </div>
+            </>
+          )}
         </div>
       ) : null}
 
       {activeTab === 'references' ? (
         <div className="workspace-card-list">
           <div className="workspace-list-card workspace-ref-list">
-            <h3>参考文献</h3>
-            {!doi ? <p className="muted">这篇文献暂未识别 DOI。</p> : null}
-            {doi && refs?.loading ? <p className="muted">加载中...</p> : null}
-            {doi && !refs?.loading && refs?.data?.length > 0 ? refs.data.map((reference, index) => (
+            <div className="workspace-ref-list__header">
+              <h3>参考文献</h3>
+              {lookupKey ? (
+                <button
+                  type="button"
+                  onClick={() => loadLiterature('references')}
+                  disabled={Boolean(refs?.loading)}
+                  aria-label="重新检索参考文献"
+                  title="重新检索参考文献"
+                >
+                  {refs?.loading ? <Loader2 size={14} className="is-spinning" /> : <RefreshCw size={14} />}
+                </button>
+              ) : null}
+            </div>
+            {!lookupKey ? <p className="muted">这篇文献暂未识别标题、DOI 或 arXiv ID。</p> : null}
+            {lookupKey && !refs?.loading ? <p className="card-footnote">检索方式：{lookupMode} 匹配</p> : null}
+            {lookupKey && refs?.loading ? <p className="muted">正在通过 {lookupMode} 匹配外部文献库...</p> : null}
+            {lookupKey && !refs?.loading && refs?.data?.length > 0 ? refs.data.map((reference, index) => (
               <p key={`${reference.title || 'ref'}:${index}`}>
-                [{index + 1}] {reference.doi ? (
-                  <a href={`https://doi.org/${reference.doi}`} target="_blank" rel="noopener" className="ref-link">
-                    {reference.title}
-                  </a>
-                ) : reference.title}
-                {reference.authors ? ` 鈥?${reference.authors}` : ''}
+                [{index + 1}] {renderLiteratureTitle(reference)}
+                {reference.authors ? ` · ${reference.authors}` : ''}
                 {reference.year ? ` (${reference.year})` : ''}
               </p>
             )) : null}
-            {doi && !refs?.loading && (!refs?.data || refs.data.length === 0) ? <p className="muted">暂未获取到参考文献数据。</p> : null}
+            {lookupKey && !refs?.loading && (!refs?.data || refs.data.length === 0) ? <p className="muted">暂未获取到参考文献数据。</p> : null}
             {refs?.source ? <p className="card-footnote">来源：{refs.source}</p> : null}
           </div>
         </div>
@@ -257,21 +484,31 @@ function InfoPanel({ fileName, metadata }) {
       {activeTab === 'citations' ? (
         <div className="workspace-card-list">
           <div className="workspace-list-card workspace-ref-list">
-            <h3>琚紩鏂囩尞</h3>
-            {!doi ? <p className="muted">这篇文献暂未识别 DOI。</p> : null}
-            {doi && cites?.loading ? <p className="muted">加载中...</p> : null}
-            {doi && !cites?.loading && cites?.data?.length > 0 ? cites.data.map((citation, index) => (
+            <div className="workspace-ref-list__header">
+              <h3>被引文献</h3>
+              {lookupKey ? (
+                <button
+                  type="button"
+                  onClick={() => loadLiterature('citations')}
+                  disabled={Boolean(cites?.loading)}
+                  aria-label="重新检索被引文献"
+                  title="重新检索被引文献"
+                >
+                  {cites?.loading ? <Loader2 size={14} className="is-spinning" /> : <RefreshCw size={14} />}
+                </button>
+              ) : null}
+            </div>
+            {!lookupKey ? <p className="muted">这篇文献暂未识别标题、DOI 或 arXiv ID。</p> : null}
+            {lookupKey && !cites?.loading ? <p className="card-footnote">检索方式：{lookupMode} 匹配</p> : null}
+            {lookupKey && cites?.loading ? <p className="muted">正在通过 {lookupMode} 匹配外部文献库...</p> : null}
+            {lookupKey && !cites?.loading && cites?.data?.length > 0 ? cites.data.map((citation, index) => (
               <p key={`${citation.title || 'cite'}:${index}`}>
-                [{index + 1}] {citation.doi ? (
-                  <a href={`https://doi.org/${citation.doi}`} target="_blank" rel="noopener" className="ref-link">
-                    {citation.title}
-                  </a>
-                ) : citation.title}
-                {citation.authors ? ` 鈥?${citation.authors}` : ''}
+                [{index + 1}] {renderLiteratureTitle(citation)}
+                {citation.authors ? ` · ${citation.authors}` : ''}
                 {citation.year ? ` (${citation.year})` : ''}
               </p>
             )) : null}
-            {doi && !cites?.loading && (!cites?.data || cites.data.length === 0) ? <p className="muted">暂未获取到被引数据。</p> : null}
+            {lookupKey && !cites?.loading && (!cites?.data || cites.data.length === 0) ? <p className="muted">暂未获取到被引数据。</p> : null}
             {cites?.source ? <p className="card-footnote">来源：{cites.source}</p> : null}
           </div>
         </div>
@@ -515,9 +752,14 @@ function RichTextBlockEditor({
   useEffect(() => {
     const textarea = textareaRef.current
     if (!textarea || !showEditor) return
-    textarea.style.height = 'auto'
-    textarea.style.height = `${Math.max(34, textarea.scrollHeight)}px`
+    syncTextareaHeight(textarea)
   }, [doc.text, showEditor])
+
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea || !showEditor) return undefined
+    return watchTextareaHeight(textarea)
+  }, [showEditor])
 
   return (
     <div
@@ -574,10 +816,14 @@ function AutoGrowTextarea({ className, value, placeholder, onChange, onFocus, on
   const ref = useRef(null)
 
   useEffect(() => {
-    if (!ref.current) return
-    ref.current.style.height = 'auto'
-    ref.current.style.height = `${Math.max(34, ref.current.scrollHeight)}px`
+    syncTextareaHeight(ref.current)
   }, [value])
+
+  useEffect(() => {
+    const textarea = ref.current
+    if (!textarea) return undefined
+    return watchTextareaHeight(textarea)
+  }, [])
 
   return (
     <textarea
@@ -593,15 +839,625 @@ function AutoGrowTextarea({ className, value, placeholder, onChange, onFocus, on
   )
 }
 
+function getPlainNoteText(value) {
+  return parseRichNoteContent(value).text
+}
+
+function syncTextareaHeight(textarea) {
+  if (!textarea) return
+  textarea.style.height = 'auto'
+  textarea.style.height = `${Math.max(34, textarea.scrollHeight)}px`
+}
+
+function watchTextareaHeight(textarea) {
+  syncTextareaHeight(textarea)
+
+  let frameId = 0
+  const scheduleSync = () => {
+    if (typeof requestAnimationFrame === 'undefined') {
+      syncTextareaHeight(textarea)
+      return
+    }
+    if (frameId) cancelAnimationFrame(frameId)
+    frameId = requestAnimationFrame(() => {
+      frameId = 0
+      syncTextareaHeight(textarea)
+    })
+  }
+
+  const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(scheduleSync) : null
+  observer?.observe(textarea)
+  if (textarea.parentElement) observer?.observe(textarea.parentElement)
+
+  const targetWindow = typeof window !== 'undefined' ? window : null
+  targetWindow?.addEventListener('resize', scheduleSync)
+
+  return () => {
+    if (frameId && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(frameId)
+    observer?.disconnect()
+    targetWindow?.removeEventListener('resize', scheduleSync)
+  }
+}
+
+function getNoteExportTitle(fileName, metadata) {
+  return metadata?.title || buildPaperTitle(fileName) || '阅读笔记'
+}
+
+function sanitizeNoteExportName(value, fallback = 'reading-notes') {
+  const cleaned = String(value || fallback)
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return (cleaned || fallback).slice(0, 80)
+}
+
+function triggerNoteDownload(content, fileName, type) {
+  const blob = new Blob([content], { type })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+function formatNoteExportTime() {
+  return new Date().toLocaleString('zh-CN')
+}
+
+const NOTE_EXPORT_PALETTES = [
+  { accent: '#2563EB', soft: '#EFF6FF', wash: '#DBEAFE', text: '#1D4ED8', dark: '#1E3A8A' },
+  { accent: '#0F766E', soft: '#F0FDFA', wash: '#CCFBF1', text: '#0F766E', dark: '#134E4A' },
+  { accent: '#D97706', soft: '#FFFBEB', wash: '#FDE68A', text: '#B45309', dark: '#78350F' },
+  { accent: '#DC2626', soft: '#FEF2F2', wash: '#FECACA', text: '#B91C1C', dark: '#7F1D1D' },
+  { accent: '#7C3AED', soft: '#F5F3FF', wash: '#DDD6FE', text: '#6D28D9', dark: '#4C1D95' },
+  { accent: '#0891B2', soft: '#ECFEFF', wash: '#CFFAFE', text: '#0E7490', dark: '#164E63' },
+  { accent: '#16A34A', soft: '#F0FDF4', wash: '#BBF7D0', text: '#15803D', dark: '#14532D' },
+  { accent: '#DB2777', soft: '#FDF2F8', wash: '#FBCFE8', text: '#BE185D', dark: '#831843' },
+]
+
+function getNoteExportPalette(index = 0) {
+  return NOTE_EXPORT_PALETTES[Math.abs(Number(index) || 0) % NOTE_EXPORT_PALETTES.length]
+}
+
+function notePaletteStyle(palette) {
+  return [
+    `--note-accent:${palette.accent}`,
+    `--note-soft:${palette.soft}`,
+    `--note-wash:${palette.wash}`,
+    `--note-text:${palette.text}`,
+    `--note-dark:${palette.dark}`,
+  ].join(';')
+}
+
+function noteBlockSourceText(block) {
+  return block?.page_number ? `第 ${block.page_number} 页` : ''
+}
+
+function escapeMarkdownText(value) {
+  return String(value || '').replace(/([\\`*_{}[\]()#+\-.!|>])/g, '\\$1')
+}
+
+function markdownQuote(value) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  return text.split(/\n/).map((line) => `> ${line || ' '}`).join('\n')
+}
+
+function countNotebookTree(treeNodes = []) {
+  return treeNodes.reduce((stats, node) => {
+    stats.nodes += 1
+    for (const block of node.blocks || []) {
+      stats.blocks += 1
+      if (block.type === 'quote') stats.quotes += 1
+      else if (block.type === 'image') stats.images += 1
+      else stats.texts += 1
+    }
+    const childStats = countNotebookTree(node.children || [])
+    stats.nodes += childStats.nodes
+    stats.blocks += childStats.blocks
+    stats.quotes += childStats.quotes
+    stats.images += childStats.images
+    stats.texts += childStats.texts
+    return stats
+  }, { nodes: 0, blocks: 0, quotes: 0, images: 0, texts: 0 })
+}
+
+function buildNoteExportStats(notebooks = []) {
+  return notebooks.reduce((stats, notebook) => {
+    const treeStats = countNotebookTree(buildNodeChildren(notebook.nodes || [], null))
+    stats.notebooks += 1
+    stats.nodes += treeStats.nodes
+    stats.blocks += treeStats.blocks
+    stats.quotes += treeStats.quotes
+    stats.images += treeStats.images
+    stats.texts += treeStats.texts
+    return stats
+  }, { notebooks: 0, nodes: 0, blocks: 0, quotes: 0, images: 0, texts: 0 })
+}
+
+function renderNoteBlockMarkdown(block) {
+  const source = noteBlockSourceText(block)
+  if (block.type === 'quote') {
+    const quote = markdownQuote(block.content || '')
+    return [
+      source ? `> 来源：${source}` : '',
+      quote,
+    ].filter(Boolean).join('\n')
+  }
+
+  if (block.type === 'image') {
+    const label = source ? `截图（${source}）` : '截图'
+    const src = block.image_url || ''
+    const caption = String(block.content || '').trim()
+    return [
+      src ? `![${escapeMarkdownText(label)}](${src})` : `![${escapeMarkdownText(label)}]()`,
+      caption ? escapeMarkdownText(caption) : '',
+    ].filter(Boolean).join('\n')
+  }
+
+  const text = getPlainNoteText(block.content || '').trim()
+  return text ? escapeMarkdownText(text) : ''
+}
+
+function renderNoteNodeMarkdown(node) {
+  const level = Math.max(3, Math.min(6, Number(node.level || 1) + 2))
+  const heading = `${'#'.repeat(level)} ${node.title || '未命名标题'}`
+  const blocks = (node.blocks || [])
+    .map(renderNoteBlockMarkdown)
+    .filter(Boolean)
+    .join('\n\n')
+  const children = (node.children || [])
+    .map(renderNoteNodeMarkdown)
+    .filter(Boolean)
+    .join('\n\n')
+  return [heading, blocks, children].filter(Boolean).join('\n\n')
+}
+
+function buildNoteExportMarkdown(notebooks, fileName, metadata) {
+  const title = getNoteExportTitle(fileName, metadata)
+  const stats = buildNoteExportStats(notebooks || [])
+  const sections = (notebooks || []).map((notebook) => {
+    const tree = buildNodeChildren(notebook.nodes || [], null)
+    const content = tree.map(renderNoteNodeMarkdown).filter(Boolean).join('\n\n')
+    return [
+      `## ${notebook.title || '未命名笔记本'}`,
+      content || '> 暂无笔记内容。',
+    ].join('\n\n')
+  })
+
+  return [
+    `# ${title} - 阅读笔记`,
+    `导出时间：${formatNoteExportTime()}`,
+    `笔记本：${stats.notebooks} 个｜标题：${stats.nodes} 个｜内容块：${stats.blocks} 个`,
+    '',
+    sections.join('\n\n'),
+    '',
+  ].join('\n')
+}
+
+function resolveNoteExportImageUrl(url) {
+  const value = String(url || '').trim()
+  if (!value) return ''
+  if (/^(https?:|data:|blob:)/i.test(value)) return value
+  if (typeof window !== 'undefined' && value.startsWith('/')) {
+    return `${window.location.origin}${value}`
+  }
+  return value
+}
+
+function renderRichNoteHtml(value) {
+  const doc = parseRichNoteContent(value)
+  const segments = buildRichTextSegments(doc)
+  const html = segments
+    .map((segment) => {
+      const text = escapeSummaryHtml(segment.text || '')
+      if (!text) return ''
+      if (segment.color && segment.color !== DEFAULT_NOTE_TEXT_COLOR) {
+        return `<span style="color:${escapeSummaryHtml(segment.color)}">${text}</span>`
+      }
+      return text
+    })
+    .join('')
+    .replace(/\n/g, '<br />')
+  return html || '<span class="export-note-muted">空白笔记</span>'
+}
+
+function renderNoteBlockHtml(block) {
+  const source = noteBlockSourceText(block)
+  if (block.type === 'quote') {
+    return `
+      <blockquote class="export-note-quote">
+        ${source ? `<span class="export-note-source">${escapeSummaryHtml(source)}</span>` : ''}
+        <p>${escapeSummaryHtml(block.content || '').replace(/\n/g, '<br />')}</p>
+      </blockquote>
+    `
+  }
+
+  if (block.type === 'image') {
+    const src = resolveNoteExportImageUrl(block.image_url)
+    return `
+      <figure class="export-note-image">
+        ${src ? `<img src="${escapeSummaryHtml(src)}" alt="笔记截图" />` : '<div class="export-note-image__empty">图片未保存</div>'}
+        ${source || block.content ? `<figcaption>${escapeSummaryHtml([source, block.content].filter(Boolean).join(' / '))}</figcaption>` : ''}
+      </figure>
+    `
+  }
+
+  return `<div class="export-note-text">${renderRichNoteHtml(block.content || '')}</div>`
+}
+
+function renderNoteNodeHtml(node, indexPath = []) {
+  const level = Number(node.level || 1)
+  const headingLevel = Math.max(3, Math.min(6, level + 2))
+  const palette = getNoteExportPalette(node.color_index ?? indexPath.at(-1) ?? level)
+  const marker = indexPath.map((item) => item + 1).join('.')
+  const blocks = (node.blocks || []).map(renderNoteBlockHtml).join('')
+  const children = (node.children || []).map((child, childIndex) => (
+    renderNoteNodeHtml(child, [...indexPath, childIndex])
+  )).join('')
+  return `
+    <section class="export-note-node export-note-node--level-${level}" style="${notePaletteStyle(palette)}">
+      <div class="export-note-heading export-note-heading--level-${level}">
+        <span>${escapeSummaryHtml(marker || '•')}</span>
+        <h${headingLevel}>${escapeSummaryHtml(node.title || '未命名标题')}</h${headingLevel}>
+      </div>
+      <div class="export-note-node__body">
+        ${blocks || '<p class="export-note-muted">暂无内容。</p>'}
+        ${children}
+      </div>
+    </section>
+  `
+}
+
+function buildNoteExportHtml(notebooks, fileName, metadata) {
+  const title = getNoteExportTitle(fileName, metadata)
+  const generatedAt = formatNoteExportTime()
+  const stats = buildNoteExportStats(notebooks || [])
+  const overviewHtml = [
+    ['笔记本', stats.notebooks],
+    ['标题', stats.nodes],
+    ['文本', stats.texts],
+    ['摘录', stats.quotes],
+    ['截图', stats.images],
+  ].map(([label, value], index) => {
+    const palette = getNoteExportPalette(index)
+    return `
+      <div class="export-note-stat" style="${notePaletteStyle(palette)}">
+        <span>${escapeSummaryHtml(label)}</span>
+        <strong>${escapeSummaryHtml(value)}</strong>
+      </div>
+    `
+  }).join('')
+  const tocHtml = (notebooks || []).map((notebook, index) => {
+    const palette = getNoteExportPalette(index)
+    const treeStats = countNotebookTree(buildNodeChildren(notebook.nodes || [], null))
+    return `
+      <div class="export-note-toc-item" style="${notePaletteStyle(palette)}">
+        <b>${String(index + 1).padStart(2, '0')}</b>
+        <span>${escapeSummaryHtml(notebook.title || '未命名笔记本')}</span>
+        <small>${treeStats.nodes} 个标题 / ${treeStats.blocks} 条内容</small>
+      </div>
+    `
+  }).join('')
+  const notebookHtml = (notebooks || []).map((notebook, index) => {
+    const palette = getNoteExportPalette(index)
+    const tree = buildNodeChildren(notebook.nodes || [], null)
+    return `
+      <section class="export-note-book" style="${notePaletteStyle(palette)}">
+        <div class="export-note-book__header">
+          <span>${String(index + 1).padStart(2, '0')}</span>
+          <div>
+            <h2>${escapeSummaryHtml(notebook.title || '未命名笔记本')}</h2>
+            <p>${tree.length} 个一级标题</p>
+          </div>
+        </div>
+        ${tree.length ? tree.map((node, nodeIndex) => renderNoteNodeHtml(node, [nodeIndex])).join('') : '<p class="export-note-muted">暂无笔记内容。</p>'}
+      </section>
+    `
+  }).join('')
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeSummaryHtml(title)} - 阅读笔记</title>
+  <style>
+    @page { size: A4; margin: 17mm 15mm; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #eef2f7;
+      color: #172033;
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", Arial, sans-serif;
+      line-height: 1.72;
+    }
+    .export-note-document {
+      width: min(900px, 100%);
+      margin: 0 auto;
+      background: #ffffff;
+      min-height: 100vh;
+      padding: 46px 52px 64px;
+    }
+    .export-note-cover {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid #dbeafe;
+      border-radius: 22px;
+      padding: 28px 30px;
+      margin-bottom: 26px;
+      background:
+        linear-gradient(135deg, rgba(37, 99, 235, 0.12), rgba(15, 118, 110, 0.08) 46%, rgba(217, 119, 6, 0.10)),
+        #fbfdff;
+    }
+    .export-note-type {
+      display: inline-flex;
+      padding: 5px 12px;
+      border-radius: 999px;
+      background: #0f172a;
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    h1 { margin: 16px 0 10px; color: #0f172a; font-size: 30px; line-height: 1.22; }
+    .export-note-meta { color: #475569; font-size: 12px; }
+    .export-note-overview {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin: 20px 0 0;
+    }
+    .export-note-stat {
+      min-height: 68px;
+      border: 1px solid var(--note-wash);
+      border-radius: 16px;
+      padding: 10px 12px;
+      background: var(--note-soft);
+    }
+    .export-note-stat span { display: block; color: var(--note-text); font-size: 12px; font-weight: 700; }
+    .export-note-stat strong { display: block; margin-top: 5px; color: var(--note-dark); font-size: 24px; line-height: 1; }
+    .export-note-toc {
+      display: grid;
+      gap: 9px;
+      margin: 22px 0 30px;
+    }
+    .export-note-toc-title {
+      margin: 0 0 2px;
+      color: #0f172a;
+      font-size: 14px;
+      font-weight: 800;
+    }
+    .export-note-toc-item {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 11px 13px;
+      border: 1px solid var(--note-wash);
+      border-radius: 14px;
+      background: linear-gradient(90deg, var(--note-soft), #ffffff);
+    }
+    .export-note-toc-item b {
+      color: var(--note-text);
+      font-size: 13px;
+    }
+    .export-note-toc-item span {
+      min-width: 0;
+      color: #172033;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .export-note-toc-item small { color: #64748b; font-size: 12px; }
+    .export-note-book {
+      margin: 30px 0 0;
+      padding-top: 6px;
+      page-break-inside: auto;
+    }
+    .export-note-book__header {
+      display: grid;
+      grid-template-columns: 52px minmax(0, 1fr);
+      gap: 14px;
+      align-items: center;
+      padding: 16px 18px;
+      border-radius: 18px;
+      border: 1px solid var(--note-wash);
+      background: linear-gradient(135deg, var(--note-soft), #ffffff 74%);
+    }
+    .export-note-book__header > span {
+      width: 42px;
+      height: 42px;
+      border-radius: 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--note-accent);
+      color: #ffffff;
+      font-weight: 800;
+    }
+    .export-note-book h2 { margin: 0; color: var(--note-dark); font-size: 22px; line-height: 1.28; }
+    .export-note-book__header p { margin: 4px 0 0; color: var(--note-text); font-size: 12px; }
+    .export-note-node {
+      margin: 16px 0;
+      page-break-inside: avoid;
+    }
+    .export-note-node--level-2 { margin-left: 18px; }
+    .export-note-node--level-3 { margin-left: 36px; }
+    .export-note-heading {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      gap: 9px;
+      align-items: center;
+      margin: 14px 0 8px;
+    }
+    .export-note-heading span {
+      min-width: 30px;
+      min-height: 28px;
+      border-radius: 10px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--note-accent);
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .export-note-heading h3,
+    .export-note-heading h4,
+    .export-note-heading h5,
+    .export-note-heading h6 {
+      margin: 0;
+      color: var(--note-dark);
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .export-note-heading h3 { font-size: 17px; }
+    .export-note-heading h4 { font-size: 15px; }
+    .export-note-heading h5,
+    .export-note-heading h6 { font-size: 14px; }
+    .export-note-node__body {
+      border-left: 2px solid var(--note-wash);
+      margin-left: 15px;
+      padding-left: 18px;
+    }
+    .export-note-text {
+      margin: 9px 0;
+      padding: 11px 13px;
+      border-radius: 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      color: #243246;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .export-note-quote {
+      margin: 10px 0;
+      padding: 13px 15px;
+      border: 1px solid var(--note-wash);
+      border-left: 5px solid var(--note-accent);
+      border-radius: 14px;
+      background: var(--note-soft);
+      color: #334155;
+    }
+    .export-note-quote p { margin: 7px 0 0; }
+    .export-note-source {
+      display: inline-flex;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #ffffff;
+      color: var(--note-text);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .export-note-image {
+      margin: 13px 0;
+      padding: 13px;
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      background: #ffffff;
+      box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+    }
+    .export-note-image img {
+      display: block;
+      max-width: 100%;
+      max-height: 520px;
+      object-fit: contain;
+      margin: 0 auto;
+      border-radius: 10px;
+    }
+    .export-note-image figcaption {
+      margin-top: 9px;
+      color: #64748b;
+      font-size: 12px;
+      text-align: center;
+    }
+    .export-note-image__empty {
+      padding: 20px;
+      color: #94a3b8;
+      text-align: center;
+      background: #f8fafc;
+      border-radius: 12px;
+    }
+    .export-note-muted { color: #94a3b8; }
+    @media print {
+      body { background: #fff; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      .export-note-document { width: 100%; padding: 0; }
+      .export-note-cover,
+      .export-note-book__header,
+      .export-note-node,
+      .export-note-text,
+      .export-note-quote,
+      .export-note-image { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <main class="export-note-document">
+    <header class="export-note-cover">
+      <span class="export-note-type">阅读笔记</span>
+      <h1>${escapeSummaryHtml(title)}</h1>
+      <div class="export-note-meta">导出时间：${escapeSummaryHtml(generatedAt)}</div>
+      <div class="export-note-overview">${overviewHtml}</div>
+    </header>
+    ${tocHtml ? `<section class="export-note-toc"><h2 class="export-note-toc-title">笔记目录</h2>${tocHtml}</section>` : ''}
+    ${notebookHtml || '<p class="export-note-muted">暂无笔记内容。</p>'}
+  </main>
+</body>
+</html>`
+}
+
+function exportNotesAsMarkdown(notebooks, fileName, metadata) {
+  const title = getNoteExportTitle(fileName, metadata)
+  const markdown = buildNoteExportMarkdown(notebooks, fileName, metadata)
+  triggerNoteDownload(
+    markdown,
+    `${sanitizeNoteExportName(title)}-阅读笔记.md`,
+    'text/markdown;charset=utf-8',
+  )
+}
+
+function exportNotesAsWord(notebooks, fileName, metadata) {
+  const title = getNoteExportTitle(fileName, metadata)
+  const html = buildNoteExportHtml(notebooks, fileName, metadata)
+  triggerNoteDownload(
+    `\ufeff${html}`,
+    `${sanitizeNoteExportName(title)}-阅读笔记.doc`,
+    'application/msword;charset=utf-8',
+  )
+}
+
+function exportNotesAsPdf(notebooks, fileName, metadata) {
+  const html = buildNoteExportHtml(notebooks, fileName, metadata)
+  const printWindow = window.open('', '_blank', 'width=980,height=720')
+  if (!printWindow) {
+    window.alert('浏览器拦截了导出窗口，请允许弹窗后再试。')
+    return
+  }
+  printWindow.document.open()
+  printWindow.document.write(html)
+  printWindow.document.close()
+  printWindow.focus()
+  window.setTimeout(() => {
+    printWindow.print()
+  }, 300)
+}
+
 function NotesPanel({
   paperId,
+  fileName,
+  metadata,
   notebooks,
   loading,
   saving,
+  saveStatus = 'idle',
+  saveError = '',
+  hasUnsavedChanges = false,
+  currentUser,
   activeTarget,
   onCreateNotebook,
   onDraftChange,
   onSaveNotebooks,
+  onRetrySave,
+  onRequireVip,
   onSetActiveTarget,
   onJumpToNote,
 }) {
@@ -611,10 +1467,32 @@ function NotesPanel({
   const [templateDialogTab, setTemplateDialogTab] = useState('system')
   const [customTemplates, setCustomTemplates] = useState(() => readStoredCustomTemplates())
   const [colorCommand, setColorCommand] = useState(null)
+  const [noteExportMenuOpen, setNoteExportMenuOpen] = useState(false)
   const notesStyle = useMemo(() => buildNotesStyle(prefs), [prefs])
+  const hasNotebooks = (notebooks || []).length > 0
+  const canExportNotes = Boolean(currentUser?.features?.can_export_notes)
+  const effectiveSaveStatus = saving ? 'saving' : saveStatus
+  const saveStatusText = (() => {
+    if (effectiveSaveStatus === 'saving') return '保存中...'
+    if (effectiveSaveStatus === 'error') return '保存失败，点击重试'
+    if (hasUnsavedChanges || effectiveSaveStatus === 'dirty') return '有未保存内容'
+    return '已保存'
+  })()
+  const saveIndicatorStatus = (() => {
+    if (effectiveSaveStatus === 'saving') return 'saving'
+    if (effectiveSaveStatus === 'error') return 'error'
+    if (hasUnsavedChanges || effectiveSaveStatus === 'dirty') return 'dirty'
+    return 'saved'
+  })()
+  const canRetrySave = effectiveSaveStatus === 'error' && !saving
   const systemTemplateOptions = useMemo(
     () => [BLANK_NOTEBOOK_TEMPLATE_OPTION, ...NOTEBOOK_TEMPLATES],
     [],
+  )
+  const canUseAllTemplates = Boolean(currentUser?.features?.can_use_all_templates)
+  const allowedTemplateIds = useMemo(
+    () => new Set(currentUser?.features?.allowed_template_ids || FREE_NOTE_TEMPLATE_IDS),
+    [currentUser?.features?.allowed_template_ids],
   )
 
   useEffect(() => {
@@ -622,6 +1500,7 @@ function NotesPanel({
     setColorMenuOpen(false)
     setTemplateMenuOpen(false)
     setTemplateDialogTab('system')
+    setNoteExportMenuOpen(false)
   }, [paperId])
 
   useEffect(() => {
@@ -687,6 +1566,17 @@ function NotesPanel({
     onCreateNotebook?.(kind)
   }
 
+  function isTemplateAvailable(template) {
+    const templateId = String(template?.createKind || template?.id || '')
+    if (!templateId || canUseAllTemplates) return true
+    if (templateId.startsWith('custom')) return true
+    return allowedTemplateIds.has(templateId)
+  }
+
+  function handleLockedTemplateClick() {
+    window.alert('该模板仅限 VIP 使用，开通 VIP 后即可解锁全部笔记模板。')
+  }
+
   function handleCreateCustomTemplateNotebook() {
     const nextIndex = customTemplates.length + 1
     handleCreateNotebook({
@@ -723,14 +1613,65 @@ function NotesPanel({
     window.alert(existing ? `已更新自建模板：${savedTemplate.title}` : `已保存为自建模板：${savedTemplate.title}`)
   }
 
+  function handleNotesExportPermissionError(error) {
+    if (error?.status === 403 || error?.code === 'membership_feature_locked') {
+      onRequireVip?.()
+      return
+    }
+    window.alert(error?.message || '导出权限校验失败，请稍后再试。')
+  }
+
+  async function ensureNotesExportPermission() {
+    if (!canExportNotes) {
+      onRequireVip?.()
+      return false
+    }
+    if (!paperId) {
+      window.alert('当前论文信息缺失，暂不能导出。')
+      return false
+    }
+    try {
+      await checkNotesExportAllowed(paperId)
+      return true
+    } catch (error) {
+      handleNotesExportPermissionError(error)
+      return false
+    }
+  }
+
+  async function handleExportNotes(format) {
+    const draftNotebooks = notebooks || []
+    setNoteExportMenuOpen(false)
+    if (!draftNotebooks.length) return
+    const allowed = await ensureNotesExportPermission()
+    if (!allowed) return
+    if (format === 'markdown') {
+      exportNotesAsMarkdown(draftNotebooks, fileName, metadata)
+      return
+    }
+    if (format === 'pdf') {
+      exportNotesAsPdf(draftNotebooks, fileName, metadata)
+      return
+    }
+    exportNotesAsWord(draftNotebooks, fileName, metadata)
+  }
+
   function renderTemplateCard(template) {
     const Icon = NOTEBOOK_TEMPLATE_ICON_MAP[template.id] || FileText
+    const isAvailable = isTemplateAvailable(template)
     return (
       <button
         key={template.id}
         type="button"
-        className="notes-template-card"
-        onClick={() => handleCreateNotebook(template.createKind || template)}
+        className={`notes-template-card${isAvailable ? '' : ' is-locked'}`}
+        aria-disabled={!isAvailable}
+        onClick={() => {
+          if (!isAvailable) {
+            handleLockedTemplateClick()
+            return
+          }
+          handleCreateNotebook(template.createKind || template)
+        }}
       >
         <div className="notes-template-preview" aria-hidden="true">
           {template.previewSections?.slice(0, 5).map((section, sectionIndex) => (
@@ -761,9 +1702,15 @@ function NotesPanel({
             {template.title}
           </span>
           <span className="notes-template-card__footer-meta">
-            {template.footerText || `${template.sectionCount} 个分区`}
+            {isAvailable ? (template.footerText || `${template.sectionCount} 个分区`) : 'VIP 解锁'}
           </span>
         </div>
+        {!isAvailable ? (
+          <span className="notes-template-card__lock-badge">
+            <Crown size={12} />
+            VIP
+          </span>
+        ) : null}
       </button>
     )
   }
@@ -938,6 +1885,46 @@ function NotesPanel({
             <Save size={15} />
             <span>{saving ? '保存中' : '保存'}</span>
           </button>
+          <button
+            type="button"
+            className={`notes-save-state is-${saveIndicatorStatus}`}
+            onClick={canRetrySave ? () => onRetrySave?.() : undefined}
+            disabled={!canRetrySave}
+            title={saveError || saveStatusText}
+            aria-label={saveError || saveStatusText}
+          >
+            <span className="notes-save-state__dot" />
+            <span className="notes-save-state__label">{saveStatusText}</span>
+          </button>
+          <div className="notes-export-wrap">
+            <button
+              type="button"
+              className="notes-command"
+              disabled={!hasNotebooks}
+              aria-expanded={noteExportMenuOpen}
+              title={canExportNotes ? '导出阅读笔记' : 'VIP 可导出阅读笔记'}
+              onClick={() => {
+                setColorMenuOpen(false)
+                setTemplateMenuOpen(false)
+                if (!canExportNotes) {
+                  setNoteExportMenuOpen(false)
+                  onRequireVip?.()
+                  return
+                }
+                setNoteExportMenuOpen((open) => !open)
+              }}
+            >
+              <Download size={15} />
+              <span>导出</span>
+            </button>
+            {noteExportMenuOpen && hasNotebooks ? (
+              <div className="notes-export-popover" role="menu" aria-label="导出阅读笔记">
+                <button type="button" onClick={() => handleExportNotes('word')}>Word</button>
+                <button type="button" onClick={() => handleExportNotes('pdf')}>PDF</button>
+                <button type="button" onClick={() => handleExportNotes('markdown')}>Markdown</button>
+              </div>
+            ) : null}
+          </div>
         </div>
 
         <div className="notes-format-toolbar" aria-label="笔记排版工具">
@@ -2402,6 +3389,12 @@ function QualityLiteratureSummaryPanel({
     annotationFingerprintReadyRef.current = false
   }, [paperId])
 
+  const logicalAnnotationTotal = useMemo(() => countLogicalAnnotations(annotations), [annotations])
+  const liveAnnotationGroups = useMemo(
+    () => buildAnnotationSummaryGroupsFromAnnotations(annotations),
+    [annotations],
+  )
+
   useEffect(() => {
     if (!paperId) return
     if (!annotationFingerprintReadyRef.current) {
@@ -2415,7 +3408,7 @@ function QualityLiteratureSummaryPanel({
       const previous = current.annotations
       if (!previous?.summary || previous.status === 'running') return current
       const previousTotal = getAnnotationSummaryTotal(previous.summary)
-      const currentTotal = Array.isArray(annotations) ? annotations.length : 0
+      const currentTotal = logicalAnnotationTotal
       if (previousTotal === 0 && currentTotal === 0) return current
       return {
         ...current,
@@ -2431,7 +3424,7 @@ function QualityLiteratureSummaryPanel({
         },
       }
     })
-  }, [paperId, annotationFingerprint])
+  }, [annotationFingerprint, logicalAnnotationTotal, paperId])
 
   const activeType = QUALITY_SUMMARY_TYPES.find((type) => type.id === activeSummaryId)
   const activeSummary = activeType ? summaryState[activeType.id] : null
@@ -2525,16 +3518,16 @@ function QualityLiteratureSummaryPanel({
     const rawSummary = activeSummary?.summary
     const rawAnnotationGroups = getAnnotationGroups(rawSummary)
     const rawAnnotationTotal = getAnnotationGroupTotal(rawAnnotationGroups)
-    const liveAnnotationTotal = annotations.length
+    const liveAnnotationTotal = logicalAnnotationTotal
     const annotationCountMismatch = activeType.id === 'annotations' && rawSummary && rawAnnotationTotal !== liveAnnotationTotal
     const needsManualRefresh = Boolean(activeSummary?.isStale || annotationCountMismatch)
     const summary = rawSummary
     const sections = summary?.sections || []
     const assistantPanels = getQualityAssistantPanels(summary)
-    const annotationGroups = getAnnotationGroups(summary)
+    const annotationGroups = activeType.id === 'annotations' ? liveAnnotationGroups : getAnnotationGroups(summary)
     const reviewFieldBlocks = Array.isArray(summary?.review_field_blocks) ? summary.review_field_blocks : []
     const annotationTotal = getAnnotationGroupTotal(annotationGroups)
-    const annotationTotalLabel = needsManualRefresh ? '上次生成时有效标注' : '当前有效标注'
+    const annotationTotalLabel = '当前有效标注'
     const hideFallbackSections = activeType.id === 'annotations' && summary && annotationTotal === 0 && !sections.length
     const displaySections = sections.length
       ? sections
@@ -2563,7 +3556,6 @@ function QualityLiteratureSummaryPanel({
             <div className="summary-progress-card">
               <div>
                 <strong>{QUALITY_SUMMARY_STAGE_LABELS[activeSummary?.stage] || QUALITY_SUMMARY_STAGE_LABELS.idle}</strong>
-                <span>{activeSummary?.model || '质量优先模式'}</span>
               </div>
               <div className="summary-progress-track">
                 <span style={{ width: `${Math.max(0, Math.min(100, activeSummary?.progress || 0))}%` }} />
@@ -2738,7 +3730,7 @@ function QualityLiteratureSummaryPanel({
                 ? '正在读取缓存'
                 : generatingCount
                   ? `${generatingCount} 个正在生成`
-                  : `当前 ${annotations.length} 条标注`}
+                  : `当前 ${logicalAnnotationTotal} 条标注`}
             </span>
           </div>
           <button className="summary-generate-all" type="button" disabled={generatingCount > 0 || isGeneratingAll || !paperId} onClick={handleGenerateAll}>
@@ -2819,9 +3811,14 @@ export function SideWorkspacePanel({
   notebooks,
   notesLoading,
   notesSaving,
+  notesSaveStatus,
+  notesSaveError,
+  hasUnsavedNotes,
   onCreateNotebook,
   onDraftChange,
   onSaveNotebooks,
+  onRetrySaveNotebooks,
+  onRequireVip,
   activeNoteTarget,
   onSetActiveNoteTarget,
   onJumpToNote,
@@ -2838,23 +3835,41 @@ export function SideWorkspacePanel({
   onInsertSummaryNote,
   onJumpToEvidence,
   onClearAnnotations,
+  onRefreshMetadata,
+  onSaveMetadata,
   initialSummaryId = '',
 }) {
   if (!activePanel) return null
 
   return (
     <aside className="workspace-panel" style={{ width, '--ui-reader-scale': uiFontScale }}>
-      {activePanel === 'info' ? <InfoPanel fileName={fileName} metadata={metadata} /> : null}
+      {activePanel === 'info' ? (
+        <InfoPanel
+          paperId={paperId}
+          fileName={fileName}
+          metadata={metadata}
+          onRefreshMetadata={onRefreshMetadata}
+          onSaveMetadata={onSaveMetadata}
+        />
+      ) : null}
       {activePanel === 'notes' ? (
         <NotesPanel
           paperId={paperId}
+          fileName={fileName}
+          metadata={metadata}
           notebooks={notebooks || []}
           loading={notesLoading}
           saving={notesSaving}
+          saveStatus={notesSaveStatus}
+          saveError={notesSaveError}
+          hasUnsavedChanges={hasUnsavedNotes}
+          currentUser={currentUser}
           activeTarget={activeNoteTarget}
           onCreateNotebook={onCreateNotebook}
           onDraftChange={onDraftChange}
           onSaveNotebooks={onSaveNotebooks}
+          onRetrySave={onRetrySaveNotebooks}
+          onRequireVip={onRequireVip}
           onSetActiveTarget={onSetActiveNoteTarget}
           onJumpToNote={onJumpToNote}
         />

@@ -17,6 +17,7 @@ from app.schemas.note import (
     PaperNoteNodeResponse,
     PaperNotesSaveRequest,
 )
+from app.services.membership import ensure_notes_export_allowed, ensure_template_allowed_for_user
 
 router = APIRouter(prefix="/papers/{paper_id}/notebooks", tags=["notes"])
 
@@ -91,6 +92,17 @@ def list_notebooks(
     _ensure_owned_paper(paper_id, user, db)
     notebooks = db.scalars(_select_owned_notebooks(paper_id, user.id)).all()
     return PaperNotebookListResponse(notebooks=[_build_notebook_response(notebook) for notebook in notebooks])
+
+
+@router.post("/export/check")
+def check_notebook_export_allowed(
+    paper_id: int,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, bool]:
+    _ensure_owned_paper(paper_id, user, db)
+    ensure_notes_export_allowed(db, user.id)
+    return {"allowed": True}
 
 
 def _save_notebook_tree(
@@ -210,6 +222,7 @@ def save_notebooks(
     kept_notebook_ids: set[int] = set()
 
     for notebook_payload in payload.notebooks:
+        ensure_template_allowed_for_user(db, user.id, notebook_payload.template_type)
         notebook = _save_notebook_tree(
             db=db,
             paper_id=paper_id,

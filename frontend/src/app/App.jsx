@@ -1,17 +1,13 @@
-import { useEffect, useRef, useState } from 'react'
-import { Bell, Brain, Copy, LogIn, LogOut, Settings2, Sparkles, Trash2, UserRound, X } from 'lucide-react'
-import { AdminPage } from '../components/account/AdminPage'
-import { AiConfigPage } from '../components/account/AiConfigPage'
-import { UserCenterPage } from '../components/account/UserCenterPage'
-import { HomePage } from '../components/home/HomePage'
-import { ResourcePreviewModal } from '../components/home/ResourcePreviewModal'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { Bell, Crown, ListChecks, LogIn, Sparkles, Trash2, X } from 'lucide-react'
+import { TaskCenterSheet } from '../components/layout/TaskCenterSheet'
+import { UserHoverMenu } from '../components/layout/UserHoverMenu'
 import { UtilityRail } from '../components/layout/UtilityRail'
-import { FullTranslationReader } from '../components/reader/FullTranslationReader'
-import { PaperReader } from '../components/reader/PaperReader'
-import { SelectionInsightPanel } from '../components/reader/SelectionInsightPanel'
-import { SideWorkspacePanel } from '../components/reader/SideWorkspacePanel'
 import { DEFAULT_SHAPE_OPTIONS } from '../components/reader/shapeAnnotationModel'
-import Login from '../log/Login.jsx'
+import {
+  readReadingSessionSnapshot,
+  saveReadingSessionSnapshot,
+} from '../components/reader/readingSessionStorage'
 import { usePdfReader } from '../hooks/usePdfReader'
 import { useAnnotations } from '../hooks/useAnnotations'
 import { useInkAnnotations } from '../hooks/useInkAnnotations'
@@ -27,8 +23,11 @@ import {
   ensureInsertTarget,
   insertBlockIntoNotebooks,
 } from '../components/reader/noteTree'
+import { buildNoteAnchorFocus } from '../components/reader/noteAnchorModel'
+import { buildPaperChatContextPayload } from '../components/reader/paperChatContext'
 import {
   clearStoredAuthToken,
+  deleteCurrentUser,
   fetchCurrentUser,
   getStoredAuthToken,
   storeAuthToken,
@@ -43,6 +42,14 @@ import {
   markAllNotificationsRead,
   markNotificationRead,
 } from '../services/notificationApi'
+import {
+  archiveCompletedTaskCenterItems,
+  archiveTaskCenterItems,
+  cancelTask,
+  fetchTaskCenter,
+  fetchTaskCenterSummary,
+  retryTask,
+} from '../services/taskApi'
 import {
   getStoredUiPreferences,
   getUiFontScale,
@@ -67,6 +74,10 @@ import {
   hashTranslationPages,
 } from '../components/reader/fullTranslationLayout'
 import { resolveAssetUrl } from '../utils/assetUrl'
+import { countLogicalAnnotations } from '../utils/annotationAggregation'
+import { toUserMessage } from '../utils/errorMessage'
+import { MembershipModal } from '../components/membership/MembershipModal'
+import { fetchMembershipPlans } from '../services/membershipApi'
 import {
   Sheet,
   SheetContent,
@@ -74,8 +85,91 @@ import {
   SheetHeader,
   SheetTitle,
 } from '../components/ui/sheet'
-import 'pdfjs-dist/web/pdf_viewer.css'
 import '../styles/app.css'
+
+const AdminPage = lazy(() =>
+  import('../components/account/AdminPage').then((module) => ({ default: module.AdminPage })),
+)
+const HomePage = lazy(() =>
+  import('../components/home/HomePage').then((module) => ({ default: module.HomePage })),
+)
+const AiConfigPage = lazy(() =>
+  import('../components/account/AiConfigPage').then((module) => ({ default: module.AiConfigPage })),
+)
+const UserCenterPage = lazy(() =>
+  import('../components/account/UserCenterPage').then((module) => ({ default: module.UserCenterPage })),
+)
+const ResourcePreviewModal = lazy(() =>
+  import('../components/home/ResourcePreviewModal').then((module) => ({ default: module.ResourcePreviewModal })),
+)
+const FullTranslationReader = lazy(() =>
+  import('../components/reader/FullTranslationReader').then((module) => ({ default: module.FullTranslationReader })),
+)
+const PaperReader = lazy(() =>
+  import('../components/reader/PaperReader').then((module) => ({ default: module.PaperReader })),
+)
+const SelectionInsightPanel = lazy(() =>
+  import('../components/reader/SelectionInsightPanel').then((module) => ({ default: module.SelectionInsightPanel })),
+)
+let sideWorkspacePanelPromise
+function loadSideWorkspacePanel() {
+  if (!sideWorkspacePanelPromise) {
+    sideWorkspacePanelPromise = import('../components/reader/SideWorkspacePanel').then((module) => ({
+      default: module.SideWorkspacePanel,
+    }))
+  }
+  return sideWorkspacePanelPromise
+}
+
+function preloadSideWorkspacePanel() {
+  void loadSideWorkspacePanel()
+}
+
+const SideWorkspacePanel = lazy(loadSideWorkspacePanel)
+const Login = lazy(() => import('../log/Login.jsx'))
+
+function ViewFallback({ message }) {
+  return (
+    <div className="view-skeleton" role="status" aria-busy="true">
+      <span className="view-skeleton__line view-skeleton__line--title" />
+      <span className="view-skeleton__line" />
+      <span className="view-skeleton__block" />
+      <strong>{message}</strong>
+    </div>
+  )
+}
+
+function shouldPauseBackgroundPolling() {
+  const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false
+  return isHidden || isOffline
+}
+
+function confirmDangerAction(message) {
+  if (typeof window === 'undefined') return true
+  return window.confirm(message)
+}
+
+function WorkspacePanelFallback({ width, uiFontScale = 1 }) {
+  return (
+    <aside
+      aria-busy="true"
+      aria-label="正在加载工作区"
+      className="workspace-panel workspace-panel--loading"
+      style={{ width, '--ui-reader-scale': uiFontScale }}
+    >
+      <div className="workspace-panel__content workspace-panel-loading">
+        <div className="workspace-panel-loading__hero">
+          <span className="workspace-panel-loading__line workspace-panel-loading__line--title" />
+          <span className="workspace-panel-loading__line workspace-panel-loading__line--wide" />
+          <span className="workspace-panel-loading__line workspace-panel-loading__line--medium" />
+        </div>
+        <div className="workspace-panel-loading__block" />
+        <div className="workspace-panel-loading__block is-short" />
+      </div>
+    </aside>
+  )
+}
 
 function sanitizeDownloadName(value, fallback = 'paper') {
   const text = String(value || fallback)
@@ -151,6 +245,23 @@ function buildCitationText(format, metadata, fileName) {
     return `${joinChineseAuthors(source.authors)}. ${title}[J/OL]. ${journal}, ${year}.${doiPart}`.trim()
   }
 
+  if (format === 'bibtex') {
+    const citeKey = [
+      source.authors[0]?.split(/\s+/).at(-1) || 'paper',
+      source.year || 'nd',
+      title.split(/\s+/)[0] || 'work',
+    ].join('').replace(/[^A-Za-z0-9_:-]/g, '')
+    return [
+      `@article{${citeKey},`,
+      `  title = {${title}},`,
+      source.authors.length ? `  author = {${source.authors.join(' and ')}},` : '',
+      source.journal ? `  journal = {${source.journal}},` : '',
+      source.year ? `  year = {${source.year}},` : '',
+      source.doi ? `  doi = {${source.doi}},` : '',
+      '}',
+    ].filter(Boolean).join('\n')
+  }
+
   return `${joinChineseAuthors(source.authors)}. ${title}[J]. ${journal}, ${year}.${doiPart}`.trim()
 }
 
@@ -173,26 +284,22 @@ function triggerBlobDownload(blob, fileName) {
   URL.revokeObjectURL(url)
 }
 
-void buildCitationText
-void triggerTextDownload
-
 function normalizeFullTranslationStatus(value) {
-  return ['idle', 'running', 'completed', 'error', 'cancelled'].includes(value) ? value : 'idle'
+  return ['idle', 'running', 'completed', 'partial_failed', 'error', 'cancelled'].includes(value) ? value : 'idle'
 }
 
 function getFullTranslationProgress(payload) {
   const total = Number(payload?.total_units) || 0
   const completed = Number(payload?.completed_units) || 0
-  if (payload?.status === 'completed') return 100
+  if (payload?.status === 'completed' || payload?.status === 'partial_failed') return 100
   if (total <= 0) return payload?.status === 'running' ? 3 : 0
   return Math.max(3, Math.min(99, (completed / total) * 100))
 }
 
-function hasCompleteFullTranslationCache(payload) {
+function hasReadableFullTranslationCache(payload) {
   return Boolean(
-    payload?.status === 'completed'
+    ['completed', 'partial_failed'].includes(payload?.status)
     && payload?.pages?.length
-    && !Number(payload?.pending_blocks_count || 0)
   )
 }
 
@@ -207,19 +314,27 @@ const WORKSPACE_MIN_WIDTH = 300
 const WORKSPACE_DEFAULT_WIDTH = 380
 const WORKSPACE_MAX_WIDTH = 620
 const NOTIFICATION_SUMMARY_POLL_MS = 30000
+const NOTIFICATION_DRAWER_POLL_MS = 15000
 const NOTIFICATION_LIST_LIMIT = 20
+const TASK_CENTER_SUMMARY_POLL_MS = 30000
+const TASK_CENTER_LIST_POLL_MS = 10000
+const TASK_CENTER_LIST_LIMIT = 50
+const FULL_TRANSLATION_FEATURE_ENABLED = false
+const TASK_EVENT_SOURCE_KINDS = new Set(['paper_summary', 'research_matrix'])
+const AUTH_INVALID_EVENT = 'xk-auth-invalid'
+const NOTIFICATION_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
 
 function formatNotificationTime(value) {
   if (!value) return ''
   const parsed = new Date(value)
   if (Number.isNaN(parsed.getTime())) return ''
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(parsed)
+  return NOTIFICATION_TIME_FORMATTER.format(parsed)
 }
 
 function getNotificationLabel(item) {
@@ -228,6 +343,7 @@ function getNotificationLabel(item) {
   const sourceKind = String(item?.source_kind || '').trim()
 
   if (actionKind.includes('summary') || eventKind.includes('summary')) return '摘要结果'
+  if (eventKind.includes('partial_failed')) return '翻译待处理'
   if (actionKind.includes('translation') || eventKind.includes('translation')) return '翻译完成'
   if (actionKind.includes('matrix') || eventKind.includes('matrix')) return '矩阵更新'
   if (sourceKind.includes('admin') || eventKind.includes('broadcast')) return '系统广播'
@@ -255,6 +371,152 @@ function normalizeNotificationItem(item) {
     read_at: item?.read_at || null,
     created_at: item?.created_at || null,
   }
+}
+
+function isFullTranslationNotification(item) {
+  return (
+    String(item?.source_kind || '') === 'full_translation'
+    || String(item?.action_kind || '') === 'open-full-translation'
+  )
+}
+
+function areNotificationSummariesEqual(left, right) {
+  return (
+    Number(left?.unread_count || 0) === Number(right?.unread_count || 0)
+    && (left?.latest_notification_id ?? null) === (right?.latest_notification_id ?? null)
+    && (left?.latest_created_at || null) === (right?.latest_created_at || null)
+  )
+}
+
+function areNotificationItemsEqual(left = [], right = []) {
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    const leftItem = left[index]
+    const rightItem = right[index]
+    if (
+      leftItem.id !== rightItem.id
+      || leftItem.source_kind !== rightItem.source_kind
+      || leftItem.source_id !== rightItem.source_id
+      || leftItem.event_kind !== rightItem.event_kind
+      || leftItem.title !== rightItem.title
+      || leftItem.message !== rightItem.message
+      || leftItem.action_kind !== rightItem.action_kind
+      || (leftItem.read_at || null) !== (rightItem.read_at || null)
+      || (leftItem.created_at || null) !== (rightItem.created_at || null)
+      || JSON.stringify(leftItem.action_payload || {}) !== JSON.stringify(rightItem.action_payload || {})
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+function normalizeTaskCenterSummary(summary) {
+  return {
+    active_count: Number(summary?.active_count || 0),
+    failed_count: Number(summary?.failed_count || 0),
+    completed_count: Number(summary?.completed_count || 0),
+    total_count: Number(summary?.total_count || 0),
+    attention_count: Number(summary?.attention_count || 0),
+  }
+}
+
+function normalizeTaskCenterItem(item) {
+  return {
+    id: String(item?.id || ''),
+    source_kind: String(item?.source_kind || ''),
+    source_id: Number(item?.source_id || 0),
+    status: String(item?.status || 'idle'),
+    status_group: String(item?.status_group || 'idle'),
+    status_label: String(item?.status_label || ''),
+    stage: String(item?.stage || 'idle'),
+    stage_label: String(item?.stage_label || ''),
+    title: String(item?.title || '').trim(),
+    subtitle: String(item?.subtitle || '').trim(),
+    progress_percent: Number(item?.progress_percent || 0),
+    error_message: String(item?.error_message || '').trim(),
+    action_kind: String(item?.action_kind || 'none'),
+    action_payload: item?.action_payload && typeof item.action_payload === 'object' ? item.action_payload : {},
+    can_cancel: Boolean(item?.can_cancel),
+    can_retry: Boolean(item?.can_retry),
+    created_at: item?.created_at || null,
+    updated_at: item?.updated_at || null,
+  }
+}
+
+function normalizeTaskCenter(payload) {
+  const items = Array.isArray(payload?.items) ? payload.items.map(normalizeTaskCenterItem).filter((item) => item.id) : []
+  return {
+    summary: normalizeTaskCenterSummary(payload?.summary),
+    items,
+  }
+}
+
+function buildVisibleTaskCenterPayload(payload) {
+  const normalized = normalizeTaskCenter(payload)
+  if (FULL_TRANSLATION_FEATURE_ENABLED) return normalized
+  const items = normalized.items.filter((item) => item.source_kind !== 'full_translation')
+  if (items.length === normalized.items.length) {
+    return { ...normalized, items }
+  }
+  const summary = items.reduce((result, item) => {
+    const group = item.status_group || 'idle'
+    if (group === 'active') result.active_count += 1
+    if (group === 'failed') result.failed_count += 1
+    if (group === 'completed') result.completed_count += 1
+    result.total_count += 1
+    return result
+  }, normalizeTaskCenterSummary())
+  summary.attention_count = summary.active_count + summary.failed_count
+  return { summary, items }
+}
+
+function areTaskCenterSummariesEqual(left, right) {
+  return (
+    Number(left?.active_count || 0) === Number(right?.active_count || 0)
+    && Number(left?.failed_count || 0) === Number(right?.failed_count || 0)
+    && Number(left?.completed_count || 0) === Number(right?.completed_count || 0)
+    && Number(left?.total_count || 0) === Number(right?.total_count || 0)
+    && Number(left?.attention_count || 0) === Number(right?.attention_count || 0)
+  )
+}
+
+function areTaskCenterItemsEqual(left = [], right = []) {
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    const leftItem = left[index]
+    const rightItem = right[index]
+    if (
+      leftItem.id !== rightItem.id
+      || leftItem.source_kind !== rightItem.source_kind
+      || leftItem.source_id !== rightItem.source_id
+      || leftItem.status !== rightItem.status
+      || leftItem.status_group !== rightItem.status_group
+      || leftItem.status_label !== rightItem.status_label
+      || leftItem.stage !== rightItem.stage
+      || leftItem.stage_label !== rightItem.stage_label
+      || leftItem.title !== rightItem.title
+      || leftItem.subtitle !== rightItem.subtitle
+      || leftItem.progress_percent !== rightItem.progress_percent
+      || leftItem.error_message !== rightItem.error_message
+      || leftItem.action_kind !== rightItem.action_kind
+      || leftItem.can_cancel !== rightItem.can_cancel
+      || leftItem.can_retry !== rightItem.can_retry
+      || (leftItem.created_at || null) !== (rightItem.created_at || null)
+      || (leftItem.updated_at || null) !== (rightItem.updated_at || null)
+      || JSON.stringify(leftItem.action_payload || {}) !== JSON.stringify(rightItem.action_payload || {})
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+function areTaskCenterPayloadsEqual(left, right) {
+  return (
+    areTaskCenterSummariesEqual(left?.summary, right?.summary)
+    && areTaskCenterItemsEqual(left?.items || [], right?.items || [])
+  )
 }
 
 const EMPTY_RESOURCE_OVERVIEW = { stats: {}, papers: [] }
@@ -313,7 +575,16 @@ function App() {
   const [notificationSummary, setNotificationSummary] = useState(() => normalizeNotificationSummary())
   const [notificationItems, setNotificationItems] = useState([])
   const [notificationLoading, setNotificationLoading] = useState(false)
+  const [notificationError, setNotificationError] = useState('')
+  const [notificationActionBusy, setNotificationActionBusy] = useState('')
   const [notificationToast, setNotificationToast] = useState(null)
+  const [isTaskCenterOpen, setIsTaskCenterOpen] = useState(false)
+  const [taskCenterPayload, setTaskCenterPayload] = useState(() => normalizeTaskCenter())
+  const [taskCenterLoading, setTaskCenterLoading] = useState(false)
+  const [taskCenterError, setTaskCenterError] = useState('')
+  const [taskCenterActionBusyId, setTaskCenterActionBusyId] = useState('')
+  const [membershipPlans, setMembershipPlans] = useState([])
+  const [isMembershipModalOpen, setIsMembershipModalOpen] = useState(false)
   const chatMessageCounterRef = useRef(0)
   const chatRequestCounterRef = useRef(0)
   const initialSuggestionRequestRef = useRef({})
@@ -323,14 +594,44 @@ function App() {
   const notificationSummaryPollRef = useRef(null)
   const notificationDrawerPollRef = useRef(null)
   const notificationToastTimerRef = useRef(null)
+  const notificationSummaryInFlightRef = useRef(false)
+  const notificationListInFlightRef = useRef(false)
+  const notificationSummaryRef = useRef(normalizeNotificationSummary())
+  const notificationItemsRef = useRef([])
+  const isNotificationOpenRef = useRef(false)
+  const taskCenterSummaryPollRef = useRef(null)
+  const taskCenterListPollRef = useRef(null)
+  const taskCenterSummaryInFlightRef = useRef(false)
+  const taskCenterListInFlightRef = useRef(false)
+  const taskCenterPayloadRef = useRef(normalizeTaskCenter())
+  const isTaskCenterOpenRef = useRef(false)
+  const realtimeEventSourceRef = useRef(null)
+  const realtimeLastEventIdRef = useRef('')
+  const notificationPermissionRequestRef = useRef(false)
   const lastSeenNotificationIdRef = useRef(null)
   const didInitNotificationPollingRef = useRef(false)
   const toastedNotificationIdsRef = useRef(new Set())
   const readingResourceRefreshTimerRef = useRef(null)
   const readingResourceIdleRefreshRef = useRef(null)
+  const restoredWorkspaceSessionRef = useRef('')
+  const userMenuCloseTimerRef = useRef(null)
+  const userMenuRefreshInFlightRef = useRef(false)
+  const authInvalidHandlerRef = useRef(null)
   const currentUserAvatarSrc = resolveAssetUrl(currentUser?.avatar_url)
+  notificationSummaryRef.current = notificationSummary
+  notificationItemsRef.current = notificationItems
+  isNotificationOpenRef.current = isNotificationOpen
+  taskCenterPayloadRef.current = taskCenterPayload
+  isTaskCenterOpenRef.current = isTaskCenterOpen
+  authInvalidHandlerRef.current = () => {
+    if (!getStoredAuthToken()) return
+    handleLogout()
+    setAuthMode('login')
+    setIsAuthViewOpen(true)
+  }
 
   function openFullTranslationReader(paperId = activePaperId) {
+    if (!FULL_TRANSLATION_FEATURE_ENABLED) return
     if (!paperId) return
     setFullTranslationOpenPaperId(paperId)
     setIsFullTranslationOpen(true)
@@ -340,6 +641,63 @@ function App() {
     setIsFullTranslationOpen(false)
     setFullTranslationOpenPaperId(null)
   }
+
+  function openMembershipModal() {
+    setIsMembershipModalOpen(true)
+  }
+
+  function closeMembershipModal() {
+    setIsMembershipModalOpen(false)
+  }
+
+  async function openSupportCenter() {
+    if (!currentUser) {
+      setAuthMode('login')
+      setIsAuthViewOpen(true)
+      return
+    }
+
+    const canLeave = await ensureNotesSavedBeforeLeaving()
+    if (!canLeave) return
+    setSummaryInitialType('')
+    setHomeInitialSection('recent')
+    setAccountSection(currentUser?.is_admin ? 'admin-feedback' : 'feedback')
+    closeFullTranslationReader()
+  }
+
+  useEffect(() => {
+    const originalFetch = window.fetch.bind(window)
+    window.fetch = async (input, init) => {
+      const response = await originalFetch(input, init)
+      const rawUrl = typeof input === 'string' ? input : input?.url || ''
+      const pathname = rawUrl ? new URL(rawUrl, window.location.origin).pathname : ''
+
+      if (
+        response.status === 401
+        && pathname.startsWith('/api/')
+        && pathname !== '/api/auth/login'
+        && getStoredAuthToken()
+      ) {
+        window.dispatchEvent(new Event(AUTH_INVALID_EVENT))
+      }
+
+      return response
+    }
+
+    return () => {
+      window.fetch = originalFetch
+    }
+  }, [])
+
+  useEffect(() => {
+    const handleInvalidAuth = () => {
+      authInvalidHandlerRef.current?.()
+    }
+    window.addEventListener(AUTH_INVALID_EVENT, handleInvalidAuth)
+    return () => {
+      window.removeEventListener(AUTH_INVALID_EVENT, handleInvalidAuth)
+    }
+  }, [])
 
   // Get active AI provider
   useEffect(function () {
@@ -355,6 +713,16 @@ function App() {
       })
       .catch(function () {})
   }, [currentUser])
+
+  useEffect(() => {
+    fetchMembershipPlans()
+      .then((payload) => {
+        setMembershipPlans(Array.isArray(payload?.plans) ? payload.plans : [])
+      })
+      .catch(() => {
+        setMembershipPlans([])
+      })
+  }, [])
 
   const {
     activeView,
@@ -373,6 +741,7 @@ function App() {
     goHome,
     handleFileChange,
     importConflict,
+    importStatus,
     isImporting,
     isLoading,
     metadata,
@@ -387,11 +756,14 @@ function App() {
     readingStats,
     recentReadings,
     readingDurationVersion,
+    refreshPaperMetadata,
     refreshTrashPapers,
     renameFolder,
     resolveImportConflict,
+    retryImportConflict,
     restorePaperFromTrash,
     scale,
+    savePaperMetadata,
     setCurrentPage,
     switchToPaper,
     totalPages,
@@ -409,6 +781,25 @@ function App() {
   const isReaderView = activeView !== 'home'
   const isAccountView = Boolean(accountSection)
   const isAdminUser = Boolean(currentUser?.is_admin)
+  const isFullTranslationBetaEnabled = FULL_TRANSLATION_FEATURE_ENABLED
+
+  useEffect(() => {
+    if (!isReaderView) return undefined
+
+    if (typeof window === 'undefined') {
+      preloadSideWorkspacePanel()
+      return undefined
+    }
+
+    if (typeof window.requestIdleCallback === 'function') {
+      const idleId = window.requestIdleCallback(preloadSideWorkspacePanel, { timeout: 800 })
+      return () => window.cancelIdleCallback?.(idleId)
+    }
+
+    const timerId = window.setTimeout(preloadSideWorkspacePanel, 120)
+    return () => window.clearTimeout(timerId)
+  }, [isReaderView])
+
   const {
     annotations,
     createAnnotation,
@@ -417,6 +808,7 @@ function App() {
     eraseAnnotationRange,
     restoreAnnotations,
   } = useAnnotations(activePaperId)
+  const logicalAnnotationTotal = countLogicalAnnotations(annotations)
   const {
     inkAnnotations,
     createInkAnnotation,
@@ -432,8 +824,13 @@ function App() {
     notebooks,
     loading: notesLoading,
     saving: notesSaving,
+    saveStatus: notesSaveStatus,
+    saveError: notesSaveError,
+    hasUnsavedChanges: hasUnsavedNotes,
     setNotebooks,
     saveNotebooks,
+    retrySaveNotebooks,
+    flushUnsavedNotes,
     createNotebookDraft,
   } = usePaperNotes(activePaperId)
   const [activeNoteTarget, setActiveNoteTarget] = useState(null)
@@ -500,6 +897,31 @@ function App() {
       setWorkspacePanelWidth((current) => Math.min(current, workspaceSafeMaxWidth))
     }, 0)
   }, [setWorkspacePanelWidth, workspaceSafeMaxWidth])
+
+  const activePaperSessionKey = isReaderView ? String(activeView) : ''
+
+  useEffect(() => {
+    if (!activePaperSessionKey) return
+    const restoredSession = readReadingSessionSnapshot(activePaperSessionKey)
+    if (!restoredSession) return
+
+    restoredWorkspaceSessionRef.current = activePaperSessionKey
+    setActiveWorkspacePanel(restoredSession.activeWorkspacePanel || '')
+    setWorkspacePanelWidth(restoredSession.workspaceWidth)
+  }, [activePaperSessionKey, setWorkspacePanelWidth])
+
+  useEffect(() => {
+    if (!activePaperSessionKey) return
+    if (restoredWorkspaceSessionRef.current === activePaperSessionKey) {
+      restoredWorkspaceSessionRef.current = ''
+      return
+    }
+
+    saveReadingSessionSnapshot(activePaperSessionKey, {
+      activeWorkspacePanel,
+      workspaceWidth: workspacePanel.width,
+    })
+  }, [activePaperSessionKey, activeWorkspacePanel, workspacePanel.width])
 
   const { selectionCard, handleSelection, aiEnabled, toggleAI } = useSelectionInsight({
     readerRef,
@@ -683,9 +1105,36 @@ function App() {
     setResourcePreview(null)
   }
 
-  function openPaperResource(paperId, resource = null) {
+  async function ensureNotesSavedBeforeLeaving() {
+    if (!hasUnsavedNotes && notesSaveStatus !== 'error') return true
+    const saved = await flushUnsavedNotes()
+    if (!saved && typeof window !== 'undefined') {
+      window.alert('笔记保存失败，请点击顶部“保存失败，点击重试”或手动保存后再切换。')
+    }
+    return saved
+  }
+
+  async function switchToPaperSafely(paperId) {
     if (!paperId) return
+    if (String(paperId) !== String(activePaperId)) {
+      const canLeave = await ensureNotesSavedBeforeLeaving()
+      if (!canLeave) return false
+    }
     switchToPaper(paperId)
+    return true
+  }
+
+  async function goHomeSafely() {
+    const canLeave = await ensureNotesSavedBeforeLeaving()
+    if (!canLeave) return false
+    goHome()
+    return true
+  }
+
+  async function openPaperResource(paperId, resource = null) {
+    if (!paperId) return
+    const opened = await switchToPaperSafely(paperId)
+    if (!opened) return
     setAccountSection('')
     setHomeInitialSection('recent')
     setSummaryInitialType('')
@@ -694,18 +1143,20 @@ function App() {
     const resourceType = resource?.type || ''
     if (resourceType === 'notes') {
       setActiveWorkspacePanel('notes')
-      return
+      return true
     }
 
     if (resourceType.startsWith('summary_')) {
       setActiveWorkspacePanel('summary')
-      return
+      return true
     }
 
     if (resourceType === 'annotations') {
       setActiveWorkspacePanel('info')
-      return
+      return true
     }
+
+    return true
   }
 
   useEffect(() => {
@@ -777,6 +1228,14 @@ function App() {
   }, [])
 
   useEffect(() => {
+    return () => {
+      if (userMenuCloseTimerRef.current) {
+        window.clearTimeout(userMenuCloseTimerRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
     if (!isUserMenuOpen) {
       return undefined
     }
@@ -790,6 +1249,23 @@ function App() {
     window.addEventListener('pointerdown', handlePointerDown)
     return () => {
       window.removeEventListener('pointerdown', handlePointerDown)
+    }
+  }, [isUserMenuOpen])
+
+  useEffect(() => {
+    if (!isUserMenuOpen) {
+      return undefined
+    }
+
+    function handleEscape(event) {
+      if (event.key === 'Escape') {
+        setIsUserMenuOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleEscape)
+    return () => {
+      window.removeEventListener('keydown', handleEscape)
     }
   }, [isUserMenuOpen])
 
@@ -814,10 +1290,143 @@ function App() {
     }
   }
 
+  function clearTaskCenterPolling() {
+    if (taskCenterSummaryPollRef.current) {
+      window.clearInterval(taskCenterSummaryPollRef.current)
+      taskCenterSummaryPollRef.current = null
+    }
+    clearTaskCenterListPolling()
+  }
+
+  function clearTaskCenterListPolling() {
+    if (taskCenterListPollRef.current) {
+      window.clearInterval(taskCenterListPollRef.current)
+      taskCenterListPollRef.current = null
+    }
+  }
+
+  function clearRealtimeEventStream() {
+    if (realtimeEventSourceRef.current) {
+      realtimeEventSourceRef.current.close()
+      realtimeEventSourceRef.current = null
+    }
+  }
+
+  function handleRealtimeNotificationEvent(event) {
+    if (event?.lastEventId) {
+      realtimeLastEventIdRef.current = event.lastEventId
+    }
+
+    let payload = {}
+    try {
+      payload = JSON.parse(event?.data || '{}')
+    } catch {
+      payload = {}
+    }
+
+    void loadNotificationSummary({ background: true })
+    if (TASK_EVENT_SOURCE_KINDS.has(String(payload?.source_kind || ''))) {
+      if (isTaskCenterOpenRef.current) {
+        void loadTaskCenter({ background: true })
+      } else {
+        void loadTaskCenterSummary({ background: true })
+      }
+    }
+  }
+
+  function beginRealtimeEventStream() {
+    clearRealtimeEventStream()
+    if (!currentUser || typeof window === 'undefined' || !('EventSource' in window)) return
+    const token = getStoredAuthToken()
+    if (!token) return
+
+    const params = new URLSearchParams({ token })
+    if (realtimeLastEventIdRef.current) {
+      params.set('last_event_id', realtimeLastEventIdRef.current)
+    }
+    const stream = new window.EventSource(`/api/events/stream?${params.toString()}`)
+    realtimeEventSourceRef.current = stream
+    stream.addEventListener('notification', handleRealtimeNotificationEvent)
+    stream.addEventListener('connected', (event) => {
+      let payload = {}
+      try {
+        payload = JSON.parse(event?.data || '{}')
+      } catch {
+        payload = {}
+      }
+      const latestId = payload?.latest_notification_id
+      if (latestId && !realtimeLastEventIdRef.current) {
+        realtimeLastEventIdRef.current = String(latestId)
+      }
+      updateNotificationSummaryState((current) => ({
+        ...current,
+        unread_count: Number(payload?.unread_count ?? current.unread_count ?? 0),
+        latest_notification_id: payload?.latest_notification_id ?? current.latest_notification_id,
+      }))
+    })
+    stream.onerror = () => {
+      // EventSource reconnects by itself. Existing polling remains as a fallback.
+    }
+  }
+
+  function updateNotificationSummaryState(updater) {
+    setNotificationSummary((current) => {
+      const next = normalizeNotificationSummary(
+        typeof updater === 'function' ? updater(current) : updater,
+      )
+      if (areNotificationSummariesEqual(current, next)) {
+        notificationSummaryRef.current = current
+        return current
+      }
+      notificationSummaryRef.current = next
+      return next
+    })
+  }
+
+  function updateNotificationItemsState(updater) {
+    setNotificationItems((current) => {
+      const next = typeof updater === 'function' ? updater(current) : updater
+      notificationItemsRef.current = next
+      return areNotificationItemsEqual(current, next) ? current : next
+    })
+  }
+
+  function updateTaskCenterPayloadState(updater) {
+    setTaskCenterPayload((current) => {
+      const next = normalizeTaskCenter(typeof updater === 'function' ? updater(current) : updater)
+      taskCenterPayloadRef.current = next
+      return areTaskCenterPayloadsEqual(current, next) ? current : next
+    })
+  }
+
+  function showSystemNotification(item) {
+    if (!item?.id || typeof window === 'undefined' || !('Notification' in window)) return
+    if (window.Notification.permission !== 'granted') return
+    const pageVisible = document.visibilityState === 'visible'
+    const pageFocused = typeof document.hasFocus === 'function' ? document.hasFocus() : true
+    if (pageVisible && pageFocused) return
+
+    const systemNotice = new window.Notification(item.title || '通知', {
+      body: item.message || '点击查看详情',
+      tag: `xk-reader-notification-${item.id}`,
+      renotify: true,
+    })
+    systemNotice.onclick = () => {
+      window.focus()
+      systemNotice.close()
+      void handleNotificationOpen(item)
+    }
+    window.setTimeout(() => {
+      systemNotice.close()
+    }, 6000)
+  }
+
   function showNotificationToast(item) {
     if (!item?.id) return
+    if (!FULL_TRANSLATION_FEATURE_ENABLED && isFullTranslationNotification(item)) return
     toastedNotificationIdsRef.current.add(item.id)
     setNotificationToast(item)
+    showSystemNotification(item)
     clearNotificationToastTimer()
     notificationToastTimerRef.current = window.setTimeout(() => {
       setNotificationToast(null)
@@ -827,7 +1436,7 @@ function App() {
 
   function applyNotificationSummary(summary, options = {}) {
     const normalized = normalizeNotificationSummary(summary)
-    setNotificationSummary(normalized)
+    updateNotificationSummaryState(normalized)
     const latestId = normalized.latest_notification_id
     if (!latestId) {
       lastSeenNotificationIdRef.current = null
@@ -848,44 +1457,57 @@ function App() {
 
   async function loadNotificationSummary(options = {}) {
     if (!currentUser) return
+    if (notificationSummaryInFlightRef.current) return notificationSummaryRef.current
+    notificationSummaryInFlightRef.current = true
     try {
       const payload = await fetchNotificationSummary()
       applyNotificationSummary(payload, options)
+      return payload
     } catch {
       if (options.resetOnError) {
-        setNotificationSummary(normalizeNotificationSummary())
+        updateNotificationSummaryState(normalizeNotificationSummary())
       }
+      return null
+    } finally {
+      notificationSummaryInFlightRef.current = false
     }
   }
 
   async function loadNotificationList(options = {}) {
     if (!currentUser) return
+    if (notificationListInFlightRef.current) return notificationItemsRef.current
+    notificationListInFlightRef.current = true
     if (!options.background) {
       setNotificationLoading(true)
     }
     try {
       const payload = await fetchNotifications(NOTIFICATION_LIST_LIMIT)
       const items = Array.isArray(payload?.items) ? payload.items.map(normalizeNotificationItem) : []
-      setNotificationItems(items)
-      setNotificationSummary((current) => ({
+      const visibleItems = FULL_TRANSLATION_FEATURE_ENABLED
+        ? items
+        : items.filter((item) => !isFullTranslationNotification(item))
+      updateNotificationItemsState(visibleItems)
+      setNotificationError('')
+      updateNotificationSummaryState((current) => ({
         ...current,
         unread_count: Number(payload?.unread_count || 0),
-        latest_notification_id: items[0]?.id ?? current.latest_notification_id,
-        latest_created_at: items[0]?.created_at ?? current.latest_created_at,
+        latest_notification_id: visibleItems[0]?.id ?? current.latest_notification_id,
+        latest_created_at: visibleItems[0]?.created_at ?? current.latest_created_at,
       }))
       if (options.toastLatest) {
-        const target = items.find((item) => !item.read_at && !toastedNotificationIdsRef.current.has(item.id))
+        const target = visibleItems.find((item) => !item.read_at && !toastedNotificationIdsRef.current.has(item.id))
         if (target) {
           showNotificationToast(target)
         }
       }
-      return items
-    } catch {
+      return visibleItems
+    } catch (error) {
       if (!options.background) {
-        setNotificationItems([])
+        setNotificationError(toUserMessage(error, '通知加载失败，请稍后重试。'))
       }
-      return []
+      return notificationItemsRef.current
     } finally {
+      notificationListInFlightRef.current = false
       if (!options.background) {
         setNotificationLoading(false)
       }
@@ -895,15 +1517,92 @@ function App() {
   function beginNotificationSummaryPolling() {
     clearNotificationSummaryPolling()
     notificationSummaryPollRef.current = window.setInterval(() => {
-      loadNotificationSummary()
+      if (shouldPauseBackgroundPolling()) return
+      if (!isNotificationOpenRef.current) {
+        loadNotificationSummary()
+      }
     }, NOTIFICATION_SUMMARY_POLL_MS)
   }
 
   function beginNotificationDrawerPolling() {
     clearNotificationDrawerPolling()
     notificationDrawerPollRef.current = window.setInterval(() => {
+      if (shouldPauseBackgroundPolling()) return
       loadNotificationList({ background: true })
-    }, NOTIFICATION_SUMMARY_POLL_MS)
+    }, NOTIFICATION_DRAWER_POLL_MS)
+  }
+
+  async function loadTaskCenter(options = {}) {
+    if (!currentUser) return normalizeTaskCenter()
+    if (taskCenterListInFlightRef.current) return taskCenterPayloadRef.current
+    taskCenterListInFlightRef.current = true
+    if (!options.background) {
+      setTaskCenterLoading(true)
+    }
+    try {
+      const payload = normalizeTaskCenter(await fetchTaskCenter(TASK_CENTER_LIST_LIMIT))
+      updateTaskCenterPayloadState(payload)
+      setTaskCenterError('')
+      return payload
+    } catch (error) {
+      if (options.resetOnError) {
+        updateTaskCenterPayloadState(normalizeTaskCenter())
+      }
+      if (!options.background) {
+        setTaskCenterError(toUserMessage(error, '任务列表加载失败'))
+      }
+      return null
+    } finally {
+      taskCenterListInFlightRef.current = false
+      if (!options.background) {
+        setTaskCenterLoading(false)
+      }
+    }
+  }
+
+  async function loadTaskCenterSummary(options = {}) {
+    if (!currentUser) return normalizeTaskCenterSummary()
+    if (taskCenterSummaryInFlightRef.current) return taskCenterPayloadRef.current.summary
+    taskCenterSummaryInFlightRef.current = true
+    try {
+      const summary = normalizeTaskCenterSummary(await fetchTaskCenterSummary())
+      updateTaskCenterPayloadState((current) => ({
+        ...current,
+        summary,
+      }))
+      return summary
+    } catch (error) {
+      if (options.resetOnError) {
+        updateTaskCenterPayloadState((current) => ({
+          ...current,
+          summary: normalizeTaskCenterSummary(),
+        }))
+      }
+      if (!options.background) {
+        setTaskCenterError(toUserMessage(error, '任务状态加载失败'))
+      }
+      return null
+    } finally {
+      taskCenterSummaryInFlightRef.current = false
+    }
+  }
+
+  function beginTaskCenterPolling() {
+    clearTaskCenterPolling()
+    taskCenterSummaryPollRef.current = window.setInterval(() => {
+      if (shouldPauseBackgroundPolling()) return
+      if (!isTaskCenterOpenRef.current) {
+        loadTaskCenterSummary({ background: true })
+      }
+    }, TASK_CENTER_SUMMARY_POLL_MS)
+  }
+
+  function beginTaskCenterListPolling() {
+    clearTaskCenterListPolling()
+    taskCenterListPollRef.current = window.setInterval(() => {
+      if (shouldPauseBackgroundPolling()) return
+      loadTaskCenter({ background: true })
+    }, TASK_CENTER_LIST_POLL_MS)
   }
 
   async function navigateFromNotification(item) {
@@ -917,37 +1616,103 @@ function App() {
         showNotificationToast({ id: createTransientId('missing'), title: '提示', message: '目标内容已不存在或无权限访问' })
         return
       }
+      const opened = await switchToPaperSafely(paperId)
+      if (!opened) return
       setAccountSection('')
       setHomeInitialSection('recent')
       setSummaryInitialType(summaryType)
       closeFullTranslationReader()
-      switchToPaper(paperId)
       setActiveWorkspacePanel('summary')
       return
     }
 
     if (actionKind === 'open-full-translation') {
+      if (!FULL_TRANSLATION_FEATURE_ENABLED) return
       const paperId = Number(payload.paper_id || 0)
       if (!paperId) {
         showNotificationToast({ id: createTransientId('missing'), title: '提示', message: '目标内容已不存在或无权限访问' })
         return
       }
+      const opened = await switchToPaperSafely(paperId)
+      if (!opened) return
       setAccountSection('')
       setHomeInitialSection('recent')
       setSummaryInitialType('')
       setActiveWorkspacePanel('')
-      switchToPaper(paperId)
       openFullTranslationReader(paperId)
       return
     }
 
     if (actionKind === 'open-matrix') {
+      const opened = await goHomeSafely()
+      if (!opened) return
       setSummaryInitialType('')
       setAccountSection('')
       closeFullTranslationReader()
       setHomeInitialSection('matrix')
-      goHome()
       return
+    }
+
+    if (actionKind === 'open-membership') {
+      openMembershipModal()
+    }
+  }
+
+  async function handleTaskCenterOpen(item) {
+    if (!item) return
+    setIsTaskCenterOpen(false)
+    await navigateFromNotification(item)
+  }
+
+  async function handleTaskCenterAction(item, action) {
+    if (!item?.id || taskCenterActionBusyId) return
+    if (action === 'cancel' && !confirmDangerAction('确定取消这个后台任务吗？取消后可能需要重新生成。')) return
+    setTaskCenterActionBusyId(item.id)
+    setTaskCenterError('')
+    try {
+      if (action === 'cancel') {
+        await cancelTask(item.id)
+      } else {
+        await retryTask(item.id)
+      }
+      await loadTaskCenter({ background: true })
+    } catch (error) {
+      setTaskCenterError(toUserMessage(error, '任务操作失败'))
+    } finally {
+      setTaskCenterActionBusyId('')
+    }
+  }
+
+  async function handleDeleteTaskCenterItem(item) {
+    if (!item?.id || item.status_group !== 'completed') return
+    if (!confirmDangerAction('确定从任务中心移除这条已完成记录吗？')) return
+    setTaskCenterActionBusyId(item.id)
+    setTaskCenterError('')
+    try {
+      await archiveTaskCenterItems([item.id])
+      await loadTaskCenter({ background: true })
+    } catch (error) {
+      setTaskCenterError(toUserMessage(error, '任务移除失败'))
+    } finally {
+      setTaskCenterActionBusyId('')
+    }
+  }
+
+  async function handleClearCompletedTasks() {
+    const completedIds = (taskCenterPayloadRef.current.items || [])
+      .filter((item) => item.status_group === 'completed')
+      .map((item) => String(item.id))
+    if (!completedIds.length) return
+    if (!confirmDangerAction(`确定清理 ${completedIds.length} 条已完成任务记录吗？`)) return
+    setTaskCenterActionBusyId('__archive_completed__')
+    setTaskCenterError('')
+    try {
+      await archiveCompletedTaskCenterItems()
+      await loadTaskCenter({ background: true })
+    } catch (error) {
+      setTaskCenterError(toUserMessage(error, '清理已完成任务失败'))
+    } finally {
+      setTaskCenterActionBusyId('')
     }
   }
 
@@ -955,12 +1720,12 @@ function App() {
     if (!item?.id) return
     try {
       await markNotificationRead(item.id)
-      setNotificationItems((previous) =>
+      updateNotificationItemsState((previous) =>
         previous.map((entry) =>
           entry.id === item.id ? { ...entry, read_at: entry.read_at || new Date().toISOString() } : entry,
         ),
       )
-      setNotificationSummary((current) => ({
+      updateNotificationSummaryState((current) => ({
         ...current,
         unread_count: Math.max(0, Number(current.unread_count || 0) - (item.read_at ? 0 : 1)),
       }))
@@ -972,27 +1737,36 @@ function App() {
   }
 
   async function handleReadAllNotifications() {
+    if (notificationActionBusy || notificationSummary.unread_count <= 0) return
+    setNotificationActionBusy('read-all')
+    setNotificationError('')
     try {
       const payload = await markAllNotificationsRead()
       if (Number(payload?.updated_count || 0) >= 0) {
         const readAt = new Date().toISOString()
-        setNotificationItems((previous) => previous.map((item) => ({ ...item, read_at: item.read_at || readAt })))
-        setNotificationSummary((current) => ({ ...current, unread_count: 0 }))
+        updateNotificationItemsState((previous) => previous.map((item) => ({ ...item, read_at: item.read_at || readAt })))
+        updateNotificationSummaryState((current) => ({ ...current, unread_count: 0 }))
       }
-    } catch {
-      // Ignore read-all failures in the UI.
+    } catch (error) {
+      setNotificationError(toUserMessage(error, '全部已读失败，请稍后重试。'))
+    } finally {
+      setNotificationActionBusy('')
     }
   }
 
   async function handleDeleteNotification(notificationId) {
-    if (!notificationId) return
+    if (!notificationId || notificationActionBusy) return
+    if (!confirmDangerAction('确定删除这条通知吗？')) return
+    setNotificationActionBusy(`delete:${notificationId}`)
+    setNotificationError('')
     try {
       await deleteNotification(notificationId)
-      setNotificationItems((previous) => previous.filter((item) => item.id !== notificationId))
-      setNotificationSummary((current) => {
-        const removedItem = notificationItems.find((item) => item.id === notificationId)
+      const previousItems = notificationItemsRef.current
+      const nextItems = previousItems.filter((item) => item.id !== notificationId)
+      const removedItem = previousItems.find((item) => item.id === notificationId)
+      updateNotificationItemsState(nextItems)
+      updateNotificationSummaryState((current) => {
         const unreadDelta = removedItem && !removedItem.read_at ? 1 : 0
-        const nextItems = notificationItems.filter((item) => item.id !== notificationId)
         return {
           ...current,
           unread_count: Math.max(0, Number(current.unread_count || 0) - unreadDelta),
@@ -1000,23 +1774,31 @@ function App() {
           latest_created_at: nextItems[0]?.created_at ?? null,
         }
       })
-    } catch {
-      // Ignore delete failures in the UI.
+    } catch (error) {
+      setNotificationError(toUserMessage(error, '删除通知失败，请稍后重试。'))
+    } finally {
+      setNotificationActionBusy('')
     }
   }
 
   async function handleClearAllNotifications() {
+    if (notificationActionBusy || !notificationItemsRef.current.length) return
+    if (!confirmDangerAction(`确定清空 ${notificationItemsRef.current.length} 条通知吗？`)) return
+    setNotificationActionBusy('clear-all')
+    setNotificationError('')
     try {
       await clearAllNotifications()
-      setNotificationItems([])
-      setNotificationSummary((current) => ({
+      updateNotificationItemsState([])
+      updateNotificationSummaryState((current) => ({
         ...current,
         unread_count: 0,
         latest_notification_id: null,
         latest_created_at: null,
       }))
-    } catch {
-      // Ignore clear failures in the UI.
+    } catch (error) {
+      setNotificationError(toUserMessage(error, '清空通知失败，请稍后重试。'))
+    } finally {
+      setNotificationActionBusy('')
     }
   }
 
@@ -1024,16 +1806,23 @@ function App() {
     clearNotificationSummaryPolling()
     clearNotificationDrawerPolling()
     clearNotificationToastTimer()
+    clearTaskCenterPolling()
+    clearRealtimeEventStream()
+    notificationPermissionRequestRef.current = false
 
     if (!currentUser) {
       didInitNotificationPollingRef.current = false
       lastSeenNotificationIdRef.current = null
+      realtimeLastEventIdRef.current = ''
       toastedNotificationIdsRef.current = new Set()
+      setNotificationError('')
+      setNotificationActionBusy('')
       return undefined
     }
 
     const initTimerId = window.setTimeout(() => {
       loadNotificationSummary({ silentInit: true, resetOnError: true })
+      beginRealtimeEventStream()
       beginNotificationSummaryPolling()
     }, 0)
 
@@ -1042,8 +1831,69 @@ function App() {
       clearNotificationSummaryPolling()
       clearNotificationDrawerPolling()
       clearNotificationToastTimer()
+      clearRealtimeEventStream()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.uid])
+
+  useEffect(() => {
+    clearTaskCenterPolling()
+
+    if (!currentUser) {
+      setIsTaskCenterOpen(false)
+      updateTaskCenterPayloadState(normalizeTaskCenter())
+      setTaskCenterError('')
+      setTaskCenterActionBusyId('')
+      return undefined
+    }
+
+    const initTimerId = window.setTimeout(() => {
+      loadTaskCenterSummary({ background: true, resetOnError: true })
+      beginTaskCenterPolling()
+    }, 0)
+
+    return () => {
+      window.clearTimeout(initTimerId)
+      clearTaskCenterPolling()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.uid])
+
+  useEffect(() => {
+    if (!currentUser || !isTaskCenterOpen) {
+      clearTaskCenterListPolling()
+      return undefined
+    }
+    loadTaskCenter()
+    beginTaskCenterListPolling()
+    return () => {
+      clearTaskCenterListPolling()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.uid, isTaskCenterOpen])
+
+  useEffect(() => {
+    if (!currentUser || typeof window === 'undefined' || !('Notification' in window)) {
+      notificationPermissionRequestRef.current = false
+      return undefined
+    }
+    if (window.Notification.permission !== 'default' || notificationPermissionRequestRef.current) {
+      return undefined
+    }
+
+    notificationPermissionRequestRef.current = true
+    const requestPermission = () => {
+      window.removeEventListener('pointerdown', requestPermission)
+      window.removeEventListener('keydown', requestPermission)
+      void window.Notification.requestPermission().catch(() => {})
+    }
+
+    window.addEventListener('pointerdown', requestPermission, { once: true })
+    window.addEventListener('keydown', requestPermission, { once: true })
+    return () => {
+      window.removeEventListener('pointerdown', requestPermission)
+      window.removeEventListener('keydown', requestPermission)
+    }
   }, [currentUser?.uid])
 
   useEffect(() => {
@@ -1059,7 +1909,30 @@ function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.uid, isNotificationOpen])
 
-  const userInitials = (currentUser?.nickname || 'xk').slice(0, 2).toLowerCase()
+  useEffect(() => {
+    if (!currentUser) return undefined
+
+    const handleResume = () => {
+      if (shouldPauseBackgroundPolling()) return
+      void loadNotificationSummary()
+      if (isTaskCenterOpenRef.current) {
+        void loadTaskCenter({ background: true })
+      } else {
+        void loadTaskCenterSummary({ background: true })
+      }
+    }
+
+    window.addEventListener('focus', handleResume)
+    window.addEventListener('online', handleResume)
+    document.addEventListener('visibilitychange', handleResume)
+    return () => {
+      window.removeEventListener('focus', handleResume)
+      window.removeEventListener('online', handleResume)
+      document.removeEventListener('visibilitychange', handleResume)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.uid])
+
   const activeChatMessages = chatMessages[activeView] || []
   const activeChatInput = chatInput[activeView] || ''
   const activeChatAsking = chatAsking[activeView] || false
@@ -1067,11 +1940,17 @@ function App() {
   const activeInitialSuggestionsLoading = chatInitialSuggestionsLoading[activeView] || false
   const activeFollowupLoadingMessageId = chatFollowupLoadingMessageId[activeView] || ''
   const isCurrentPaperFullTranslationOpen = Boolean(
-    isFullTranslationOpen
+    isFullTranslationBetaEnabled
+    && isFullTranslationOpen
     && activePaperId
     && fullTranslationOpenPaperId === activePaperId,
   )
-  const visibleNotificationToast = currentUser ? notificationToast : null
+  const visibleNotificationToast = currentUser && (
+    FULL_TRANSLATION_FEATURE_ENABLED || !isFullTranslationNotification(notificationToast)
+  ) ? notificationToast : null
+  const notificationHasItems = notificationItems.length > 0
+  const visibleTaskCenterPayload = buildVisibleTaskCenterPayload(taskCenterPayload)
+  const taskCenterSummary = visibleTaskCenterPayload.summary || normalizeTaskCenterSummary()
   const paperReaderState = {
     error,
     fileName,
@@ -1108,6 +1987,7 @@ function App() {
 
   function beginFullTranslationPolling(paperId) {
     clearFullTranslationPolling()
+    if (!FULL_TRANSLATION_FEATURE_ENABLED) return
     if (!paperId) return
     fullTranslationPollRef.current = window.setInterval(async () => {
       try {
@@ -1128,6 +2008,13 @@ function App() {
   useEffect(() => {
     let cancelled = false
     clearFullTranslationPolling()
+
+    if (!isFullTranslationBetaEnabled) {
+      setFullTranslation(null)
+      setFullTranslationStatus('idle')
+      setFullTranslationProgress(0)
+      return undefined
+    }
 
     if (!activePaperId) {
       return undefined
@@ -1154,7 +2041,7 @@ function App() {
       cancelled = true
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePaperId])
+  }, [activePaperId, isFullTranslationBetaEnabled])
 
   function snapshotAnnotations(items) {
     return (items || []).map((annotation) => ({
@@ -1346,16 +2233,15 @@ function App() {
   }
 
   function buildPaperChatContext() {
-    const fullTextContext = String(activePaperFullText || '').replace(/\s+/g, ' ').trim()
-    const summaryContext = fullTextContext
-      ? `论文全文前文摘录：${fullTextContext.slice(0, 3600)}`
-      : (activePaperSummary || '')
-    return {
-      paper_title: metadata.title || fileName || '',
-      summary: summaryContext,
-      selected_text: selectionCard.text || '',
-      provider_id: activeProviderId,
-    }
+    return buildPaperChatContextPayload({
+      fileName,
+      fullText: activePaperFullText,
+      metadata,
+      notebooks,
+      providerId: activeProviderId,
+      selectedText: selectionCard.text,
+      summary: activePaperSummary,
+    })
   }
 
   function buildRecentChatMessages(messages) {
@@ -1399,14 +2285,43 @@ function App() {
     })
   }
 
+  function handleWorkspacePanelSelect(nextPanel) {
+    preloadSideWorkspacePanel()
+    setActiveWorkspacePanel(nextPanel)
+  }
+
   async function handleDownloadOption(format) {
     const baseName = sanitizeDownloadName(metadata.title || fileName)
     const suffixMap = {
       pdf: 'pdf',
       word: 'docx',
+      'citation-md': 'md',
+      bibtex: 'bib',
     }
+    const hasExportableAnnotations = (annotations?.length || 0) > 0 || (inkAnnotations?.length || 0) > 0
     if (!activePaperId || Number.isNaN(activePaperId) || !suffixMap[format]) {
       window.alert('当前文献暂时没有可下载地址')
+      return
+    }
+    if (format === 'citation-md') {
+      triggerTextDownload(
+        [
+          `# ${metadata.title || fileName || '文献引用'}`,
+          '',
+          `- GB/T：${buildCitationText('cajcd', metadata, fileName)}`,
+          `- MLA：${buildCitationText('mla', metadata, fileName)}`,
+          `- 常规：${buildCitationText('default', metadata, fileName)}`,
+        ].join('\n'),
+        `${baseName}-citation.md`,
+      )
+      return
+    }
+    if (format === 'bibtex') {
+      triggerTextDownload(buildCitationText('bibtex', metadata, fileName), `${baseName}.bib`)
+      return
+    }
+    if (!currentUser?.features?.can_export_notes && (format === 'word' || (format === 'pdf' && hasExportableAnnotations))) {
+      openMembershipModal()
       return
     }
 
@@ -1426,7 +2341,15 @@ function App() {
     const force = Boolean(options?.force)
     if (!activePaperId) return
 
-    if (!force && hasCompleteFullTranslationCache(fullTranslation)) {
+    if (!isFullTranslationBetaEnabled) {
+      clearFullTranslationPolling()
+      setFullTranslation(null)
+      setFullTranslationStatus('idle')
+      setFullTranslationProgress(0)
+      return
+    }
+
+    if (!force && hasReadableFullTranslationCache(fullTranslation)) {
       openFullTranslationReader(activePaperId)
       return
     }
@@ -1456,6 +2379,20 @@ function App() {
       return
     }
 
+    const shouldRetry = force
+      || fullTranslationStatus === 'error'
+      || fullTranslationStatus === 'partial_failed'
+      || Number(fullTranslation?.pending_blocks_count || 0) > 0
+    const shouldPatchFailedBlocks = fullTranslationStatus === 'partial_failed' && hasReadableFullTranslationCache(fullTranslation)
+    const confirmMessage = shouldRetry
+      ? shouldPatchFailedBlocks
+        ? '将优先补译未完成的段落，已完成译文会保留。任务会在后台运行，可在任务中心查看进度。继续吗？'
+        : '将重新生成全文翻译 Beta。任务会在后台运行，可在任务中心查看进度；旧译文会被新的结果覆盖。继续吗？'
+      : '将启动全文翻译 Beta。当前版本会优先生成右侧重排译文，版式对照仅在解析质量足够时启用；任务可在任务中心查看和取消。继续吗？'
+    if (!window.confirm(confirmMessage)) {
+      return
+    }
+
     setFullTranslationBusy(true)
     try {
       const pages = await buildFullTranslationPages(pdfDocument, pageMetrics)
@@ -1469,7 +2406,6 @@ function App() {
         provider_id: activeProviderId || null,
         parse_mode: fullTranslationParseMode,
       }
-      const shouldRetry = force || fullTranslationStatus === 'error' || Number(fullTranslation?.pending_blocks_count || 0) > 0
       const request = shouldRetry ? retryFullTranslation : startFullTranslation
       const result = await request(activePaperId, payload)
       applyFullTranslationState(result)
@@ -1867,55 +2803,46 @@ function App() {
 
   async function handleSaveAllNotebooks(nextNotebooks) {
     if (!activePaperId) return null
-      const saved = await saveNotebooks(nextNotebooks || notebooks)
-      if (saved) {
-        const prepared = ensureInsertTarget(saved, activeNoteTarget)
-        setActiveNoteTarget(prepared.target)
-        scheduleReadingResourceRefresh(1200)
-      }
-      return saved
+    const saved = await saveNotebooks(nextNotebooks || notebooks)
+    if (saved) {
+      const prepared = ensureInsertTarget(saved, activeNoteTarget)
+      setActiveNoteTarget(prepared.target)
+      scheduleReadingResourceRefresh(1200)
     }
+    return saved
+  }
 
   function handleJumpToNoteAnchor(note) {
-    if (!note?.page_number || note.start_char == null || note.end_char == null) return
-    setCurrentPage(note.page_number)
-    setNoteFocus({
-      pageNumber: note.page_number,
-      startChar: note.start_char,
-      endChar: note.end_char,
-      nonce: createTransientId('note-focus'),
-    })
+    const focus = buildNoteAnchorFocus(note, createTransientId('note-focus'))
+    if (!focus) return
+    setCurrentPage(focus.pageNumber)
+    setNoteFocus(focus)
   }
 
   function handleJumpToSummaryEvidence(source) {
-    if (!source?.page && !source?.page_number) return
-    const pageNumber = Number(source.page || source.page_number)
-    if (!pageNumber) return
-    setCurrentPage(pageNumber)
-    setNoteFocus({
-      pageNumber,
-      startChar: source.start_char ?? source.startChar ?? null,
-      endChar: source.end_char ?? source.endChar ?? null,
-      quote: source.quote || source.quote_text || '',
-      nonce: createTransientId('summary-focus'),
-    })
+    const focus = buildNoteAnchorFocus(source, createTransientId('summary-focus'))
+    if (!focus) return
+    setCurrentPage(focus.pageNumber)
+    setNoteFocus(focus)
   }
 
-  function handleJumpToPreviewEvidence(source) {
+  async function handleJumpToPreviewEvidence(source) {
     if (!resourcePreview?.paperId) {
       handleJumpToSummaryEvidence(source)
       return
     }
-    openPaperResource(resourcePreview.paperId, { type: resourcePreview.resourceType || 'summary_review' })
+    const opened = await openPaperResource(resourcePreview.paperId, { type: resourcePreview.resourceType || 'summary_review' })
+    if (!opened) return
     closeResourcePreview()
     window.setTimeout(() => {
       handleJumpToSummaryEvidence(source)
     }, 80)
   }
 
-  function handleJumpToPaperEvidence(paperId, source) {
+  async function handleJumpToPaperEvidence(paperId, source) {
     if (!paperId) return
-    openPaperResource(paperId, { type: 'summary_review' })
+    const opened = await openPaperResource(paperId, { type: 'summary_review' })
+    if (!opened) return
     window.setTimeout(() => {
       handleJumpToSummaryEvidence(source)
     }, 80)
@@ -1947,7 +2874,7 @@ function App() {
 
   async function handleClearAnnotations() {
     if (!activePaperId || !annotations.length) return null
-    if (!window.confirm(`确定清空当前论文的 ${annotations.length} 条标注吗？此操作可通过撤销恢复一次。`)) return null
+    if (!window.confirm(`确定清空当前论文的 ${logicalAnnotationTotal} 条标注吗？此操作可通过撤销恢复一次。`)) return null
     const before = snapshotAnnotations(annotations)
     const result = await clearAnnotations()
     if (result) pushAnnotationUndo(activePaperId, before)
@@ -2033,15 +2960,22 @@ function App() {
     return result
   }
 
-  function handleClosePaper(paperId) {
+  async function handleClosePaper(paperId) {
+    if (String(paperId) === String(activePaperId)) {
+      const canClose = await ensureNotesSavedBeforeLeaving()
+      if (!canClose) return
+    }
     clearAnnotationUndo(paperId)
     closePaper(paperId)
   }
 
-  function handleLogout() {
+  async function handleLogout() {
+    const canLeave = await ensureNotesSavedBeforeLeaving()
+    if (!canLeave) return
     clearNotificationSummaryPolling()
     clearNotificationDrawerPolling()
     clearNotificationToastTimer()
+    clearRealtimeEventStream()
     clearStoredAuthToken()
     localStorage.removeItem('xk_read_recent')
     setAnnotationUndoStacks({})
@@ -2058,9 +2992,13 @@ function App() {
     setCurrentUser(null)
     setIsUserMenuOpen(false)
     setIsNotificationOpen(false)
-    setNotificationItems([])
-    setNotificationSummary(normalizeNotificationSummary())
+    updateNotificationItemsState([])
+    updateNotificationSummaryState(normalizeNotificationSummary())
     setNotificationToast(null)
+    setIsTaskCenterOpen(false)
+    updateTaskCenterPayloadState(normalizeTaskCenter())
+    setTaskCenterError('')
+    setTaskCenterActionBusyId('')
     setHomeInitialSection('recent')
     setSummaryInitialType('')
     setAccountSection('')
@@ -2069,7 +3007,44 @@ function App() {
     goHome()
   }
 
-  function openAccountSection(section) {
+  function clearUserMenuCloseTimer() {
+    if (userMenuCloseTimerRef.current) {
+      window.clearTimeout(userMenuCloseTimerRef.current)
+      userMenuCloseTimerRef.current = null
+    }
+  }
+
+  async function refreshCurrentUserSnapshot() {
+    if (!currentUser || userMenuRefreshInFlightRef.current) return
+    userMenuRefreshInFlightRef.current = true
+    try {
+      const nextUser = await fetchCurrentUser()
+      setCurrentUser(nextUser)
+    } catch {
+      // 用户菜单打开时的额度刷新失败不阻断当前交互。
+    } finally {
+      userMenuRefreshInFlightRef.current = false
+    }
+  }
+
+  function openUserMenu() {
+    clearUserMenuCloseTimer()
+    setIsUserMenuOpen(true)
+    void refreshCurrentUserSnapshot()
+  }
+
+  function scheduleUserMenuClose() {
+    clearUserMenuCloseTimer()
+    userMenuCloseTimerRef.current = window.setTimeout(() => {
+      setIsUserMenuOpen(false)
+      userMenuCloseTimerRef.current = null
+    }, 140)
+  }
+
+  async function openAccountSection(section) {
+    const canLeave = await ensureNotesSavedBeforeLeaving()
+    if (!canLeave) return
+    clearUserMenuCloseTimer()
     setAccountSection(section)
     setIsUserMenuOpen(false)
   }
@@ -2094,6 +3069,11 @@ function App() {
     return user
   }
 
+  async function handleDeleteAccount() {
+    await deleteCurrentUser()
+    handleLogout()
+  }
+
   function handleUiFontSizeChange(nextValue) {
     const normalizedValue = normalizeUiFontSize(nextValue)
     setUiFontSize(normalizedValue)
@@ -2107,13 +3087,23 @@ function App() {
     '--ui-topbar-scale': uiTopbarScale,
   }
   const shouldShowAuthView = !isSessionRestoring && isAuthViewOpen
+  const isHomeWorkspaceActive = !shouldShowAuthView && !isAccountView && isHomeView
+  const isReaderWorkspaceActive = !shouldShowAuthView && !isAccountView && isReaderView
+  const isAccountWorkspaceActive = !shouldShowAuthView && isAccountView
 
-  if (!shouldShowAuthView && currentUser?.is_admin) {
+if (!shouldShowAuthView && currentUser?.is_admin) {
     return (
       <div className="app-shell app-shell--account" style={appShellStyle}>
         <main className="workspace">
           <div className="workspace-view workspace-view--account is-active">
-            <AdminPage currentUser={currentUser} onBack={handleLogout} />
+            <Suspense fallback={<ViewFallback message="正在加载管理后台..." />}>
+              <AdminPage
+                key={accountSection || 'admin-overview'}
+                currentUser={currentUser}
+                initialSection={accountSection === 'admin-feedback' ? 'feedback' : 'overview'}
+                onBack={handleLogout}
+              />
+            </Suspense>
           </div>
         </main>
       </div>
@@ -2145,9 +3135,9 @@ function App() {
               <button
                 type="button"
                 className={`doc-tab doc-tab--home${isHomeView ? ' is-active' : ''}`}
-                onClick={() => {
-                  setAccountSection('')
-                  goHome()
+                onClick={async () => {
+                  const opened = await goHomeSafely()
+                  if (opened) setAccountSection('')
                 }}
               >
                 首页
@@ -2158,9 +3148,9 @@ function App() {
                   key={paper.id}
                   type="button"
                   className={`doc-tab${activeView === paper.id ? ' is-active' : ''}`}
-                  onClick={() => {
-                    setAccountSection('')
-                    switchToPaper(paper.id)
+                  onClick={async () => {
+                    const opened = await switchToPaperSafely(paper.id)
+                    if (opened) setAccountSection('')
                   }}
                 >
                   <span className="doc-tab__label">{paper.fileName.replace(/\.pdf$/i, '')}</span>
@@ -2169,13 +3159,13 @@ function App() {
                     className="doc-tab__close"
                     onClick={(event) => {
                       event.stopPropagation()
-                      handleClosePaper(paper.id)
+                      void handleClosePaper(paper.id)
                     }}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter' || event.key === ' ') {
                         event.preventDefault()
                         event.stopPropagation()
-                        handleClosePaper(paper.id)
+                        void handleClosePaper(paper.id)
                       }
                     }}
                     role="button"
@@ -2191,9 +3181,23 @@ function App() {
           <div className="topbar-meta">
             <button
               type="button"
+              className={`topbar-action topbar-action--vip${currentUser?.membership?.is_vip ? ' is-active' : ''}`}
+              onClick={openMembershipModal}
+              aria-label="打开 VIP 会员"
+            >
+              <span className="topbar-action__vip-icon" aria-hidden="true">
+                <Crown size={13} />
+              </span>
+              <span className="topbar-action__vip-copy">
+                <span className="topbar-action__label">VIP</span>
+              </span>
+            </button>
+            <button
+              type="button"
               className="topbar-action topbar-action--notification"
               onClick={() => setIsNotificationOpen(true)}
             >
+              <Bell size={14} />
               <span className="topbar-action__label">通知</span>
               {notificationSummary.unread_count > 0 ? (
                 <span className="topbar-action__badge">
@@ -2201,80 +3205,63 @@ function App() {
                 </span>
               ) : null}
             </button>
-            <button type="button" className="topbar-action">
-              客服
+            {currentUser ? (
+              <button
+                type="button"
+                className="topbar-action topbar-action--task"
+                onClick={() => {
+                  setIsTaskCenterOpen(true)
+                  void loadTaskCenter()
+                }}
+                aria-label="打开任务中心"
+              >
+                <ListChecks size={14} />
+                <span className="topbar-action__label">任务</span>
+                {taskCenterSummary.attention_count > 0 ? (
+                  <span className="topbar-action__badge">
+                    {taskCenterSummary.attention_count > 99 ? '99+' : taskCenterSummary.attention_count}
+                  </span>
+                ) : null}
+              </button>
+            ) : null}
+            <button type="button" className="topbar-action" onClick={openSupportCenter}>
+              公众号/客服
             </button>
 
             {currentUser ? (
-              <div
-                ref={userMenuRef}
-                className="topbar-user-wrap"
-                onMouseEnter={() => setIsUserMenuOpen(true)}
-              >
-                <button
-                  type="button"
-                  className="topbar-user"
-                  aria-expanded={isUserMenuOpen}
-                  onClick={() => setIsUserMenuOpen((value) => !value)}
-                >
-                  <span className="topbar-user__avatar">
-                    {currentUserAvatarSrc ? (
-                      <img src={currentUserAvatarSrc} alt={currentUser.nickname} />
-                    ) : (
-                      userInitials
-                    )}
-                  </span>
-                  <span className="topbar-user__name">{currentUser.nickname}</span>
-                </button>
-
-                {isUserMenuOpen ? (
-                  <div className="user-menu">
-                    <div className="user-menu__header">
-                      <div className="user-menu__avatar">
-                        {currentUserAvatarSrc ? (
-                          <img src={currentUserAvatarSrc} alt={currentUser.nickname} />
-                        ) : (
-                          userInitials
-                        )}
-                      </div>
-                      <div className="user-menu__identity">
-                        <strong>{currentUser.nickname}</strong>
-                        <div className="user-menu__uid-inline">
-                          <span>{`uid: ${currentUser.uid}`}</span>
-                          <button type="button" onClick={handleCopyUid} aria-label="复制 UID">
-                            <Copy />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="user-menu__actions">
-                      <button type="button" onClick={() => openAccountSection('profile')}>
-                        <UserRound />
-                        <span>个人中心</span>
-                      </button>
-                      <button type="button" onClick={() => openAccountSection('settings')}>
-                        <Settings2 />
-                        <span>系统设置</span>
-                      </button>
-                      <button type="button" onClick={() => openAccountSection('ai-config')}>
-                        <Brain />
-                        <span>AI 配置</span>
-                      </button>
-                      {isAdminUser ? (
-                        <button type="button" onClick={() => openAccountSection('admin')}>
-                          <Settings2 />
-                          <span>管理后台</span>
-                        </button>
-                      ) : null}
-                      <button type="button" className="is-danger" onClick={handleLogout}>
-                        <LogOut />
-                        <span>退出登录</span>
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
+              <UserHoverMenu
+                currentUser={currentUser}
+                currentUserAvatarSrc={currentUserAvatarSrc}
+                isAdminUser={isAdminUser}
+                isOpen={isUserMenuOpen}
+                menuRef={userMenuRef}
+                onOpen={openUserMenu}
+                onCloseSoon={scheduleUserMenuClose}
+                onToggle={() => {
+                  clearUserMenuCloseTimer()
+                  setIsUserMenuOpen((value) => {
+                    const nextValue = !value
+                    if (nextValue) {
+                      void refreshCurrentUserSnapshot()
+                    }
+                    return nextValue
+                  })
+                }}
+                onCopyUid={handleCopyUid}
+                onOpenMembership={() => {
+                  clearUserMenuCloseTimer()
+                  setIsUserMenuOpen(false)
+                  openMembershipModal()
+                }}
+                onOpenProfile={() => openAccountSection('profile')}
+                onOpenSettings={() => openAccountSection('settings')}
+                onOpenAiConfig={() => openAccountSection('ai-config')}
+                onOpenAdmin={() => openAccountSection('admin')}
+                onLogout={handleLogout}
+                notificationSummary={notificationSummary}
+                resourceStats={resourceOverview?.stats}
+                membershipPlans={membershipPlans}
+              />
             ) : (
               <button
                 type="button"
@@ -2295,71 +3282,80 @@ function App() {
       <main className="workspace">
         {shouldShowAuthView ? (
           <div className="workspace-view workspace-view--auth is-active">
-            <Login
-              key={authMode}
-              initialMode={authMode}
-              onAuthSuccess={(authPayload) => {
-                storeAuthToken(authPayload.access_token)
-                setCurrentUser(authPayload.user)
-                setIsAuthViewOpen(false)
-              }}
-            />
+            <Suspense fallback={<ViewFallback message="正在加载登录页..." />}>
+              <Login
+                key={authMode}
+                initialMode={authMode}
+                onAuthSuccess={(authPayload) => {
+                  storeAuthToken(authPayload.access_token)
+                  setCurrentUser(authPayload.user)
+                  setIsAuthViewOpen(false)
+                }}
+              />
+            </Suspense>
           </div>
         ) : null}
 
         <div
           className={`workspace-view workspace-view--home${
-            !shouldShowAuthView && !isAccountView && isHomeView ? ' is-active' : ' is-hidden'
+            isHomeWorkspaceActive ? ' is-active' : ' is-hidden'
           }`}
         >
-          <HomePage
-            currentUser={currentUser}
-            folders={folders}
-            importConflict={importConflict}
-            isImporting={isImporting}
-            onCancelImportConflict={cancelImportConflict}
-            onCreateFolder={createFolder}
-            onDeleteFolder={deleteFolder}
-            onDeletePaper={deletePaper}
-            onEmptyTrash={emptyTrash}
-            onMovePaper={assignPaperToFolder}
-            onOpenFilePicker={openFilePicker}
-            onOpenPaper={switchToPaper}
-            onJumpToPaperEvidence={handleJumpToPaperEvidence}
-            onOpenResource={openResourcePreview}
-            onPermanentlyDeletePaper={permanentlyDeletePaper}
-            onRefreshResources={refreshResourceOverview}
-            onRefreshTrash={refreshTrashPapers}
-            onRestorePaper={restorePaperFromTrash}
-            onSaveResourceLayout={handleSaveResourceLayout}
-            onRenameFolder={renameFolder}
-            onResolveImportConflict={resolveImportConflict}
-            recentPapers={recentPapers}
-            readingDashboard={visibleReadingDashboard}
-            insightTimeframe={insightTimeframe}
-            onInsightTimeframeChange={setInsightTimeframe}
-            recentReadings={recentReadings}
-            readingStats={readingStats}
-            resourceOverview={visibleResourceOverview}
-            trashPapers={trashPapers}
-            uiFontScale={uiFontScale}
-            uncategorizedFolderId={uncategorizedFolderId}
-            initialSection={homeInitialSection}
-            onRequestLogin={() => {
-              setAuthMode('login')
-              setIsAuthViewOpen(true)
-            }}
-          />
+          <Suspense fallback={<ViewFallback message="正在加载首页..." />}>
+            <HomePage
+              currentUser={currentUser}
+              folders={folders}
+              importConflict={importConflict}
+              importStatus={importStatus}
+              isImporting={isImporting}
+              onCancelImportConflict={cancelImportConflict}
+              onCreateFolder={createFolder}
+              onDeleteFolder={deleteFolder}
+              onDeletePaper={deletePaper}
+              onEmptyTrash={emptyTrash}
+              onMovePaper={assignPaperToFolder}
+              onOpenFilePicker={openFilePicker}
+              onOpenPaper={switchToPaperSafely}
+              onJumpToPaperEvidence={handleJumpToPaperEvidence}
+              onOpenResource={openResourcePreview}
+              onPermanentlyDeletePaper={permanentlyDeletePaper}
+              onRefreshPaperMetadata={refreshPaperMetadata}
+              onRefreshResources={refreshResourceOverview}
+              onRefreshTrash={refreshTrashPapers}
+              onRestorePaper={restorePaperFromTrash}
+              onSaveResourceLayout={handleSaveResourceLayout}
+              onRenameFolder={renameFolder}
+              onResolveImportConflict={resolveImportConflict}
+              onRetryImportConflict={retryImportConflict}
+              recentPapers={recentPapers}
+              readingDashboard={visibleReadingDashboard}
+              insightTimeframe={insightTimeframe}
+              onInsightTimeframeChange={setInsightTimeframe}
+              recentReadings={recentReadings}
+              readingStats={readingStats}
+              resourceOverview={visibleResourceOverview}
+              trashPapers={trashPapers}
+              uiFontScale={uiFontScale}
+              uncategorizedFolderId={uncategorizedFolderId}
+              initialSection={homeInitialSection}
+              onRequestLogin={() => {
+                setAuthMode('login')
+                setIsAuthViewOpen(true)
+              }}
+            />
+          </Suspense>
         </div>
 
         <div
           className={`workspace-view workspace-view--reader${
-            !shouldShowAuthView && !isAccountView && isReaderView ? ' is-active' : ' is-hidden'
+            isReaderWorkspaceActive ? ' is-active' : ' is-hidden'
           }`}
           ref={readerLayoutRef}
         >
-          {isCurrentPaperFullTranslationOpen ? (
-            <FullTranslationReader
+          {isReaderWorkspaceActive ? (
+            <Suspense fallback={<ViewFallback message="正在加载阅读器..." />}>
+              {isCurrentPaperFullTranslationOpen ? (
+                <FullTranslationReader
               paperId={activePaperId}
               fileName={fileName}
               metadata={metadata}
@@ -2370,12 +3366,12 @@ function App() {
               parseMode={fullTranslationParseMode}
               uiFontScale={uiFontScale}
               onParseModeChange={setFullTranslationParseMode}
-              onRegenerate={() => handleFullTranslate({ force: true })}
-              onBack={closeFullTranslationReader}
-            />
-          ) : (
-            <>
-              <PaperReader
+                  onRegenerate={() => handleFullTranslate({ force: true })}
+                  onBack={closeFullTranslationReader}
+                />
+              ) : (
+                <>
+                  <PaperReader
                 key={`paper-reader:${activePaperId || 'none'}`}
                 pdfReader={paperReaderState}
                 readerRef={readerRef}
@@ -2427,7 +3423,8 @@ function App() {
                 onScreenshotAskAI={handleAskAIText}
                 onScreenshotInsertNote={handleInsertScreenshotNote}
                 onDownload={handleDownloadOption}
-                fullTranslateActive={hasCompleteFullTranslationCache(fullTranslation)}
+                fullTranslateVisible={isFullTranslationBetaEnabled}
+                fullTranslateActive={hasReadableFullTranslationCache(fullTranslation)}
               fullTranslateStatus={fullTranslationBusy ? 'running' : fullTranslationStatus}
               fullTranslateProgress={fullTranslationProgress}
               fullTranslateParseMode={fullTranslationParseMode}
@@ -2460,99 +3457,123 @@ function App() {
                 />
               ) : null}
 
-              <SideWorkspacePanel
-                activePanel={activeWorkspacePanel}
-                paperId={activePaperId}
-                fileName={fileName}
-                metadata={metadata}
-                annotations={annotations}
-                activePaperFullText={activePaperFullText}
-                providerId={activeProviderId}
-                currentUser={currentUser}
-                width={workspacePanel.width}
-                notebooks={notebooks}
-                notesLoading={notesLoading}
-                notesSaving={notesSaving}
-                activeNoteTarget={activeNoteTarget}
-                onCreateNotebook={handleCreateNotebook}
-                onDraftChange={setNotebooks}
-                onSaveNotebooks={handleSaveAllNotebooks}
-                onSetActiveNoteTarget={setActiveNoteTarget}
-                onJumpToNote={handleJumpToNoteAnchor}
-                onJumpToEvidence={handleJumpToSummaryEvidence}
-                onClearAnnotations={handleClearAnnotations}
-                chatMessages={activeChatMessages}
-                chatInput={activeChatInput}
-                chatAsking={activeChatAsking}
-                chatInitialSuggestions={activeInitialSuggestions}
-                chatInitialSuggestionsLoading={activeInitialSuggestionsLoading}
-                chatFollowupLoadingMessageId={activeFollowupLoadingMessageId}
-                uiFontScale={uiFontScale}
-                onChatInputChange={function (value) {
-                  setChatInput(function (previous) {
-                    return {
-                      ...previous,
-                      [activeView]: value,
-                    }
-                  })
-                }}
-                onChatSubmit={handleChatSubmit}
-                onRefreshInitialSuggestions={function () { fetchInitialSuggestions(true) }}
-                onInsertSummaryNote={handleInsertSummaryNote}
-                initialSummaryId={summaryInitialType}
-              />
+              {activeWorkspacePanel ? (
+                <Suspense fallback={<WorkspacePanelFallback width={workspacePanel.width} uiFontScale={uiFontScale} />}>
+                  <SideWorkspacePanel
+                    activePanel={activeWorkspacePanel}
+                    paperId={activePaperId}
+                    fileName={fileName}
+                    metadata={metadata}
+                    onSaveMetadata={savePaperMetadata}
+                    onRefreshMetadata={refreshPaperMetadata}
+                    annotations={annotations}
+                    activePaperFullText={activePaperFullText}
+                    providerId={activeProviderId}
+                    currentUser={currentUser}
+                    width={workspacePanel.width}
+                    notebooks={notebooks}
+                    notesLoading={notesLoading}
+                    notesSaving={notesSaving}
+                    notesSaveStatus={notesSaveStatus}
+                    notesSaveError={notesSaveError}
+                    hasUnsavedNotes={hasUnsavedNotes}
+                    onRetrySaveNotebooks={retrySaveNotebooks}
+                    activeNoteTarget={activeNoteTarget}
+                    onCreateNotebook={handleCreateNotebook}
+                    onDraftChange={setNotebooks}
+                    onSaveNotebooks={handleSaveAllNotebooks}
+                    onSetActiveNoteTarget={setActiveNoteTarget}
+                    onJumpToNote={handleJumpToNoteAnchor}
+                    onRequireVip={openMembershipModal}
+                    onJumpToEvidence={handleJumpToSummaryEvidence}
+                    onClearAnnotations={handleClearAnnotations}
+                    chatMessages={activeChatMessages}
+                    chatInput={activeChatInput}
+                    chatAsking={activeChatAsking}
+                    chatInitialSuggestions={activeInitialSuggestions}
+                    chatInitialSuggestionsLoading={activeInitialSuggestionsLoading}
+                    chatFollowupLoadingMessageId={activeFollowupLoadingMessageId}
+                    uiFontScale={uiFontScale}
+                    onChatInputChange={function (value) {
+                      setChatInput(function (previous) {
+                        return {
+                          ...previous,
+                          [activeView]: value,
+                        }
+                      })
+                    }}
+                    onChatSubmit={handleChatSubmit}
+                    onRefreshInitialSuggestions={function () { fetchInitialSuggestions(true) }}
+                    onInsertSummaryNote={handleInsertSummaryNote}
+                    initialSummaryId={summaryInitialType}
+                  />
+                </Suspense>
+              ) : null}
 
               <UtilityRail
                 activeItem={activeWorkspacePanel}
                 collapsed={isUtilityRailCollapsed}
-                onSelect={setActiveWorkspacePanel}
+                onSelect={handleWorkspacePanelSelect}
+                onItemIntent={preloadSideWorkspacePanel}
                 onToggleCollapsed={() => setIsUtilityRailCollapsed((value) => !value)}
               />
-            </>
-          )}
+                </>
+              )}
+            </Suspense>
+          ) : null}
         </div>
 
         <div
           className={`workspace-view workspace-view--account${
-            !shouldShowAuthView && isAccountView ? ' is-active' : ' is-hidden'
+            isAccountWorkspaceActive ? ' is-active' : ' is-hidden'
           }`}
         >
-          {accountSection === 'admin' ? (
-            <AdminPage currentUser={currentUser} onBack={() => setAccountSection('')} />
-          ) : accountSection === 'ai-config' ? (
-            <AiConfigPage onBack={() => setAccountSection('')} />
-          ) : (
-            <UserCenterPage
-            key={[
-              accountSection || 'profile',
-              currentUser?.uid || 'guest',
-              currentUser?.nickname || '',
-              currentUser?.education || '',
-              currentUser?.occupation || '',
-              currentUser?.organization || '',
-              currentUser?.discipline || '',
-              currentUser?.avatar_url || '',
-            ].join(':')}
-            activeSection={accountSection || 'profile'}
-            currentUser={currentUser}
-            onBack={() => setAccountSection('')}
-            onSaveProfile={handleSaveProfile}
-            onSectionChange={setAccountSection}
-            uiFontSize={uiFontSize}
-            onUiFontSizeChange={handleUiFontSizeChange}
-            onUploadAvatar={handleUploadAvatar}
-          />
-          )}
+          {isAccountWorkspaceActive ? (
+            <Suspense fallback={<ViewFallback message="正在加载账户页面..." />}>
+              {accountSection === 'admin' ? (
+                <AdminPage currentUser={currentUser} onBack={() => setAccountSection('')} />
+              ) : accountSection === 'ai-config' ? (
+                <AiConfigPage onBack={() => setAccountSection('')} />
+              ) : (
+                <UserCenterPage
+                  key={[
+                    accountSection || 'profile',
+                    currentUser?.uid || 'guest',
+                    currentUser?.nickname || '',
+                    currentUser?.education || '',
+                    currentUser?.occupation || '',
+                    currentUser?.organization || '',
+                    currentUser?.discipline || '',
+                    currentUser?.avatar_url || '',
+                  ].join(':')}
+                  activeSection={accountSection || 'profile'}
+                  currentUser={currentUser}
+                  onBack={() => setAccountSection('')}
+                  onSaveProfile={handleSaveProfile}
+                  onSectionChange={setAccountSection}
+                  uiFontSize={uiFontSize}
+                  onUiFontSizeChange={handleUiFontSizeChange}
+                  onUploadAvatar={handleUploadAvatar}
+                  onOpenMembership={openMembershipModal}
+                  onDeleteAccount={handleDeleteAccount}
+                />
+              )}
+            </Suspense>
+          ) : null}
         </div>
       </main>
 
       {resourcePreview ? (
-        <ResourcePreviewModal
-          preview={resourcePreview}
-          uiFontScale={uiFontScale}
-          onClose={closeResourcePreview}
-          onJumpToEvidence={handleJumpToPreviewEvidence}
-        />
+        <Suspense fallback={<ViewFallback message="正在加载资源预览..." />}>
+          <ResourcePreviewModal
+            preview={resourcePreview}
+            currentUser={currentUser}
+            uiFontScale={uiFontScale}
+            onClose={closeResourcePreview}
+            onJumpToEvidence={handleJumpToPreviewEvidence}
+            onRequireVip={openMembershipModal}
+          />
+        </Suspense>
       ) : null}
 
       <Sheet open={isNotificationOpen} onOpenChange={setIsNotificationOpen}>
@@ -2574,18 +3595,52 @@ function App() {
                 <strong>{notificationSummary.unread_count}</strong>
               </div>
               <div className="notification-sheet__actions">
-                <button type="button" className="notification-sheet__read-all" onClick={handleReadAllNotifications}>
-                  全部已读
+                <button
+                  type="button"
+                  className="notification-sheet__read-all"
+                  onClick={handleReadAllNotifications}
+                  disabled={Boolean(notificationActionBusy) || notificationSummary.unread_count <= 0}
+                >
+                  {notificationActionBusy === 'read-all' ? '处理中' : '全部已读'}
                 </button>
-                <button type="button" className="notification-sheet__clear-all" onClick={handleClearAllNotifications}>
-                  清空全部
+                <button
+                  type="button"
+                  className="notification-sheet__clear-all"
+                  onClick={handleClearAllNotifications}
+                  disabled={Boolean(notificationActionBusy) || notificationItems.length <= 0}
+                >
+                  {notificationActionBusy === 'clear-all' ? '清理中' : '清空全部'}
                 </button>
               </div>
             </div>
           </SheetHeader>
 
-          <div className="notification-sheet__body">
-            {notificationLoading ? (
+          <div className="notification-sheet__body" aria-busy={notificationLoading}>
+            {notificationError && notificationHasItems ? (
+              <div className="notification-sheet__notice is-error">
+                <span>{notificationError}</span>
+                <button type="button" onClick={() => void loadNotificationList()}>
+                  重试
+                </button>
+              </div>
+            ) : null}
+            {notificationLoading && notificationHasItems ? (
+              <div className="notification-sheet__notice">
+                <span>正在同步最新通知...</span>
+              </div>
+            ) : null}
+            {notificationError && !notificationHasItems ? (
+              <div className="notification-sheet__empty is-error">
+                <div className="notification-sheet__empty-icon" aria-hidden="true">
+                  <X size={18} />
+                </div>
+                <strong>通知加载失败</strong>
+                <span>{notificationError}</span>
+                <button type="button" className="notification-sheet__retry" onClick={() => void loadNotificationList()}>
+                  重新加载
+                </button>
+              </div>
+            ) : notificationLoading && !notificationHasItems ? (
               <div className="notification-sheet__empty">
                 <div className="notification-sheet__empty-icon" aria-hidden="true">
                   <Sparkles size={18} />
@@ -2616,7 +3671,9 @@ function App() {
                       type="button"
                       className="notification-item__delete"
                       onClick={() => void handleDeleteNotification(item.id)}
+                      disabled={Boolean(notificationActionBusy)}
                       aria-label="删除通知"
+                      title="删除通知"
                     >
                       <Trash2 size={14} />
                     </button>
@@ -2635,6 +3692,21 @@ function App() {
           </div>
         </SheetContent>
       </Sheet>
+
+      <TaskCenterSheet
+        open={isTaskCenterOpen}
+        onOpenChange={setIsTaskCenterOpen}
+        payload={visibleTaskCenterPayload}
+        loading={taskCenterLoading}
+        error={taskCenterError}
+        actionBusyId={taskCenterActionBusyId}
+        onRefresh={() => void loadTaskCenter()}
+        onClearCompletedTasks={handleClearCompletedTasks}
+        onDeleteTask={handleDeleteTaskCenterItem}
+        onOpenTask={handleTaskCenterOpen}
+        onCancelTask={(item) => void handleTaskCenterAction(item, 'cancel')}
+        onRetryTask={(item) => void handleTaskCenterAction(item, 'retry')}
+      />
 
       {visibleNotificationToast ? (
         <button type="button" className="notification-toast" onClick={() => handleNotificationOpen(visibleNotificationToast)}>
@@ -2668,6 +3740,27 @@ function App() {
           </span>
         </button>
       ) : null}
+
+      <MembershipModal
+        open={isMembershipModalOpen}
+        plans={membershipPlans}
+        currentUser={currentUser}
+        onClose={closeMembershipModal}
+        onRequireLogin={() => {
+          closeMembershipModal()
+          setAuthMode('login')
+          setIsAuthViewOpen(true)
+        }}
+        onRedeemed={async () => {
+          closeMembershipModal()
+          try {
+            const nextUser = await fetchCurrentUser()
+            setCurrentUser(nextUser)
+          } catch {
+            void 0
+          }
+        }}
+      />
     </div>
   )
 }

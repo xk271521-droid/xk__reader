@@ -1,25 +1,6 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
-import * as echarts from 'echarts/core'
-import { LineChart, BarChart, PieChart } from 'echarts/charts'
-import {
-  GridComponent,
-  TooltipComponent,
-  LegendComponent,
-  GraphicComponent,
-} from 'echarts/components'
-import { CanvasRenderer } from 'echarts/renderers'
-
-echarts.use([
-  LineChart,
-  BarChart,
-  PieChart,
-  GridComponent,
-  TooltipComponent,
-  LegendComponent,
-  GraphicComponent,
-  CanvasRenderer,
-])
+import { loadEcharts } from './echartsClient'
 
 const LOADING_OPTIONS = {
   text: '正在点亮图表',
@@ -38,28 +19,43 @@ export function EChartPanel({
 }) {
   const hostRef = useRef(null)
   const chartRef = useRef(null)
+  const [chartReadyVersion, setChartReadyVersion] = useState(0)
 
   useEffect(() => {
     if (!hostRef.current) return undefined
-    const chart = echarts.init(hostRef.current, null, {
-      renderer: 'canvas',
-      useDirtyRect: true,
-    })
-    chartRef.current = chart
+    let disposed = false
+    let resizeObserver = null
 
-    const resizeObserver = new ResizeObserver(() => {
-      chart.resize({
-        animation: {
-          duration: 180,
-          easing: 'cubicOut',
-        },
+    loadEcharts()
+      .then((echarts) => {
+        if (disposed || !hostRef.current) return
+        const chart = echarts.init(hostRef.current, null, {
+          renderer: 'canvas',
+          useDirtyRect: true,
+        })
+        chartRef.current = chart
+
+        resizeObserver = new ResizeObserver(() => {
+          chart.resize({
+            animation: {
+              duration: 180,
+              easing: 'cubicOut',
+            },
+          })
+        })
+        resizeObserver.observe(hostRef.current)
+        setChartReadyVersion((version) => version + 1)
       })
-    })
-    resizeObserver.observe(hostRef.current)
+      .catch((error) => {
+        if (!disposed) {
+          console.error('Failed to load ECharts', error)
+        }
+      })
 
     return () => {
-      resizeObserver.disconnect()
-      chart.dispose()
+      disposed = true
+      resizeObserver?.disconnect()
+      chartRef.current?.dispose()
       chartRef.current = null
     }
   }, [])
@@ -72,7 +68,7 @@ export function EChartPanel({
       lazyUpdate: true,
       replaceMerge: ['series'],
     })
-  }, [option])
+  }, [option, chartReadyVersion])
 
   useEffect(() => {
     const chart = chartRef.current
@@ -83,7 +79,7 @@ export function EChartPanel({
     } else {
       chart.hideLoading()
     }
-  }, [loading])
+  }, [loading, chartReadyVersion])
 
   useEffect(() => {
     const chart = chartRef.current
@@ -102,7 +98,7 @@ export function EChartPanel({
       if (onMouseOver) chart.off('mouseover', overHandler)
       if (onGlobalOut) chart.off('globalout', outHandler)
     }
-  }, [onClick, onMouseOver, onGlobalOut])
+  }, [onClick, onMouseOver, onGlobalOut, chartReadyVersion])
 
   return <div ref={hostRef} className={cn('home-echart-panel', className)} />
 }

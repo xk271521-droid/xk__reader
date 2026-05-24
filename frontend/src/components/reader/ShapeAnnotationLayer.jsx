@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp, MapPin, Pencil, Trash2 } from 'lucide-react'
 import {
   DEFAULT_SHAPE_OPTIONS,
@@ -242,6 +242,7 @@ export function ShapeAnnotationLayer({
   const items = previewShape ? [...annotations, previewShape] : annotations
   const editorStyle = textEditor?.style || DEFAULT_SHAPE_OPTIONS
   const textEditorRef = useRef(null)
+  const [textEditorDraft, setTextEditorDraft] = useState(textEditor?.content || '')
   const editingAnnotation = useMemo(
     () => (textEditor?.annotationId != null
       ? annotations.find((annotation) => annotation.id === textEditor.annotationId) || null
@@ -249,6 +250,18 @@ export function ShapeAnnotationLayer({
     [annotations, textEditor?.annotationId],
   )
   const editingCollapsed = isTextAnnotationCollapsed(editingAnnotation)
+
+  useEffect(() => {
+    setTextEditorDraft(textEditor?.content || '')
+  }, [
+    textEditor?.annotationId,
+    textEditor?.content,
+    textEditor?.height,
+    textEditor?.pageNumber,
+    textEditor?.width,
+    textEditor?.x,
+    textEditor?.y,
+  ])
 
   useEffect(() => {
     const element = textEditorRef.current
@@ -323,10 +336,14 @@ export function ShapeAnnotationLayer({
               color: editorStyle.color || DEFAULT_SHAPE_OPTIONS.color,
               fontSize: `${editorStyle.fontSize || DEFAULT_SHAPE_OPTIONS.fontSize}px`,
             }}
-            value={textEditor.content}
+            value={textEditorDraft}
             placeholder="输入标注内容"
             onPointerDown={(event) => event.stopPropagation()}
-            onChange={(event) => onTextEditorChange?.(event.target.value)}
+            onChange={(event) => {
+              const nextValue = event.target.value
+              setTextEditorDraft(nextValue)
+              onTextEditorChange?.(nextValue)
+            }}
             onBlur={(event) => onTextEditorCommit?.(event.target.value)}
             onKeyDown={(event) => {
               if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {

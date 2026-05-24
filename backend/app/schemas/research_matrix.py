@@ -18,6 +18,10 @@ class ResearchMatrixGenerateMissingRequest(BaseModel):
     provider_id: int | None = Field(default=None, ge=1)
 
 
+class ResearchMatrixRetryPaperRequest(BaseModel):
+    provider_id: int | None = Field(default=None, ge=1)
+
+
 class ResearchMatrixRefreshRequest(BaseModel):
     title: str = Field(default="", max_length=160)
     provider_id: int | None = Field(default=None, ge=1)

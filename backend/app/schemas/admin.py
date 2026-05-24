@@ -3,6 +3,12 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.auth import EMAIL_PATTERN, PHONE_PATTERN
+from app.schemas.membership import (
+    AdminRedeemCodeItem,
+    MembershipFeatures,
+    MembershipInfo,
+    MembershipQuotaUsage,
+)
 
 
 class AdminOverviewStats(BaseModel):
@@ -25,9 +31,9 @@ class AdminOverviewTrendPoint(BaseModel):
 
 class AdminOverviewResponse(BaseModel):
     stats: AdminOverviewStats
-    activity_trend: list[AdminOverviewTrendPoint] = []
-    recent_users: list["AdminUserSummary"] = []
-    recent_papers: list["AdminPaperSummary"] = []
+    activity_trend: list[AdminOverviewTrendPoint] = Field(default_factory=list)
+    recent_users: list["AdminUserSummary"] = Field(default_factory=list)
+    recent_papers: list["AdminPaperSummary"] = Field(default_factory=list)
 
 
 class AdminUserSummary(BaseModel):
@@ -52,6 +58,10 @@ class AdminUserSummary(BaseModel):
     latest_reading_at: str | None = None
     created_at: str | None = None
     last_login_at: str | None = None
+    membership: MembershipInfo
+    usage: dict[str, MembershipQuotaUsage] = Field(default_factory=dict)
+    features: MembershipFeatures
+    redeemed_code: AdminRedeemCodeItem | None = None
 
 
 class AdminUserListResponse(BaseModel):
@@ -129,3 +139,41 @@ class AdminPaperSummary(BaseModel):
 
 class AdminPaperListResponse(BaseModel):
     papers: list[AdminPaperSummary]
+
+
+class AdminFeedbackSummary(BaseModel):
+    id: int
+    user_id: int
+    uid: str
+    nickname: str
+    phone: str
+    category: str
+    title: str
+    content: str
+    contact: str | None = None
+    screenshot_url: str | None = None
+    status: str
+    admin_note: str = ""
+    created_at: str | None = None
+    updated_at: str | None = None
+    resolved_at: str | None = None
+
+
+class AdminFeedbackListResponse(BaseModel):
+    items: list[AdminFeedbackSummary]
+    page: int = 1
+    page_size: int = 12
+    total: int = 0
+    total_pages: int = 1
+
+
+class AdminFeedbackUpdateRequest(BaseModel):
+    status: str | None = Field(default=None, pattern="^(open|in_progress|resolved|closed)$")
+    admin_note: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("admin_note")
+    @classmethod
+    def strip_admin_note(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip()

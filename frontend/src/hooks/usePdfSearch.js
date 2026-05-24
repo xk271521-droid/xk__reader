@@ -59,6 +59,7 @@ export function usePdfSearch(readerRef, { pdfDocument = null, pageNumbers = [] }
   const [searchTerm, setSearchTerm] = useState('')
   const [matches, setMatches] = useState([])
   const [matchIndex, setMatchIndex] = useState(-1)
+  const hasSearchTerm = searchTerm.trim().length > 0
 
   const getSearchIndexes = useCallback(() => {
     return pageIndexesRef.current.length ? pageIndexesRef.current : renderedPageIndexesRef.current
@@ -130,7 +131,7 @@ export function usePdfSearch(readerRef, { pdfDocument = null, pageNumbers = [] }
       ? pageNumbersKey.split(',').map((value) => Number(value)).filter((value) => !Number.isNaN(value))
       : []
 
-    if (!pdfDocument || !stablePageNumbers.length) {
+    if (!pdfDocument || !stablePageNumbers.length || !hasSearchTerm) {
       return () => {
         cancelled = true
         window.clearTimeout(resetTimer)
@@ -167,7 +168,7 @@ export function usePdfSearch(readerRef, { pdfDocument = null, pageNumbers = [] }
       cancelled = true
       window.clearTimeout(resetTimer)
     }
-  }, [pageNumbersKey, pdfDocument, resetMatchesState, runSearch])
+  }, [hasSearchTerm, pageNumbersKey, pdfDocument, resetMatchesState, runSearch])
 
   const goToMatch = useCallback((idx) => {
     if (idx < 0 || idx >= matchesRef.current.length) return

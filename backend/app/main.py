@@ -4,14 +4,14 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import OperationalError
 
 from app.api.router import api_router
 from app.api.routes.research_matrix import resume_stale_matrix_runs
 from app.core.config import settings
-from app.db.session import Base, engine
-from app.models import Annotation, Folder, InkAnnotation, Notification, Paper, PaperFullTranslation, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, ResearchMatrixRun, ResearchMatrixRunPaper, User, UserAgreement, UserProfile, VerificationCode  # noqa: F401
+from app.db.session import Base, SessionLocal, engine
+from app.models import AiProvider, Annotation, FeedbackTicket, Folder, InkAnnotation, MembershipRedeemCode, Notification, Paper, PaperFullTranslation, PaperLiteratureCache, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, ResearchMatrixRun, ResearchMatrixRunPaper, TaskCenterArchive, UsageCounter, User, UserAgreement, UserMembership, UserProfile, VerificationCode  # noqa: F401
 
 
 def _ensure_system_providers() -> None:
@@ -125,6 +125,93 @@ def _ensure_paper_trash_columns() -> None:
             connection.execute(text("ALTER TABLE papers ADD COLUMN deleted_at DATETIME NULL"))
         if "deleted_original_folder_id" not in columns:
             connection.execute(text("ALTER TABLE papers ADD COLUMN deleted_original_folder_id INTEGER NULL"))
+
+
+def _ensure_paper_arxiv_column() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("papers")}
+    except Exception:
+        return
+
+    if "arxiv_id" in columns:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE papers ADD COLUMN arxiv_id VARCHAR(80) NULL"))
+
+
+def _ensure_literature_cache_table() -> None:
+    inspector = inspect(engine)
+    try:
+        table_names = set(inspector.get_table_names())
+    except Exception:
+        return
+
+    if "paper_literature_caches" in table_names:
+        return
+
+    PaperLiteratureCache.__table__.create(bind=engine, checkfirst=True)
+
+
+def _ensure_notification_indexes() -> None:
+    inspector = inspect(engine)
+    try:
+        index_names = {index["name"] for index in inspector.get_indexes("notifications")}
+    except Exception:
+        return
+
+    if "ix_notifications_user_read" in index_names:
+        return
+
+    with engine.begin() as connection:
+        try:
+            connection.execute(text("CREATE INDEX ix_notifications_user_read ON notifications (user_id, read_at)"))
+        except OperationalError as exc:
+            original = getattr(exc, "orig", None)
+            error_code = original.args[0] if original is not None and getattr(original, "args", None) else None
+            if error_code == 1061 or "duplicate key name" in str(original or exc).lower():
+                return
+            raise
+
+
+def _create_index_if_missing(table_name: str, index_name: str, create_sql: str) -> None:
+    inspector = inspect(engine)
+    try:
+        index_names = {index["name"] for index in inspector.get_indexes(table_name)}
+    except Exception:
+        return
+
+    if index_name in index_names:
+        return
+
+    with engine.begin() as connection:
+        try:
+            connection.execute(text(create_sql))
+        except OperationalError as exc:
+            original = getattr(exc, "orig", None)
+            error_code = original.args[0] if original is not None and getattr(original, "args", None) else None
+            if error_code == 1061 or "duplicate key name" in str(original or exc).lower():
+                return
+            raise
+
+
+def _ensure_task_center_indexes() -> None:
+    _create_index_if_missing(
+        "paper_summaries",
+        "ix_paper_summaries_user_status_updated",
+        "CREATE INDEX ix_paper_summaries_user_status_updated ON paper_summaries (user_id, status, updated_at)",
+    )
+    _create_index_if_missing(
+        "research_matrix_runs",
+        "ix_research_matrix_runs_user_status_updated",
+        "CREATE INDEX ix_research_matrix_runs_user_status_updated ON research_matrix_runs (user_id, status, updated_at)",
+    )
+    _create_index_if_missing(
+        "paper_full_translations",
+        "ix_paper_full_translations_status_updated",
+        "CREATE INDEX ix_paper_full_translations_status_updated ON paper_full_translations (status, updated_at)",
+    )
 
 
 def _ensure_research_matrix_columns() -> None:
@@ -263,6 +350,31 @@ def _ensure_user_token_version_column() -> None:
             )
 
 
+def _ensure_feedback_ticket_table() -> None:
+    inspector = inspect(engine)
+    try:
+        table_names = set(inspector.get_table_names())
+    except Exception:
+        return
+
+    if "feedback_tickets" in table_names:
+        return
+
+    FeedbackTicket.__table__.create(bind=engine, checkfirst=True)
+
+
+def _ensure_feedback_ticket_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("feedback_tickets")}
+    except Exception:
+        return
+
+    with engine.begin() as connection:
+        if "screenshot_url" not in columns:
+            connection.execute(text("ALTER TABLE feedback_tickets ADD COLUMN screenshot_url VARCHAR(500) NULL"))
+
+
 def _is_retryable_startup_ddl_error(exc: OperationalError) -> bool:
     original = getattr(exc, "orig", None)
     error_code = None
@@ -287,11 +399,17 @@ def _run_startup_schema_sync() -> None:
             _ensure_annotation_geometry_version_column()
             _ensure_full_translation_parse_columns()
             _ensure_paper_trash_columns()
+            _ensure_paper_arxiv_column()
+            _ensure_literature_cache_table()
+            _ensure_notification_indexes()
+            _ensure_task_center_indexes()
             _ensure_research_matrix_columns()
             _ensure_reading_record_duration_column()
             _ensure_user_email_nullable()
             _ensure_user_admin_column()
             _ensure_user_token_version_column()
+            _ensure_feedback_ticket_table()
+            _ensure_feedback_ticket_columns()
             return
         except OperationalError as exc:
             if attempt == attempts or not _is_retryable_startup_ddl_error(exc):
@@ -328,6 +446,13 @@ def create_app() -> FastAPI:
         if settings.startup_schema_sync_enabled:
             _run_startup_schema_sync()
         resume_stale_matrix_runs()
+        from app.services.task_monitor import normalize_stale_tasks
+
+        db = SessionLocal()
+        try:
+            normalize_stale_tasks(db)
+        finally:
+            db.close()
 
     return application
 

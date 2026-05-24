@@ -1,6 +1,7 @@
 import { PageThumbnails } from './PageThumbnails'
 import { PdfToolbar } from './PdfToolbar'
 import { PdfViewport } from './PdfViewport'
+import 'pdfjs-dist/web/pdf_viewer.css'
 
 export function PaperReader({
   pdfReader,
@@ -49,6 +50,7 @@ export function PaperReader({
   onScreenshotAskAI,
   onScreenshotInsertNote,
   onDownload,
+  fullTranslateVisible,
   fullTranslateActive,
   fullTranslateStatus,
   fullTranslateProgress,
@@ -84,6 +86,7 @@ export function PaperReader({
         canUndo={canUndoAnnotation}
         onUndo={onUndoAnnotation}
         onDownload={onDownload}
+        fullTranslateVisible={fullTranslateVisible}
         fullTranslateActive={fullTranslateActive}
         fullTranslateStatus={fullTranslateStatus}
         fullTranslateProgress={fullTranslateProgress}

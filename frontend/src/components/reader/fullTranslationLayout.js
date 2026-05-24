@@ -124,20 +124,92 @@ function mergeTextItemsToLines(items, pageWidth, pageHeight) {
     })
 }
 
+function median(values) {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b)
+  if (!sorted.length) return 0
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
+function detectColumnLayout(lines, pageWidth, pageHeight) {
+  const bodyLines = (lines || []).filter((line) => {
+    const width = Math.max(0, line.right - line.x)
+    const center = (line.x + line.right) / 2
+    return line.text.length >= 8
+      && line.y > pageHeight * 0.12
+      && line.y < pageHeight * 0.9
+      && width < pageWidth * 0.62
+      && center > pageWidth * 0.08
+      && center < pageWidth * 0.92
+  })
+  const midpoint = pageWidth / 2
+  const left = bodyLines.filter((line) => (line.x + line.right) / 2 < midpoint)
+  const right = bodyLines.filter((line) => (line.x + line.right) / 2 >= midpoint)
+  const larger = Math.max(left.length, right.length)
+  const smaller = Math.min(left.length, right.length)
+  if (left.length < 5 || right.length < 5 || smaller / Math.max(1, larger) < 0.35) {
+    return { columnCount: 1, midpoint }
+  }
+
+  const leftRight = median(left.map((line) => line.right))
+  const rightLeft = median(right.map((line) => line.x))
+  const gutter = rightLeft - leftRight
+  if (gutter < pageWidth * 0.035) {
+    return { columnCount: 1, midpoint }
+  }
+  return { columnCount: 2, midpoint: (leftRight + rightLeft) / 2, gutter }
+}
+
+function getLineColumn(line, layout, pageWidth) {
+  if (layout.columnCount !== 2) return 'full'
+  const width = Math.max(0, line.right - line.x)
+  const spansPage = width > pageWidth * 0.68 || (line.x < pageWidth * 0.18 && line.right > pageWidth * 0.82)
+  if (spansPage) return 'full'
+  return (line.x + line.right) / 2 < layout.midpoint ? 'left' : 'right'
+}
+
+function orderLinesForReading(lines, pageWidth, pageHeight) {
+  const layout = detectColumnLayout(lines, pageWidth, pageHeight)
+  const withColumns = (lines || []).filter(Boolean).map((line) => ({
+    ...line,
+    column: getLineColumn(line, layout, pageWidth),
+  }))
+  const byPosition = (a, b) => (Math.abs(a.y - b.y) > 3 ? a.y - b.y : a.x - b.x)
+  if (layout.columnCount !== 2) {
+    return {
+      lines: withColumns.sort(byPosition),
+      layout: { column_count: 1 },
+    }
+  }
+
+  const columnLines = withColumns.filter((line) => line.column !== 'full')
+  const firstColumnY = Math.min(...columnLines.map((line) => line.y))
+  const fullTop = withColumns.filter((line) => line.column === 'full' && line.y < firstColumnY).sort(byPosition)
+  const left = columnLines.filter((line) => line.column === 'left').sort(byPosition)
+  const right = columnLines.filter((line) => line.column === 'right').sort(byPosition)
+  const fullRest = withColumns.filter((line) => line.column === 'full' && line.y >= firstColumnY).sort(byPosition)
+  return {
+    lines: [...fullTop, ...left, ...right, ...fullRest],
+    layout: { column_count: 2, midpoint: layout.midpoint, gutter: layout.gutter },
+  }
+}
+
 function mergeLinesToBlocks(lines, pageNumber, pageWidth, pageHeight) {
-  const sorted = lines
+  const ordered = orderLinesForReading(lines, pageWidth, pageHeight)
+  const sorted = ordered.lines
     .filter(Boolean)
-    .sort((a, b) => (Math.abs(a.y - b.y) > 3 ? a.y - b.y : a.x - b.x))
   const blocks = []
 
   for (const line of sorted) {
     const last = blocks[blocks.length - 1]
     const lineHeight = Math.max(10, line.bottom - line.y)
+    const columnOk = last && (last.column || 'full') === (line.column || 'full')
     const paragraphIndentOk = last && Math.abs(line.x - last.x) < Math.max(46, lineHeight * 3.2)
     const lineSpacingOk = last && line.y - last.bottom < Math.max(18, lineHeight * 1.8)
     const fontOk = last && Math.abs(line.fontSize - last.fontSize) < 2.5
     const previousLooksOpen = last && (!/[.!?。！？]$/.test(last.text.trim()) || line.x >= last.x - Math.max(12, lineHeight))
     const canMerge = last
+      && columnOk
       && paragraphIndentOk
       && lineSpacingOk
       && fontOk
@@ -158,11 +230,12 @@ function mergeLinesToBlocks(lines, pageNumber, pageWidth, pageHeight) {
         right: line.right,
         bottom: line.bottom,
         fontSize: line.fontSize,
+        column: line.column || 'full',
       })
     }
   }
 
-  return blocks.map((block, index) => {
+  const resultBlocks = blocks.map((block, index) => {
     const text = normalizeText(block.text)
     const kind = getBlockKind(text, block.fontSize, pageHeight, block.y)
     return {
@@ -179,9 +252,11 @@ function mergeLinesToBlocks(lines, pageNumber, pageWidth, pageHeight) {
       font_size: block.fontSize,
       font_weight: kind === 'title' || kind === 'heading' ? 700 : 400,
       align: 'left',
+      column: block.column || 'full',
       skip_translate: shouldSkipTranslate(text, kind),
     }
   })
+  return { blocks: resultBlocks, layout: ordered.layout }
 }
 
 export function hashTranslationPages(pages) {
@@ -189,10 +264,12 @@ export function hashTranslationPages(pages) {
     page_number: page.page_number,
     width: Math.round(page.width),
     height: Math.round(page.height),
+    layout: page.layout || {},
     blocks: page.blocks.map((block) => ({
       id: block.id,
       text: block.source_text,
       bbox: block.bbox.map((value) => Math.round(value * 100) / 100),
+      column: block.column || 'full',
       skip: block.skip_translate,
     })),
   })))
@@ -216,12 +293,14 @@ export async function buildFullTranslationPages(pdfDocument, pageMetrics) {
     const height = pageMetrics?.[pageNumber - 1]?.height || viewport.height
     const textContent = await page.getTextContent()
     const lines = mergeTextItemsToLines(textContent.items, width, height)
+    const pageLayout = mergeLinesToBlocks(lines, pageNumber, width, height)
 
     pages.push({
       page_number: pageNumber,
       width,
       height,
-      blocks: mergeLinesToBlocks(lines, pageNumber, width, height),
+      layout: pageLayout.layout,
+      blocks: pageLayout.blocks,
     })
   }
 

@@ -14,7 +14,7 @@ from fastapi import HTTPException, status
 from app.core.config import settings
 
 
-AUTH_SCENES = {"login", "register"}
+AUTH_SCENES = {"login", "register", "reset"}
 CAPTCHA_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 

@@ -3,6 +3,10 @@ import { getStoredAuthToken } from '../services/authApi'
 
 const SHAPE_BASE = '/api/papers'
 
+function createTempShapeId() {
+  return `temp-shape-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
 async function apiFetch(url, options = {}) {
   const token = getStoredAuthToken()
   const headers = { ...options.headers }
@@ -57,6 +61,22 @@ export function useShapeAnnotations(paperId) {
     sortOrder = 0,
   }) => {
     if (!paperId) return null
+    const tempId = createTempShapeId()
+    const optimisticAnnotation = {
+      id: tempId,
+      page_number: pageNumber,
+      type,
+      x,
+      y,
+      width,
+      height,
+      content,
+      style,
+      extra,
+      sort_order: sortOrder,
+      is_pending: true,
+    }
+    setShapeAnnotations((prev) => [...prev, optimisticAnnotation])
 
     try {
       const data = await apiFetch(`${SHAPE_BASE}/${paperId}/shape-annotations`, {
@@ -75,9 +95,14 @@ export function useShapeAnnotations(paperId) {
           sort_order: sortOrder,
         }),
       })
-      if (data) setShapeAnnotations((prev) => [...prev, data])
+      if (data) {
+        setShapeAnnotations((prev) => prev.map((item) => item.id === tempId ? data : item))
+      } else {
+        setShapeAnnotations((prev) => prev.filter((item) => item.id !== tempId))
+      }
       return data
     } catch {
+      setShapeAnnotations((prev) => prev.filter((item) => item.id !== tempId))
       return null
     }
   }, [paperId])

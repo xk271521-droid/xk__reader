@@ -484,9 +484,8 @@ function CaptchaPanel({
   onBlur,
 }) {
   return (
-    <div className="auth-form__field">
-      <label htmlFor="captcha-code">验证码</label>
-      <div className="auth-captcha">
+    <div className="auth-form__field auth-form__field--captcha">
+      <div className="auth-captcha auth-captcha--inline">
         <button
           type="button"
           className="auth-captcha__image"
@@ -497,14 +496,14 @@ function CaptchaPanel({
           {captcha?.image_data_url ? (
             <img src={captcha.image_data_url} alt="图形验证码" />
           ) : (
-            <span>加载中...</span>
+            <span>{isLoading ? '加载中...' : '加载失败，点击重试'}</span>
           )}
         </button>
         <div className="auth-captcha__controls">
           <input
             id="captcha-code"
             type="text"
-            placeholder="请输入图形验证码"
+            placeholder="图形验证码"
             autoComplete="off"
             inputMode="text"
             maxLength={8}
@@ -516,12 +515,13 @@ function CaptchaPanel({
           />
           <button
             type="button"
-            className="auth-captcha__refresh"
+            className="auth-captcha__refresh auth-captcha__refresh--icon"
             onClick={onRefresh}
             disabled={isLoading}
+            aria-label="换一张"
+            title="换一张"
           >
             <RefreshCw />
-            <span>换一张</span>
           </button>
         </div>
       </div>
@@ -544,11 +544,7 @@ function VerificationCodeField({
 }) {
   return (
     <div className={`auth-form__field ${className}`.trim()}>
-      <label htmlFor={id}>
-        {label}
-        {required ? ' *' : ''}
-      </label>
-      <div className="auth-captcha__controls">
+      <div className="auth-captcha__controls auth-captcha__controls--inline">
         <input
           id={id}
           type="text"
@@ -557,12 +553,12 @@ function VerificationCodeField({
           placeholder={placeholder}
           value={value}
           onChange={(event) => onChange(event.target.value.replace(/\D/g, '').slice(0, 6))}
-          className="auth-input"
+          className="auth-input auth-input--inline-action"
           disabled={disabled}
         />
         <button
           type="button"
-          className="auth-captcha__refresh"
+          className="auth-captcha__refresh auth-captcha__refresh--inline"
           onClick={onSend}
           disabled={disabled || sending || cooldown > 0}
         >
@@ -1136,8 +1132,24 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
           </div>
 
           <div className="auth-card__header">
-            <h1>{current.title}</h1>
-            <p>{current.description}</p>
+            <h1>{mode === 'login' ? '登录' : loginStep === 'reset' ? '忘记密码' : '注册'}</h1>
+            <div className="auth-card__switch">
+              {mode === 'login' ? (
+                <>
+                  <span>没有账户?</span>
+                  <button type="button" className="text-link text-link--accent" onClick={() => resetForMode('signup')}>
+                    免费注册
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span>已有账户?</span>
+                  <button type="button" className="text-link text-link--accent" onClick={() => resetForMode('login')}>
+                    去登录
+                  </button>
+                </>
+              )}
+            </div>
           </div>
 
           {mode === 'signup' ? (
@@ -1155,11 +1167,10 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
             {mode === 'login' ? (
               <>
                 <div className="auth-form__field">
-                  <label htmlFor="account">手机号或邮箱</label>
                   <input
                     id="account"
                     type="text"
-                    placeholder="请输入手机号或邮箱"
+                    placeholder="手机号/邮箱"
                     autoComplete="username"
                     value={form.account}
                     onChange={(event) => updateField('account', event.target.value)}
@@ -1171,12 +1182,11 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
 
                 {loginStep === 'login' ? (
                   <div className="auth-form__field">
-                    <label htmlFor="login-password">密码</label>
                     <div className="auth-input-wrap">
                       <input
                         id="login-password"
                         type={showPassword ? 'text' : 'password'}
-                        placeholder="请输入密码"
+                        placeholder="密码"
                         autoComplete="current-password"
                         value={form.password}
                         onChange={(event) => updateField('password', event.target.value)}
@@ -1198,7 +1208,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                     <VerificationCodeField
                       id="reset-code"
                       label="重置验证码"
-                      placeholder="请输入 6 位重置验证码"
+                      placeholder="输入 6 位重置验证码"
                       value={form.resetVerificationCode}
                       onChange={(value) => updateField('resetVerificationCode', value)}
                       onSend={handleSendResetCode}
@@ -1208,12 +1218,11 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                     />
 
                     <div className="auth-form__field">
-                      <label htmlFor="reset-password">新密码</label>
                       <div className="auth-input-wrap">
                         <input
                           id="reset-password"
                           type={showPassword ? 'text' : 'password'}
-                          placeholder="请输入新密码"
+                          placeholder="新密码"
                           autoComplete="new-password"
                           value={form.password}
                           onChange={(event) => updateField('password', event.target.value)}
@@ -1232,12 +1241,11 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                     </div>
 
                     <div className="auth-form__field">
-                      <label htmlFor="reset-confirm-password">确认新密码</label>
                       <div className="auth-input-wrap">
                         <input
                           id="reset-confirm-password"
                           type={showConfirmPassword ? 'text' : 'password'}
-                          placeholder="请再次输入新密码"
+                          placeholder="确认新密码"
                           autoComplete="new-password"
                           value={form.confirmPassword}
                           onChange={(event) => updateField('confirmPassword', event.target.value)}
@@ -1270,11 +1278,10 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
             ) : signupStep === 1 ? (
               <>
                 <div className="auth-form__field">
-                  <label htmlFor="signup-phone">手机号</label>
                   <input
                     id="signup-phone"
                     type="tel"
-                    placeholder="请输入手机号"
+                    placeholder="手机号"
                     autoComplete="tel"
                     value={form.phone}
                     onChange={(event) => updateField('phone', event.target.value)}
@@ -1288,7 +1295,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                   className="auth-form__field--paired"
                   id="signup-phone-code"
                   label="短信验证码"
-                  placeholder="请输入 6 位短信验证码"
+                  placeholder="输入 6 位短信验证码"
                   value={form.phoneVerificationCode}
                   onChange={(value) => updateField('phoneVerificationCode', value)}
                   onSend={() => openSendCodeModal('sms')}
@@ -1298,40 +1305,49 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                 />
 
                 <div className="auth-form__field">
-                  <label htmlFor="signup-email">邮箱</label>
                   <input
                     id="signup-email"
                     type="email"
-                    placeholder="可选，填写后需验证"
+                    placeholder="邮箱（选填）"
                     autoComplete="email"
                     value={form.email}
-                    onChange={(event) => updateField('email', event.target.value)}
+                    onChange={(event) => {
+                      const nextEmail = event.target.value
+                      setForm((currentForm) => ({
+                        ...currentForm,
+                        email: nextEmail,
+                        emailVerificationCode: nextEmail.trim() ? currentForm.emailVerificationCode : '',
+                      }))
+                      if (!nextEmail.trim()) {
+                        setEmailCodeCooldown(0)
+                      }
+                    }}
                     onFocus={() => handleFieldFocus('account')}
                     onBlur={handleFieldBlur}
                     className="auth-input"
                   />
                 </div>
 
-                <VerificationCodeField
-                  className="auth-form__field--paired"
-                  id="signup-email-code"
-                  label="邮箱验证码"
-                  placeholder={form.email.trim() ? '请输入 6 位邮箱验证码' : '填写邮箱后可发送'}
-                  value={form.emailVerificationCode}
-                  onChange={(value) => updateField('emailVerificationCode', value)}
-                  onSend={() => openSendCodeModal('email')}
-                  sending={isSendingEmailCode}
-                  cooldown={emailCodeCooldown}
-                  disabled={!form.email.trim()}
-                />
+                {form.email.trim() ? (
+                  <VerificationCodeField
+                    className="auth-form__field--paired"
+                    id="signup-email-code"
+                    label="邮箱验证码"
+                    placeholder="输入 6 位邮箱验证码"
+                    value={form.emailVerificationCode}
+                    onChange={(value) => updateField('emailVerificationCode', value)}
+                    onSend={() => openSendCodeModal('email')}
+                    sending={isSendingEmailCode}
+                    cooldown={emailCodeCooldown}
+                  />
+                ) : null}
 
                 <div className="auth-form__field">
-                  <label htmlFor="signup-password">密码</label>
                   <div className="auth-input-wrap">
                     <input
                       id="signup-password"
                       type={showPassword ? 'text' : 'password'}
-                      placeholder="至少 8 位"
+                      placeholder="密码"
                       autoComplete="new-password"
                       value={form.password}
                       onChange={(event) => updateField('password', event.target.value)}
@@ -1350,12 +1366,11 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                 </div>
 
                 <div className="auth-form__field">
-                  <label htmlFor="signup-confirm-password">确认密码</label>
                   <div className="auth-input-wrap">
                     <input
                       id="signup-confirm-password"
                       type={showConfirmPassword ? 'text' : 'password'}
-                      placeholder="请再次输入密码"
+                      placeholder="确认密码"
                       autoComplete="new-password"
                       value={form.confirmPassword}
                       onChange={(event) => updateField('confirmPassword', event.target.value)}
@@ -1376,11 +1391,10 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
             ) : (
               <>
                 <div className="auth-form__field">
-                  <label htmlFor="nickname">昵称</label>
                   <input
                     id="nickname"
                     type="text"
-                    placeholder="请输入昵称"
+                    placeholder="昵称"
                     autoComplete="nickname"
                     value={form.nickname}
                     onChange={(event) => updateField('nickname', event.target.value)}
@@ -1427,11 +1441,10 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                 </div>
 
                 <div className="auth-form__field">
-                  <label htmlFor="organization">学校/单位</label>
                   <input
                     id="organization"
                     type="text"
-                    placeholder="请输入学校或单位"
+                    placeholder="学校/单位"
                     autoComplete="organization"
                     value={form.organization}
                     onChange={(event) => updateField('organization', event.target.value)}
@@ -1488,7 +1501,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                       await loadCaptcha('reset')
                     }}
                   >
-                    忘记密码？
+                    忘记密码
                   </button>
                 ) : (
                   <button
@@ -1546,16 +1559,6 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
             </div>
           </form>
 
-          <div className="auth-card__footer">
-            {current.footerPrefix}{' '}
-            <button
-              type="button"
-              className="text-link text-link--strong"
-              onClick={() => resetForMode(mode === 'login' ? 'signup' : 'login')}
-            >
-              {current.footerAction}
-            </button>
-          </div>
         </div>
       </div>
     </div>

@@ -55,6 +55,7 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
   const selectionTimerRef = useRef(null)
   const [selectionCard, setSelectionCard] = useState(createInitialSelectionState)
   const [aiEnabled, setAiEnabled] = useState(true)
+  const aiEnabledRef = useRef(true)
   const summaryRef = useRef(paperSummary)
   const providerRef = useRef(null)
   const explRef = useRef('')
@@ -62,6 +63,10 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
   useEffect(() => {
     summaryRef.current = paperSummary
   }, [paperSummary])
+
+  useEffect(() => {
+    aiEnabledRef.current = aiEnabled
+  }, [aiEnabled])
 
   useEffect(() => {
     let cancelled = false
@@ -167,7 +172,7 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
         textKind: data.text_kind || current.textKind,
       }))
 
-      if (aiEnabled && providerId && wordCount >= 5) {
+      if (aiEnabledRef.current && providerId && wordCount >= 5) {
         setSelectionCard((current) => ({ ...current, explaining: true, explanation: '' }))
         explRef.current = ''
         try {
@@ -252,8 +257,11 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
   function toggleAI() {
     setAiEnabled((previous) => {
       if (previous) {
+        aiEnabledRef.current = false
         activeRequestRef.current += 1
         setSelectionCard((current) => ({ ...current, explaining: false, explanation: '' }))
+      } else {
+        aiEnabledRef.current = true
       }
       return !previous
     })

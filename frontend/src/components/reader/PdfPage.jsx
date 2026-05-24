@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
+import { getStoredAuthToken } from '../../services/authApi'
 import { loadPdfJs } from '../../services/pdfjsClient'
 import { InkOverlay } from './InkOverlay'
 import { ShapeAnnotationLayer } from './ShapeAnnotationLayer'
@@ -12,6 +13,44 @@ function getErrorMessage(error) {
   if (!error) return '未知错误'
   if (typeof error === 'string') return error
   return error.message || error.name || '未知错误'
+}
+
+function canvasHasVisibleContent(canvas) {
+  if (!canvas?.width || !canvas?.height) return true
+  let context = null
+  try {
+    context = canvas.getContext('2d')
+    if (!context) return true
+  } catch {
+    return true
+  }
+
+  let data = null
+  try {
+    data = context.getImageData(0, 0, canvas.width, canvas.height).data
+  } catch {
+    return true
+  }
+
+  const pixelCount = data.length / 4
+  const stride = Math.max(1, Math.floor(pixelCount / 12000))
+
+  for (let pixel = 0; pixel < pixelCount; pixel += stride) {
+    const index = pixel * 4
+    const alpha = data[index + 3]
+    if (alpha < 8) continue
+
+    if (data[index] < 245 || data[index + 1] < 245 || data[index + 2] < 245) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function buildAuthHeaders() {
+  const token = getStoredAuthToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
 function toRgba(color, alpha) {
@@ -278,6 +317,7 @@ function arePageMetricsEqual(left, right) {
 
 function arePdfPagePropsEqual(previousProps, nextProps) {
   if (previousProps.pageNumber !== nextProps.pageNumber) return false
+  if (previousProps.paperId !== nextProps.paperId) return false
   if (previousProps.pdfDocument !== nextProps.pdfDocument) return false
   if (previousProps.scale !== nextProps.scale) return false
   if (previousProps.shouldRender !== nextProps.shouldRender) return false
@@ -339,6 +379,7 @@ function PdfPageComponent({
   onPageIndexReady,
   pageMetric,
   pageNumber,
+  paperId = null,
   pdfDocument,
   scale,
   shouldRender,
@@ -347,7 +388,16 @@ function PdfPageComponent({
   const highlightCanvasRef = useRef(null)
   const pageFrameRef = useRef(null)
   const textLayerRef = useRef(null)
+  const onPageIndexReadyRef = useRef(onPageIndexReady)
   const [renderError, setRenderError] = useState('')
+  const [fallbackImageUrl, setFallbackImageUrl] = useState('')
+  const [fallbackError, setFallbackError] = useState('')
+  const [useImageFallback, setUseImageFallback] = useState(false)
+  const [useTextFallback, setUseTextFallback] = useState(false)
+
+  useEffect(() => {
+    onPageIndexReadyRef.current = onPageIndexReady
+  }, [onPageIndexReady])
 
   useEffect(() => {
     if (!pageFrameRef.current || !pageMetric) {
@@ -387,6 +437,9 @@ function PdfPageComponent({
 
     async function renderPage() {
       setRenderError('')
+      setFallbackError('')
+      setUseImageFallback(false)
+      setUseTextFallback(false)
       const page = await pdfDocument.getPage(pageNumber)
 
       if (isCancelled) {
@@ -444,6 +497,18 @@ function PdfPageComponent({
         textContentCache.set(key, textContent)
       }
 
+      const pageText = textContent.items
+        ?.map((item) => item.str || '')
+        .join('')
+        .trim()
+
+      if (!canvasHasVisibleContent(canvas)) {
+        setUseImageFallback(true)
+        if (pageText) {
+          setUseTextFallback(true)
+        }
+      }
+
       if (isCancelled || !textLayerRef.current) {
         return
       }
@@ -464,10 +529,11 @@ function PdfPageComponent({
       }
 
       currentPageFrame.__lineRects = collectLineRects(textLayerRef.current)
-      onPageIndexReady?.(
+      onPageIndexReadyRef.current?.(
         pageNumber,
         buildRenderedPageIndex({
           pageNumber,
+          canvasElement: canvas,
           textDivs: textLayer.textDivs,
           textStrings: textLayer.textContentItemsStr,
           textLayerElement: textLayerRef.current,
@@ -481,6 +547,7 @@ function PdfPageComponent({
       if (!isCancelled) {
         console.error(`PDF page ${pageNumber} render failed`, renderError)
         setRenderError(getErrorMessage(renderError))
+        setUseImageFallback(true)
       }
     })
 
@@ -492,19 +559,95 @@ function PdfPageComponent({
         currentPageFrame.__lineRects = []
       }
     }
-  }, [onPageIndexReady, pageMetric, pageNumber, pdfDocument, scale, shouldRender])
+  }, [pageMetric, pageNumber, pdfDocument, scale, shouldRender])
+
+  useEffect(() => {
+    if (!useImageFallback || !paperId || !shouldRender) {
+      setFallbackImageUrl((currentUrl) => {
+        if (currentUrl) URL.revokeObjectURL(currentUrl)
+        return ''
+      })
+      return undefined
+    }
+
+    let isCancelled = false
+    let objectUrl = ''
+
+    async function loadFallbackImage() {
+      setFallbackError('')
+      const response = await fetch(
+        `/api/papers/${encodeURIComponent(paperId)}/pages/${encodeURIComponent(pageNumber)}/image?scale=2`,
+        { headers: buildAuthHeaders() },
+      )
+
+      if (!response.ok) {
+        let detail = '页面图片加载失败'
+        try {
+          const payload = await response.json()
+          if (typeof payload?.detail === 'string') detail = payload.detail
+        } catch {
+          // Keep the generic fallback message when the response is not JSON.
+        }
+        throw new Error(detail)
+      }
+
+      const blob = await response.blob()
+      objectUrl = URL.createObjectURL(blob)
+      if (!isCancelled) {
+        setFallbackImageUrl((currentUrl) => {
+          if (currentUrl) URL.revokeObjectURL(currentUrl)
+          return objectUrl
+        })
+        objectUrl = ''
+      }
+    }
+
+    loadFallbackImage().catch((error) => {
+      if (!isCancelled) {
+        setFallbackError(getErrorMessage(error))
+      }
+    })
+
+    return () => {
+      isCancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [pageNumber, paperId, shouldRender, useImageFallback])
 
   const selectionRects = currentSelection?.rects
+  const pageFrameClassName = [
+    'pdf-page-frame',
+    fallbackImageUrl ? 'pdf-page-frame--image-fallback' : '',
+    useTextFallback && !fallbackImageUrl ? 'pdf-page-frame--text-fallback' : '',
+  ].filter(Boolean).join(' ')
 
   return (
-    <div className="pdf-page-frame" data-page-number={pageNumber} ref={pageFrameRef}>
+    <div className={pageFrameClassName} data-page-number={pageNumber} ref={pageFrameRef}>
       {shouldRender ? (
         <>
           <canvas className="pdf-highlight-canvas" ref={highlightCanvasRef} aria-hidden="true" />
           <canvas className="pdf-page-canvas" ref={canvasRef} />
+          {fallbackImageUrl ? (
+            <img
+              alt={`第 ${pageNumber} 页`}
+              className="pdf-page-fallback-image"
+              draggable="false"
+              src={fallbackImageUrl}
+            />
+          ) : null}
           {renderError ? (
             <div className="pdf-page-render-error">
               第 {pageNumber} 页渲染失败：{renderError}
+            </div>
+          ) : null}
+          {fallbackError ? (
+            <div className="pdf-page-render-error">
+              第 {pageNumber} 页图片兜底失败：{fallbackError}
+            </div>
+          ) : null}
+          {useTextFallback ? (
+            <div className="pdf-page-render-notice">
+              第 {pageNumber} 页已切换兜底显示
             </div>
           ) : null}
           <div className="textLayer" ref={textLayerRef} />

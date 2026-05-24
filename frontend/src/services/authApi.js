@@ -10,11 +10,18 @@ async function parseJsonResponse(response) {
   }
 
   if (!response.ok) {
-    const detail =
-      typeof payload?.detail === 'string'
-        ? payload.detail
-        : '请求失败，请稍后再试。'
-    throw new Error(detail)
+    const detail = payload?.detail
+    const message =
+      typeof detail === 'string'
+        ? detail
+        : typeof detail?.message === 'string'
+          ? detail.message
+          : 'Request failed. Please try again later.'
+    const error = new Error(message)
+    error.detail = detail
+    error.code = detail?.code || null
+    error.status = response.status
+    throw error
   }
 
   return payload
@@ -140,6 +147,17 @@ export async function uploadAvatar(file, token = getStoredAuthToken()) {
       ...buildAuthHeaders(token),
     },
     body: formData,
+  })
+
+  return parseJsonResponse(response)
+}
+
+export async function deleteCurrentUser(token = getStoredAuthToken()) {
+  const response = await fetch('/api/auth/me', {
+    method: 'DELETE',
+    headers: {
+      ...buildAuthHeaders(token),
+    },
   })
 
   return parseJsonResponse(response)

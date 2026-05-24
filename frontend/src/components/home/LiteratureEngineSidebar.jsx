@@ -1,20 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ChevronDown } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { getLiteratureEngineById, groupLiteratureEngines } from '@/data/literatureSearchEngines'
-
-function EngineBadge({ engine }) {
-  return (
-    <Badge
-      variant="outline"
-      className="literature-panel-badge literature-panel-badge--engine"
-      style={{ '--engine-color': engine.color }}
-    >
-      {engine.shortName}
-    </Badge>
-  )
-}
 
 function getAccessLabel(accessType) {
   if (accessType === 'free') return '开放'
@@ -41,7 +28,6 @@ export function LiteratureEngineSidebar({ activeEngineId, onSelect }) {
       <div className="literature-sidebar__intro">
         <span className="literature-sidebar__eyebrow">Literature Search</span>
         <h2>按资源类型切换学术站点</h2>
-        <p>左侧按资源类型组织站点，右侧只展示当前选中站点的详细介绍和入口。</p>
       </div>
 
       <ScrollArea className="literature-sidebar__scroll">
@@ -53,6 +39,7 @@ export function LiteratureEngineSidebar({ activeEngineId, onSelect }) {
                 <button
                   type="button"
                   className={`literature-group__header${isOpen ? ' is-open' : ''}`}
+                  aria-expanded={isOpen}
                   onClick={() => {
                     setOpenGroups((current) => ({
                       ...current,
@@ -78,15 +65,12 @@ export function LiteratureEngineSidebar({ activeEngineId, onSelect }) {
                           className={`literature-engine-item${isActive ? ' is-active' : ''}`}
                           onClick={() => onSelect(engine.id)}
                         >
-                          <div className="literature-engine-item__badge-wrap">
-                            <EngineBadge engine={engine} />
-                          </div>
                           <div className="literature-engine-item__copy">
                             <div className="literature-engine-item__topline">
                               <strong>{engine.name}</strong>
-                              <Badge variant="outline" className="literature-access-badge">
+                              <span className="literature-engine-item__access">
                                 {getAccessLabel(engine.accessType)}
-                              </Badge>
+                              </span>
                             </div>
                             <span title={engine.coverage}>{engine.coverage}</span>
                           </div>
