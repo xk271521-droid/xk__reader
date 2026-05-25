@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
 import {
   fetchCaptchaChallenge,
@@ -22,6 +22,10 @@ const DISCIPLINE_OPTIONS = [
   '信息与通信工程',
   '其他',
 ]
+
+function isDesktopShell() {
+  return typeof window !== 'undefined' && Boolean(window.paperDesktop)
+}
 
 const copy = {
   login: {
@@ -101,15 +105,31 @@ function AnimatedCharacters({
   const [mouseY, setMouseY] = useState(0)
   const [isPurpleBlinking, setIsPurpleBlinking] = useState(false)
   const [isBlackBlinking, setIsBlackBlinking] = useState(false)
+  const animationFrameRef = useRef(0)
+  const lastMouseRef = useRef({ x: 0, y: 0 })
 
   useEffect(() => {
     const handleMouseMove = (event) => {
-      setMouseX(event.clientX)
-      setMouseY(event.clientY)
+      lastMouseRef.current = { x: event.clientX, y: event.clientY }
+
+      if (animationFrameRef.current) {
+        return
+      }
+
+      animationFrameRef.current = window.requestAnimationFrame(() => {
+        animationFrameRef.current = 0
+        setMouseX(lastMouseRef.current.x)
+        setMouseY(lastMouseRef.current.y)
+      })
     }
 
     window.addEventListener('mousemove', handleMouseMove)
-    return () => window.removeEventListener('mousemove', handleMouseMove)
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove)
+      if (animationFrameRef.current) {
+        window.cancelAnimationFrame(animationFrameRef.current)
+      }
+    }
   }, [])
 
   useEffect(() => {
@@ -665,6 +685,7 @@ function isValidEmail(value) {
 }
 
 function Login({ initialMode = 'login', onAuthSuccess }) {
+  const isDesktop = isDesktopShell()
   const [mode, setMode] = useState(initialMode)
   const [signupStep, setSignupStep] = useState(1)
   const [loginStep, setLoginStep] = useState('login')
@@ -715,6 +736,18 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
     setActivePasswordField('')
     setIsTyping(false)
   }
+
+  useEffect(() => {
+    if (!isDesktop || mode !== 'login' || loginStep !== 'login') {
+      return undefined
+    }
+
+    const focusTimer = window.setTimeout(() => {
+      document.getElementById('account')?.focus()
+    }, 0)
+
+    return () => window.clearTimeout(focusTimer)
+  }, [isDesktop, loginStep, mode])
 
   function resetForMode(nextMode) {
     setMode(nextMode)
@@ -1111,9 +1144,11 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
           </div>
 
           <div className="scene-panel__footer">
-            <a href={SOURCE_CODE_URL} target="_blank" rel="noreferrer" title={SOURCE_CODE_TITLE}>
-              {SOURCE_CODE_LABEL}
-            </a>
+            {!isDesktop ? (
+              <a href={SOURCE_CODE_URL} target="_blank" rel="noreferrer" title={SOURCE_CODE_TITLE}>
+                {SOURCE_CODE_LABEL}
+              </a>
+            ) : null}
             <button type="button">隐私政策</button>
             <button type="button">服务条款</button>
           </div>
@@ -1177,6 +1212,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                     placeholder="手机号/邮箱"
                     autoComplete="username"
                     value={form.account}
+                    autoFocus={isDesktop}
                     onChange={(event) => updateField('account', event.target.value)}
                     onFocus={() => handleFieldFocus('account')}
                     onBlur={handleFieldBlur}
@@ -1563,15 +1599,17 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
             </div>
           </form>
 
-          <a
-            className="auth-card__source"
-            href={SOURCE_CODE_URL}
-            target="_blank"
-            rel="noreferrer"
-            title={SOURCE_CODE_TITLE}
-          >
-            {SOURCE_CODE_LABEL}
-          </a>
+          {!isDesktop ? (
+            <a
+              className="auth-card__source"
+              href={SOURCE_CODE_URL}
+              target="_blank"
+              rel="noreferrer"
+              title={SOURCE_CODE_TITLE}
+            >
+              {SOURCE_CODE_LABEL}
+            </a>
+          ) : null}
 
         </div>
       </div>
