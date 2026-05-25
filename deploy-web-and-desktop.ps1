@@ -25,7 +25,11 @@ function Invoke-DeployStep {
   )
   Write-Host ""
   Write-Host "==> $Name" -ForegroundColor Cyan
+  $global:LASTEXITCODE = 0
   & $Body
+  if ($LASTEXITCODE -ne 0) {
+    throw "$Name failed with exit code $LASTEXITCODE"
+  }
   Write-Host "OK: $Name" -ForegroundColor Green
 }
 
@@ -67,23 +71,23 @@ if (-not $BackendOnly -and -not $SkipDesktopPackage) {
   }
 }
 
-$deployArgs = @(
-  "-HostName", $HostName,
-  "-UserName", $UserName
-)
+$deployParams = @{
+  HostName = $HostName
+  UserName = $UserName
+}
 
 if ($FrontendOnly) {
-  $deployArgs += "-FrontendOnly"
+  $deployParams["FrontendOnly"] = $true
 }
 
 if ($BackendOnly) {
-  $deployArgs += "-BackendOnly"
+  $deployParams["BackendOnly"] = $true
 }
 
 if (-not $BackendOnly) {
-  $deployArgs += "-SkipBuild"
+  $deployParams["SkipBuild"] = $true
 }
 
 Invoke-DeployStep "Deploy web/backend to server" {
-  & $DeployScript @deployArgs
+  & $DeployScript @deployParams
 }

@@ -245,6 +245,10 @@ finally:
 
 print("Deployment finished.")
 '@ | python -
+  $deployExitCode = $LASTEXITCODE
+  if ($deployExitCode -ne 0) {
+    throw "Deployment failed with exit code $deployExitCode"
+  }
 } finally {
   Remove-Item Env:XK_DEPLOY_PASSWORD -ErrorAction SilentlyContinue
 }
