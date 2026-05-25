@@ -5,6 +5,7 @@
 # Frontend build artifacts
 frontend/node_modules/
 frontend/dist/
+frontend/public/downloads/*.zip
 auth-preview/node_modules/
 auth-preview/dist/
 

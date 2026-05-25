@@ -11,5 +11,6 @@ C:\Users\xk\Desktop\paper-reader-desktop\AGENTS.md
 5. 网页版改完后，桌面端通常只需要重新打包：
    cd C:\Users\xk\Desktop\paper-reader-desktop
    npm run package:win
+6. 网页版“下载桌面端”按钮固定指向 /downloads/xk-reader-desktop-windows.zip；打包桌面端会生成这个 zip，部署网页时会放到服务器 /www/xk-reader/frontend/downloads/。
 
 请先确认你理解这个架构，再继续帮我开发。

@@ -79,6 +79,8 @@ backend_only = os.environ.get("XK_DEPLOY_BACKEND_ONLY") == "1"
 timestamp = time.strftime("%Y%m%d%H%M%S")
 frontend_dist = root / "frontend" / "dist"
 backend_dir = root / "backend"
+desktop_download_name = "xk-reader-desktop-windows.zip"
+desktop_download = frontend_dist / "downloads" / desktop_download_name
 local_frontend_archive = root / "deploy-frontend-dist.tar.gz"
 local_backend_archive = root / "deploy-backend.tar.gz"
 
@@ -126,6 +128,11 @@ def should_skip_backend_path(path: Path) -> bool:
 
 
 def build_frontend_archive() -> None:
+    if not desktop_download.exists():
+        raise RuntimeError(
+            "Desktop download archive is missing from frontend/dist/downloads. "
+            "Run npm run package:win in C:\\Users\\xk\\Desktop\\paper-reader-desktop before deploying the web app."
+        )
     if local_frontend_archive.exists():
         local_frontend_archive.unlink()
     with tarfile.open(local_frontend_archive, "w:gz") as tar:
@@ -225,6 +232,7 @@ try:
         "sleep 2",
         "curl -fsS http://127.0.0.1:8000/api/health >/tmp/xk-reader-health.txt",
         "curl -fsS -I http://127.0.0.1/ >/tmp/xk-reader-frontend-head.txt",
+        "curl -fsS -I http://127.0.0.1/downloads/xk-reader-desktop-windows.zip >/tmp/xk-reader-desktop-download-head.txt",
         f"echo backup={remote_backup}",
         "cat /tmp/xk-reader-health.txt",
     ])

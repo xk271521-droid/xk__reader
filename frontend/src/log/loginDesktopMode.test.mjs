@@ -18,3 +18,10 @@ test('login character mouse tracking is animation-frame throttled', () => {
   assert.match(loginSource, /window\.requestAnimationFrame/)
   assert.match(loginSource, /window\.cancelAnimationFrame/)
 })
+
+test('login page exposes the desktop download link only on the web', () => {
+  assert.match(loginSource, /DESKTOP_DOWNLOAD_URL/)
+  assert.match(loginSource, /DESKTOP_DOWNLOAD_FILENAME/)
+  assert.match(loginSource, /className="auth-card__desktop-download"/)
+  assert.match(loginSource, /download=\{DESKTOP_DOWNLOAD_FILENAME\}/)
+})

@@ -785,6 +785,30 @@ body {
   margin-top: 24px;
 }
 
+.auth-card__desktop-download {
+  display: inline-flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+  border: 1px solid rgba(255, 154, 59, 0.44);
+  border-radius: 0;
+  background: rgba(255, 154, 59, 0.08);
+  color: #9a4f09;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.auth-card__desktop-download:hover {
+  border-color: rgba(255, 154, 59, 0.86);
+  background: rgba(255, 154, 59, 0.14);
+  color: #7c3f07;
+}
+
 .auth-card__source {
   display: inline-flex;
   align-self: center;

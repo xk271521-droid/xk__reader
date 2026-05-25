@@ -57,6 +57,9 @@ npm run package:win
 - 把构建产物复制到桌面端包内
 - 使用同一个服务器后端：`http://47.99.141.123`
 - 生成/更新桌面快捷方式 `C:\Users\xk\Desktop\XK 阅读.lnk`
+- 生成网页下载包 `C:\Users\xk\Desktop\codexwork\frontend\public\downloads\xk-reader-desktop-windows.zip`
+
+网页版的下载按钮固定指向 `/downloads/xk-reader-desktop-windows.zip`。部署后服务器文件路径应是 `/www/xk-reader/frontend/downloads/xk-reader-desktop-windows.zip`，访问地址是 `http://47.99.141.123/downloads/xk-reader-desktop-windows.zip`。
 
 ## 常用验证
 

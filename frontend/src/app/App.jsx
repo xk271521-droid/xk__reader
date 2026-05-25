@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { Bell, Code2, Crown, ListChecks, LogIn, Sparkles, Trash2, X } from 'lucide-react'
+import { Bell, Code2, Crown, Download, ListChecks, LogIn, Sparkles, Trash2, X } from 'lucide-react'
 import { TaskCenterSheet } from '../components/layout/TaskCenterSheet'
 import { UserHoverMenu } from '../components/layout/UserHoverMenu'
 import { UtilityRail } from '../components/layout/UtilityRail'
@@ -79,6 +79,12 @@ import { isDesktopShell } from '../utils/desktopShell'
 import { toUserMessage } from '../utils/errorMessage'
 import { MembershipModal } from '../components/membership/MembershipModal'
 import { fetchMembershipPlans } from '../services/membershipApi'
+import {
+  DESKTOP_DOWNLOAD_FILENAME,
+  DESKTOP_DOWNLOAD_LABEL,
+  DESKTOP_DOWNLOAD_TITLE,
+  DESKTOP_DOWNLOAD_URL,
+} from '../config/desktopDownload'
 import { SOURCE_CODE_LABEL, SOURCE_CODE_TITLE, SOURCE_CODE_URL } from '../config/sourceCode'
 import {
   Sheet,
@@ -3208,6 +3214,18 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
                 </span>
               ) : null}
             </button>
+            {!isDesktop ? (
+              <a
+                className="topbar-action topbar-action--desktop-download"
+                href={DESKTOP_DOWNLOAD_URL}
+                download={DESKTOP_DOWNLOAD_FILENAME}
+                title={DESKTOP_DOWNLOAD_TITLE}
+                aria-label={DESKTOP_DOWNLOAD_TITLE}
+              >
+                <Download size={14} />
+                <span className="topbar-action__label">{DESKTOP_DOWNLOAD_LABEL}</span>
+              </a>
+            ) : null}
             {!isDesktop ? (
               <a
                 className="topbar-action topbar-action--source"

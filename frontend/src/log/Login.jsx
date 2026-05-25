@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { Download, RefreshCw } from 'lucide-react'
 import {
   fetchCaptchaChallenge,
   loginUser,
@@ -8,6 +8,12 @@ import {
   sendResetVerificationCode,
   sendRegisterVerificationCode,
 } from '../services/authApi'
+import {
+  DESKTOP_DOWNLOAD_FILENAME,
+  DESKTOP_DOWNLOAD_LABEL,
+  DESKTOP_DOWNLOAD_TITLE,
+  DESKTOP_DOWNLOAD_URL,
+} from '../config/desktopDownload'
 import { SOURCE_CODE_LABEL, SOURCE_CODE_TITLE, SOURCE_CODE_URL } from '../config/sourceCode'
 import { isDesktopShell } from '../utils/desktopShell'
 import xkLogoIcon from '../assets/brand/xk-logo-icon.svg'
@@ -1605,6 +1611,18 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
               />
             </div>
           </form>
+
+          {!isDesktop ? (
+            <a
+              className="auth-card__desktop-download"
+              href={DESKTOP_DOWNLOAD_URL}
+              download={DESKTOP_DOWNLOAD_FILENAME}
+              title={DESKTOP_DOWNLOAD_TITLE}
+            >
+              <Download size={16} />
+              <span>{DESKTOP_DOWNLOAD_LABEL}</span>
+            </a>
+          ) : null}
 
           {!isDesktop ? (
             <a
