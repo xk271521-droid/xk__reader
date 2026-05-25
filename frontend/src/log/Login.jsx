@@ -711,6 +711,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
   const [phoneCodeCooldown, setPhoneCodeCooldown] = useState(0)
   const [emailCodeCooldown, setEmailCodeCooldown] = useState(0)
   const [resetCodeCooldown, setResetCodeCooldown] = useState(0)
+  const accountInputRef = useRef(null)
   const current = copy[mode]
 
   const passwordLength = useMemo(() => {
@@ -744,21 +745,20 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
       return undefined
     }
 
-    const desktopFocusTimers = [0, 120, 420, 900].map((delay) =>
-      window.setTimeout(() => {
-        const activeElement = document.activeElement
-        const isPageIdle =
-          !activeElement || activeElement === document.body || activeElement === document.documentElement
+    const focusAccountInput = () => {
+      const activeElement = document.activeElement
+      const isPageIdle =
+        !activeElement || activeElement === document.body || activeElement === document.documentElement
 
-        if (isPageIdle) {
-          document.getElementById('account')?.focus()
-        }
-      }, delay),
-    )
-
-    return () => {
-      desktopFocusTimers.forEach((timerId) => window.clearTimeout(timerId))
+      if (isPageIdle) {
+        accountInputRef.current?.focus({ preventScroll: true })
+      }
     }
+
+    focusAccountInput()
+    window.addEventListener('focus', focusAccountInput)
+
+    return () => window.removeEventListener('focus', focusAccountInput)
   }, [isDesktop, loginStep, mode])
 
   function resetForMode(nextMode) {
@@ -1214,6 +1214,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
               <>
                 <div className="auth-form__field">
                   <input
+                    ref={accountInputRef}
                     id="account"
                     type="text"
                     placeholder="手机号/邮箱"
