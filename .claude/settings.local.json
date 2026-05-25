@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /c/Users/xk/Desktop/codexwork log --oneline -5)",
+      "Bash(git -C /c/Users/xk/Desktop/codexwork status --short)"
+    ]
+  }
+}
