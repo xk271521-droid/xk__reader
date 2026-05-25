@@ -9,6 +9,7 @@ import {
   sendRegisterVerificationCode,
 } from '../services/authApi'
 import { SOURCE_CODE_LABEL, SOURCE_CODE_TITLE, SOURCE_CODE_URL } from '../config/sourceCode'
+import { isDesktopShell } from '../utils/desktopShell'
 import xkLogoIcon from '../assets/brand/xk-logo-icon.svg'
 import './Login.css'
 
@@ -22,10 +23,6 @@ const DISCIPLINE_OPTIONS = [
   '信息与通信工程',
   '其他',
 ]
-
-function isDesktopShell() {
-  return typeof window !== 'undefined' && Boolean(window.paperDesktop)
-}
 
 const copy = {
   login: {
@@ -742,11 +739,21 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
       return undefined
     }
 
-    const focusTimer = window.setTimeout(() => {
-      document.getElementById('account')?.focus()
-    }, 0)
+    const desktopFocusTimers = [0, 120, 420, 900].map((delay) =>
+      window.setTimeout(() => {
+        const activeElement = document.activeElement
+        const isPageIdle =
+          !activeElement || activeElement === document.body || activeElement === document.documentElement
 
-    return () => window.clearTimeout(focusTimer)
+        if (isPageIdle) {
+          document.getElementById('account')?.focus()
+        }
+      }, delay),
+    )
+
+    return () => {
+      desktopFocusTimers.forEach((timerId) => window.clearTimeout(timerId))
+    }
   }, [isDesktop, loginStep, mode])
 
   function resetForMode(nextMode) {

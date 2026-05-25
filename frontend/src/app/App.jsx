@@ -75,6 +75,7 @@ import {
 } from '../components/reader/fullTranslationLayout'
 import { resolveAssetUrl } from '../utils/assetUrl'
 import { countLogicalAnnotations } from '../utils/annotationAggregation'
+import { isDesktopShell } from '../utils/desktopShell'
 import { toUserMessage } from '../utils/errorMessage'
 import { MembershipModal } from '../components/membership/MembershipModal'
 import { fetchMembershipPlans } from '../services/membershipApi'
@@ -149,10 +150,6 @@ function shouldPauseBackgroundPolling() {
 function confirmDangerAction(message) {
   if (typeof window === 'undefined') return true
   return window.confirm(message)
-}
-
-function isDesktopShell() {
-  return typeof window !== 'undefined' && Boolean(window.paperDesktop)
 }
 
 function WorkspacePanelFallback({ width, uiFontScale = 1 }) {
