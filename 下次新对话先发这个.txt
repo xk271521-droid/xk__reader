@@ -1,0 +1,15 @@
+先读下面两个文件再继续：
+
+C:\Users\xk\Desktop\codexwork\AGENTS.md
+C:\Users\xk\Desktop\paper-reader-desktop\AGENTS.md
+
+我的要求：
+1. 网页版是核心，桌面端必须包含网页版全部功能。
+2. 桌面端不要重写一套 UI，只打包网页版，再加桌面独有能力。
+3. 网页版和桌面端共用同一个服务器后端。
+4. 只有桌面端才有的功能，用 isDesktopShell() 判断，不要显示到网页版。
+5. 网页版改完后，桌面端通常只需要重新打包：
+   cd C:\Users\xk\Desktop\paper-reader-desktop
+   npm run package:win
+
+请先确认你理解这个架构，再继续帮我开发。
