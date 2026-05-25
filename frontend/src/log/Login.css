@@ -809,20 +809,6 @@ body {
   color: #7c3f07;
 }
 
-.auth-card__source {
-  display: inline-flex;
-  align-self: center;
-  margin-top: 18px;
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 500;
-  text-decoration: none;
-}
-
-.auth-card__source:hover {
-  color: var(--text);
-}
-
 button:focus-visible,
 input:focus-visible {
   outline: none;

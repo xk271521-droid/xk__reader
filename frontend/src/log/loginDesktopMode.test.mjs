@@ -4,13 +4,17 @@ import test from 'node:test'
 
 const loginSource = readFileSync(new URL('./Login.jsx', import.meta.url), 'utf8')
 
-test('login page has desktop shell guards for source links and startup focus', () => {
+test('login page keeps startup focus guarded for the desktop shell', () => {
   assert.match(loginSource, /import \{ isDesktopShell \} from '..\/utils\/desktopShell'/)
   assert.match(loginSource, /const isDesktop = isDesktopShell\(\)/)
-  assert.match(loginSource, /!isDesktop \? \(/)
   assert.match(loginSource, /autoFocus=\{isDesktop\}/)
   assert.match(loginSource, /desktopFocusTimers/)
   assert.match(loginSource, /document\.activeElement/)
+})
+
+test('login page does not expose the source code link', () => {
+  assert.doesNotMatch(loginSource, /SOURCE_CODE_/)
+  assert.doesNotMatch(loginSource, /auth-card__source/)
 })
 
 test('login character mouse tracking is animation-frame throttled', () => {

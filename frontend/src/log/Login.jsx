@@ -14,7 +14,6 @@ import {
   DESKTOP_DOWNLOAD_TITLE,
   DESKTOP_DOWNLOAD_URL,
 } from '../config/desktopDownload'
-import { SOURCE_CODE_LABEL, SOURCE_CODE_TITLE, SOURCE_CODE_URL } from '../config/sourceCode'
 import { isDesktopShell } from '../utils/desktopShell'
 import xkLogoIcon from '../assets/brand/xk-logo-icon.svg'
 import './Login.css'
@@ -1157,11 +1156,6 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
           </div>
 
           <div className="scene-panel__footer">
-            {!isDesktop ? (
-              <a href={SOURCE_CODE_URL} target="_blank" rel="noreferrer" title={SOURCE_CODE_TITLE}>
-                {SOURCE_CODE_LABEL}
-              </a>
-            ) : null}
             <button type="button">隐私政策</button>
             <button type="button">服务条款</button>
           </div>
@@ -1621,18 +1615,6 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
             >
               <Download size={16} />
               <span>{DESKTOP_DOWNLOAD_LABEL}</span>
-            </a>
-          ) : null}
-
-          {!isDesktop ? (
-            <a
-              className="auth-card__source"
-              href={SOURCE_CODE_URL}
-              target="_blank"
-              rel="noreferrer"
-              title={SOURCE_CODE_TITLE}
-            >
-              {SOURCE_CODE_LABEL}
             </a>
           ) : null}
 
