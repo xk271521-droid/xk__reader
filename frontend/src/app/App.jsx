@@ -151,6 +151,10 @@ function confirmDangerAction(message) {
   return window.confirm(message)
 }
 
+function isDesktopShell() {
+  return typeof window !== 'undefined' && Boolean(window.paperDesktop)
+}
+
 function WorkspacePanelFallback({ width, uiFontScale = 1 }) {
   return (
     <aside
@@ -534,6 +538,7 @@ function createTransientId(prefix = 'temp') {
 }
 
 function App() {
+  const isDesktop = isDesktopShell()
   const readerRef = useRef(null)
   const readerLayoutRef = useRef(null)
   const userMenuRef = useRef(null)
@@ -3206,17 +3211,19 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
                 </span>
               ) : null}
             </button>
-            <a
-              className="topbar-action topbar-action--source"
-              href={SOURCE_CODE_URL}
-              target="_blank"
-              rel="noreferrer"
-              title={SOURCE_CODE_TITLE}
-              aria-label={SOURCE_CODE_TITLE}
-            >
-              <Code2 size={14} />
-              <span className="topbar-action__label">{SOURCE_CODE_LABEL}</span>
-            </a>
+            {!isDesktop ? (
+              <a
+                className="topbar-action topbar-action--source"
+                href={SOURCE_CODE_URL}
+                target="_blank"
+                rel="noreferrer"
+                title={SOURCE_CODE_TITLE}
+                aria-label={SOURCE_CODE_TITLE}
+              >
+                <Code2 size={14} />
+                <span className="topbar-action__label">{SOURCE_CODE_LABEL}</span>
+              </a>
+            ) : null}
 
             {currentUser ? (
               <button
