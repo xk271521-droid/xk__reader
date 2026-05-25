@@ -66,6 +66,7 @@ Invoke-CheckStep "Git working tree visibility" {
 
 Invoke-CheckStep "PowerShell syntax" {
   Test-PowerShellSyntax -Path (Join-Path $root 'deploy.ps1')
+  Test-PowerShellSyntax -Path (Join-Path $root 'deploy-web-and-desktop.ps1')
   Test-PowerShellSyntax -Path (Join-Path $root 'check-before-deploy.ps1')
   $localBackendScript = Join-Path $root 'backend\start-local-backend.ps1'
   if (Test-Path -LiteralPath $localBackendScript) {

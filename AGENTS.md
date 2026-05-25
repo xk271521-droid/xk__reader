@@ -51,6 +51,15 @@ cd C:\Users\xk\Desktop\codexwork\paper-reader-desktop
 npm run package:win
 ```
 
+如果要把网页版更新和新版桌面端下载包一起发布到服务器，优先运行顶层一键脚本：
+
+```powershell
+cd C:\Users\xk\Desktop\codexwork
+.\deploy-web-and-desktop.ps1
+```
+
+这个脚本会先打包桌面端，再调用 `deploy.ps1 -SkipBuild` 部署，避免服务器下载按钮拿到旧桌面端。如果没有提前临时设置服务器密码环境变量，脚本会在部署阶段提示输入。
+
 打包脚本会：
 
 - 构建 `C:\Users\xk\Desktop\codexwork\frontend`
