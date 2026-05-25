@@ -11,8 +11,8 @@ test('one-step deploy packages the desktop app before deploying the web app', ()
   assert.match(scriptSource, /& \$DeployScript @deployArgs/)
 })
 
-test('one-step deploy verifies the generated desktop download archive', () => {
-  assert.match(scriptSource, /\$DownloadArchive = Join-Path \$Root "frontend\\public\\downloads\\xk-reader-desktop-windows\.zip"/)
-  assert.match(scriptSource, /Test-Path -LiteralPath \$DownloadArchive/)
-  assert.match(scriptSource, /Desktop download archive was not generated/)
+test('one-step deploy verifies the generated desktop installer', () => {
+  assert.match(scriptSource, /\$DesktopInstaller = Join-Path \$Root "frontend\\public\\downloads\\xk-reader-setup\.exe"/)
+  assert.match(scriptSource, /Test-Path -LiteralPath \$DesktopInstaller/)
+  assert.match(scriptSource, /Desktop installer was not generated/)
 })

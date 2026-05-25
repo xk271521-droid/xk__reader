@@ -9,8 +9,8 @@ import {
 } from './desktopDownload.js'
 
 test('desktop download config points to the generated Windows package', () => {
-  assert.equal(DESKTOP_DOWNLOAD_LABEL, '下载桌面端')
-  assert.equal(DESKTOP_DOWNLOAD_TITLE, '下载 XK 阅读 Windows 桌面端')
-  assert.equal(DESKTOP_DOWNLOAD_FILENAME, 'xk-reader-desktop-windows.zip')
-  assert.equal(DESKTOP_DOWNLOAD_URL, '/downloads/xk-reader-desktop-windows.zip')
+  assert.equal(DESKTOP_DOWNLOAD_LABEL, '\u4e0b\u8f7d\u684c\u9762\u7aef')
+  assert.equal(DESKTOP_DOWNLOAD_TITLE, '\u4e0b\u8f7d XK \u9605\u8bfb Windows \u5b89\u88c5\u7a0b\u5e8f')
+  assert.equal(DESKTOP_DOWNLOAD_FILENAME, 'xk-reader-setup.exe')
+  assert.equal(DESKTOP_DOWNLOAD_URL, '/downloads/xk-reader-setup.exe')
 })

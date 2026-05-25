@@ -11,7 +11,7 @@ C:\Users\xk\Desktop\codexwork\paper-reader-desktop\AGENTS.md
 5. 网页版改完后，桌面端通常只需要重新打包：
    cd C:\Users\xk\Desktop\codexwork\paper-reader-desktop
    npm run package:win
-6. 网页版“下载桌面端”按钮固定指向 /downloads/xk-reader-desktop-windows.zip；打包桌面端会生成这个 zip，部署网页时会放到服务器 /www/xk-reader/frontend/downloads/。
+6. 网页版“下载桌面端”按钮固定指向 /downloads/xk-reader-setup.exe；打包桌面端会生成这个 Windows 安装程序，部署网页时会放到服务器 /www/xk-reader/frontend/downloads/。
 7. 发布网页版和新版桌面端下载包时，优先运行：
    cd C:\Users\xk\Desktop\codexwork
    .\deploy-web-and-desktop.ps1

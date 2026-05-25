@@ -15,8 +15,8 @@ if ($FrontendOnly -and $BackendOnly) {
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DesktopDir = Join-Path $Root "paper-reader-desktop"
 $DeployScript = Join-Path $Root "deploy.ps1"
-$DownloadArchive = Join-Path $Root "frontend\public\downloads\xk-reader-desktop-windows.zip"
-$DistDownloadArchive = Join-Path $Root "frontend\dist\downloads\xk-reader-desktop-windows.zip"
+$DesktopInstaller = Join-Path $Root "frontend\public\downloads\xk-reader-setup.exe"
+$DistDesktopInstaller = Join-Path $Root "frontend\dist\downloads\xk-reader-setup.exe"
 
 function Invoke-DeployStep {
   param(
@@ -29,23 +29,23 @@ function Invoke-DeployStep {
   Write-Host "OK: $Name" -ForegroundColor Green
 }
 
-function Assert-DesktopDownloadArchive {
-  if (-not (Test-Path -LiteralPath $DownloadArchive)) {
-    throw "Desktop download archive was not generated: $DownloadArchive"
+function Assert-DesktopInstaller {
+  if (-not (Test-Path -LiteralPath $DesktopInstaller)) {
+    throw "Desktop installer was not generated: $DesktopInstaller"
   }
 
-  $archive = Get-Item -LiteralPath $DownloadArchive
-  if ($archive.Length -le 0) {
-    throw "Desktop download archive is empty: $DownloadArchive"
+  $installer = Get-Item -LiteralPath $DesktopInstaller
+  if ($installer.Length -le 0) {
+    throw "Desktop installer is empty: $DesktopInstaller"
   }
 
-  if (-not (Test-Path -LiteralPath $DistDownloadArchive)) {
-    throw "Desktop download archive was not copied into frontend dist: $DistDownloadArchive"
+  if (-not (Test-Path -LiteralPath $DistDesktopInstaller)) {
+    throw "Desktop installer was not copied into frontend dist: $DistDesktopInstaller"
   }
 }
 
 if (-not $BackendOnly -and -not $SkipDesktopPackage) {
-  Invoke-DeployStep "Package desktop app and web download archive" {
+  Invoke-DeployStep "Package desktop installer and web download" {
     if (-not (Test-Path -LiteralPath (Join-Path $DesktopDir "package.json"))) {
       throw "Desktop project was not found: $DesktopDir"
     }
@@ -58,12 +58,12 @@ if (-not $BackendOnly -and -not $SkipDesktopPackage) {
     }
   }
 
-  Invoke-DeployStep "Verify desktop download archive" {
-    Assert-DesktopDownloadArchive
+  Invoke-DeployStep "Verify desktop installer" {
+    Assert-DesktopInstaller
   }
 } elseif (-not $BackendOnly) {
-  Invoke-DeployStep "Verify existing desktop download archive" {
-    Assert-DesktopDownloadArchive
+  Invoke-DeployStep "Verify existing desktop installer" {
+    Assert-DesktopInstaller
   }
 }
 

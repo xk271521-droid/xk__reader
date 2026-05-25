@@ -58,17 +58,17 @@ cd C:\Users\xk\Desktop\codexwork
 .\deploy-web-and-desktop.ps1
 ```
 
-这个脚本会先打包桌面端，再调用 `deploy.ps1 -SkipBuild` 部署，避免服务器下载按钮拿到旧桌面端。如果没有提前临时设置服务器密码环境变量，脚本会在部署阶段提示输入。
+这个脚本会先生成 Windows 安装程序，再调用 `deploy.ps1 -SkipBuild` 部署，避免服务器下载按钮拿到旧桌面端。如果没有提前临时设置服务器密码环境变量，脚本会在部署阶段提示输入。
 
 打包脚本会：
 
 - 构建 `C:\Users\xk\Desktop\codexwork\frontend`
 - 把构建产物复制到桌面端包内
 - 使用同一个服务器后端：`http://47.99.141.123`
-- 生成/更新桌面快捷方式 `C:\Users\xk\Desktop\XK 阅读.lnk`
-- 生成网页下载包 `C:\Users\xk\Desktop\codexwork\frontend\public\downloads\xk-reader-desktop-windows.zip`
+- 生成 Windows 安装程序 `C:\Users\xk\Desktop\codexwork\paper-reader-desktop\release\builder\xk-reader-setup.exe`
+- 生成网页下载用的安装程序 `C:\Users\xk\Desktop\codexwork\frontend\public\downloads\xk-reader-setup.exe`
 
-网页版的下载按钮固定指向 `/downloads/xk-reader-desktop-windows.zip`。部署后服务器文件路径应是 `/www/xk-reader/frontend/downloads/xk-reader-desktop-windows.zip`，访问地址是 `http://47.99.141.123/downloads/xk-reader-desktop-windows.zip`。
+网页版的下载按钮固定指向 `/downloads/xk-reader-setup.exe`。部署后服务器文件路径应是 `/www/xk-reader/frontend/downloads/xk-reader-setup.exe`，访问地址是 `http://47.99.141.123/downloads/xk-reader-setup.exe`。这是 NSIS 安装器，会创建桌面快捷方式和开始菜单入口，并允许用户选择安装目录。
 
 ## 常用验证
 
