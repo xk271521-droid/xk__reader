@@ -1,6 +1,7 @@
 .idea/
 .codex/
 .superpowers/
+paper-reader-desktop/
 
 # Frontend build artifacts
 frontend/node_modules/

@@ -5,9 +5,9 @@
 ## 项目结构
 
 - 网页版和后端主仓库：`C:\Users\xk\Desktop\codexwork`
-- 桌面端 Electron 壳仓库：`C:\Users\xk\Desktop\paper-reader-desktop`
+- 桌面端 Electron 壳仓库：`C:\Users\xk\Desktop\codexwork\paper-reader-desktop`
 - 当前桌面快捷方式：`C:\Users\xk\Desktop\XK 阅读.lnk`
-- 当前桌面程序：`C:\Users\xk\Desktop\paper-reader-desktop\release\XK 阅读\XK 阅读.exe`
+- 当前桌面程序：`C:\Users\xk\Desktop\codexwork\paper-reader-desktop\release\XK 阅读\XK 阅读.exe`
 
 ## 核心原则
 
@@ -24,7 +24,7 @@
    - 完成后重新打包桌面端即可，不要在桌面仓库重写同一套功能。
 
 2. 只有桌面端要有的能力：
-   - 原生能力放在 `C:\Users\xk\Desktop\paper-reader-desktop`
+   - 原生能力放在 `C:\Users\xk\Desktop\codexwork\paper-reader-desktop`
    - 前端入口仍可写在 `codexwork/frontend`，但必须用桌面模式判断包起来。
 
 3. 桌面模式判断：
@@ -47,7 +47,7 @@ return isDesktop ? <DesktopOnlyFeature /> : null
 每次网页版改完后，如果要让桌面端拿到新功能，运行：
 
 ```powershell
-cd C:\Users\xk\Desktop\paper-reader-desktop
+cd C:\Users\xk\Desktop\codexwork\paper-reader-desktop
 npm run package:win
 ```
 
@@ -74,7 +74,7 @@ npm run build
 桌面端：
 
 ```powershell
-cd C:\Users\xk\Desktop\paper-reader-desktop
+cd C:\Users\xk\Desktop\codexwork\paper-reader-desktop
 npm test
 npm run package:win
 ```
@@ -92,4 +92,4 @@ npm run package:win
 
 用户可以直接说：
 
-“先读 `C:\Users\xk\Desktop\codexwork\AGENTS.md` 和 `C:\Users\xk\Desktop\paper-reader-desktop\AGENTS.md`，继续按这个架构开发：网页版核心 + 桌面增强层。”
+“先读 `C:\Users\xk\Desktop\codexwork\AGENTS.md` 和 `C:\Users\xk\Desktop\codexwork\paper-reader-desktop\AGENTS.md`，继续按这个架构开发：网页版核心 + 桌面增强层。”

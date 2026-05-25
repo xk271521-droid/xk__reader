@@ -1,7 +1,7 @@
 先读下面两个文件再继续：
 
 C:\Users\xk\Desktop\codexwork\AGENTS.md
-C:\Users\xk\Desktop\paper-reader-desktop\AGENTS.md
+C:\Users\xk\Desktop\codexwork\paper-reader-desktop\AGENTS.md
 
 我的要求：
 1. 网页版是核心，桌面端必须包含网页版全部功能。
@@ -9,7 +9,7 @@ C:\Users\xk\Desktop\paper-reader-desktop\AGENTS.md
 3. 网页版和桌面端共用同一个服务器后端。
 4. 只有桌面端才有的功能，用 isDesktopShell() 判断，不要显示到网页版。
 5. 网页版改完后，桌面端通常只需要重新打包：
-   cd C:\Users\xk\Desktop\paper-reader-desktop
+   cd C:\Users\xk\Desktop\codexwork\paper-reader-desktop
    npm run package:win
 6. 网页版“下载桌面端”按钮固定指向 /downloads/xk-reader-desktop-windows.zip；打包桌面端会生成这个 zip，部署网页时会放到服务器 /www/xk-reader/frontend/downloads/。
 

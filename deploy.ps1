@@ -131,7 +131,7 @@ def build_frontend_archive() -> None:
     if not desktop_download.exists():
         raise RuntimeError(
             "Desktop download archive is missing from frontend/dist/downloads. "
-            "Run npm run package:win in C:\\Users\\xk\\Desktop\\paper-reader-desktop before deploying the web app."
+            "Run npm run package:win in C:\\Users\\xk\\Desktop\\codexwork\\paper-reader-desktop before deploying the web app."
         )
     if local_frontend_archive.exists():
         local_frontend_archive.unlink()
