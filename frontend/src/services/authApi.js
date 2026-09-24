@@ -1,4 +1,37 @@
 const AUTH_TOKEN_KEY = 'xk_reader_auth_token'
+const REMEMBERED_LOGIN_KEY = 'xk_reader_remembered_login'
+
+function getLocalStorage() {
+  return typeof window !== 'undefined' ? window.localStorage : null
+}
+
+function getSessionStorage() {
+  return typeof window !== 'undefined' ? window.sessionStorage : null
+}
+
+function safeGet(storage, key) {
+  try {
+    return storage?.getItem(key) || ''
+  } catch {
+    return ''
+  }
+}
+
+function safeSet(storage, key, value) {
+  try {
+    storage?.setItem(key, value)
+  } catch {
+    // Storage can be disabled; login still works for the current request.
+  }
+}
+
+function safeRemove(storage, key) {
+  try {
+    storage?.removeItem(key)
+  } catch {
+    // Ignore unavailable storage.
+  }
+}
 
 async function parseJsonResponse(response) {
   let payload
@@ -38,15 +71,62 @@ function buildAuthHeaders(token) {
 }
 
 export function getStoredAuthToken() {
-  return window.localStorage.getItem(AUTH_TOKEN_KEY)
+  return safeGet(getLocalStorage(), AUTH_TOKEN_KEY) || safeGet(getSessionStorage(), AUTH_TOKEN_KEY)
 }
 
-export function storeAuthToken(token) {
-  window.localStorage.setItem(AUTH_TOKEN_KEY, token)
+export function storeAuthToken(token, options = {}) {
+  const remember = options.remember !== false
+  if (remember) {
+    safeSet(getLocalStorage(), AUTH_TOKEN_KEY, token)
+    safeRemove(getSessionStorage(), AUTH_TOKEN_KEY)
+    return
+  }
+
+  safeSet(getSessionStorage(), AUTH_TOKEN_KEY, token)
+  safeRemove(getLocalStorage(), AUTH_TOKEN_KEY)
 }
 
 export function clearStoredAuthToken() {
-  window.localStorage.removeItem(AUTH_TOKEN_KEY)
+  safeRemove(getLocalStorage(), AUTH_TOKEN_KEY)
+  safeRemove(getSessionStorage(), AUTH_TOKEN_KEY)
+}
+
+export function getRememberedLogin() {
+  const raw = safeGet(getLocalStorage(), REMEMBERED_LOGIN_KEY)
+  if (!raw) {
+    return { account: '', remember: false }
+  }
+
+  try {
+    const payload = JSON.parse(raw)
+    return {
+      account: typeof payload?.account === 'string' ? payload.account : '',
+      remember: Boolean(payload?.remember),
+    }
+  } catch {
+    return { account: '', remember: false }
+  }
+}
+
+export function storeRememberedLogin({ account, remember }) {
+  if (!remember) {
+    clearRememberedLogin()
+    return
+  }
+
+  safeSet(
+    getLocalStorage(),
+    REMEMBERED_LOGIN_KEY,
+    JSON.stringify({
+      account: String(account || '').trim(),
+      remember: true,
+      updatedAt: Date.now(),
+    }),
+  )
+}
+
+export function clearRememberedLogin() {
+  safeRemove(getLocalStorage(), REMEMBERED_LOGIN_KEY)
 }
 
 export async function fetchCaptchaChallenge(scene) {

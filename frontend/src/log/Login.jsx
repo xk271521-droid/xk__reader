@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Download, RefreshCw } from 'lucide-react'
 import {
   fetchCaptchaChallenge,
+  getRememberedLogin,
   loginUser,
   registerUser,
   resetPassword,
   sendResetVerificationCode,
   sendRegisterVerificationCode,
+  storeRememberedLogin,
 } from '../services/authApi'
 import {
   DESKTOP_DOWNLOAD_FILENAME,
@@ -28,6 +30,8 @@ const DISCIPLINE_OPTIONS = [
   '信息与通信工程',
   '其他',
 ]
+
+const DESKTOP_LOGIN_FOCUS_DELAYS = [0, 80, 240, 600, 1200]
 
 const copy = {
   login: {
@@ -658,7 +662,7 @@ function InteractiveHoverButton({ text, icon, className = '', type = 'button', .
   )
 }
 
-function buildEmptyForm() {
+function buildEmptyForm(overrides = {}) {
   return {
     account: '',
     phone: '',
@@ -675,7 +679,17 @@ function buildEmptyForm() {
     organization: '',
     discipline: DISCIPLINE_OPTIONS[0],
     agreeTerms: false,
+    rememberMe: false,
+    ...overrides,
   }
+}
+
+function buildRememberedLoginForm() {
+  const rememberedLogin = getRememberedLogin()
+  return buildEmptyForm({
+    account: rememberedLogin.account,
+    rememberMe: rememberedLogin.remember,
+  })
 }
 
 function isValidPhone(value) {
@@ -691,7 +705,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
   const [mode, setMode] = useState(initialMode)
   const [signupStep, setSignupStep] = useState(1)
   const [loginStep, setLoginStep] = useState('login')
-  const [form, setForm] = useState(buildEmptyForm)
+  const [form, setForm] = useState(buildRememberedLoginForm)
   const [showPassword, setShowPassword] = useState(false)
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [isTyping, setIsTyping] = useState(false)
@@ -745,27 +759,49 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
       return undefined
     }
 
-    const focusAccountInput = () => {
+    const isPageFocusIdle = () => {
       const activeElement = document.activeElement
-      const isPageIdle =
-        !activeElement || activeElement === document.body || activeElement === document.documentElement
+      return !activeElement || activeElement === document.body || activeElement === document.documentElement
+    }
 
-      if (isPageIdle) {
-        accountInputRef.current?.focus({ preventScroll: true })
+    const focusAccountInput = () => {
+      const input = accountInputRef.current
+      if (!input || input.disabled) {
+        return
+      }
+
+      if (document.activeElement === input || isPageFocusIdle()) {
+        input.focus({ preventScroll: true })
       }
     }
 
     focusAccountInput()
-    window.addEventListener('focus', focusAccountInput)
+    const timerIds = DESKTOP_LOGIN_FOCUS_DELAYS.map((delay) => window.setTimeout(focusAccountInput, delay))
+    const handleWindowFocus = () => {
+      timerIds.push(window.setTimeout(focusAccountInput, 0))
+      timerIds.push(window.setTimeout(focusAccountInput, 120))
+    }
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        handleWindowFocus()
+      }
+    }
 
-    return () => window.removeEventListener('focus', focusAccountInput)
+    window.addEventListener('focus', handleWindowFocus)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      timerIds.forEach((timerId) => window.clearTimeout(timerId))
+      window.removeEventListener('focus', handleWindowFocus)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
   }, [isDesktop, loginStep, mode])
 
   function resetForMode(nextMode) {
     setMode(nextMode)
     setSignupStep(1)
     setLoginStep('login')
-    setForm(buildEmptyForm())
+    setForm(nextMode === 'login' ? buildRememberedLoginForm() : buildEmptyForm())
     setShowPassword(false)
     setShowConfirmPassword(false)
     setIsTyping(false)
@@ -1034,6 +1070,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
           setForm((currentForm) => ({
             ...buildEmptyForm(),
             account: currentForm.account.trim(),
+            rememberMe: currentForm.rememberMe,
           }))
           await loadCaptcha('login')
         } catch (requestError) {
@@ -1058,8 +1095,10 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
           password: form.password,
           captcha_id: captcha.challenge_id,
           captcha_code: form.captchaCode.trim(),
+          remember_me: form.rememberMe,
         })
-        onAuthSuccess?.(authPayload)
+        storeRememberedLogin({ account: form.account.trim(), remember: form.rememberMe })
+        onAuthSuccess?.(authPayload, { remember: form.rememberMe, account: form.account.trim() })
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : '登录失败，请稍后再试。')
         loadCaptcha('login')
@@ -1536,7 +1575,11 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
             {mode === 'login' ? (
               <div className="auth-form__row">
                 <label className="remember-row">
-                  <input type="checkbox" />
+                  <input
+                    type="checkbox"
+                    checked={form.rememberMe}
+                    onChange={(event) => updateField('rememberMe', event.target.checked)}
+                  />
                   <span>30 天内记住我</span>
                 </label>
                 {loginStep === 'login' ? (
@@ -1561,6 +1604,7 @@ function Login({ initialMode = 'login', onAuthSuccess }) {
                       setForm((currentForm) => ({
                         ...buildEmptyForm(),
                         account: currentForm.account,
+                        rememberMe: currentForm.rememberMe,
                       }))
                       await loadCaptcha('login')
                     }}

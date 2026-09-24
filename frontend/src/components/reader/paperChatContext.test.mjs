@@ -31,12 +31,14 @@ test('builds note digest with page citations', () => {
 
 test('builds chat payload that asks for cited answers', () => {
   const payload = buildPaperChatContextPayload({
+    paperId: 7,
     fileName: 'paper.pdf',
     fullText: '[第 3 页]\nResult text',
     metadata: { title: 'Paper Title' },
     providerId: 2,
     selectedText: 'selected',
   })
+  assert.equal(payload.paper_id, 7)
   assert.equal(payload.paper_title, 'Paper Title')
   assert.equal(payload.provider_id, 2)
   assert.equal(payload.selected_text, 'selected')

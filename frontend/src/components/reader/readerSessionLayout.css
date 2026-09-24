@@ -1,0 +1,36 @@
+/*
+ * Reader sessions render their children absolutely so inactive documents can
+ * stay mounted. This container must remain the flexible main track; otherwise
+ * it has no intrinsic width and the active PDF is rendered off-screen.
+ */
+.reader-session-stack {
+  flex: auto;
+  align-self: stretch;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.reader-session-stack.is-hidden {
+  visibility: hidden;
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+}
+
+.reader-session {
+  visibility: hidden;
+  pointer-events: none;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.reader-session.is-active {
+  visibility: visible;
+  pointer-events: auto;
+}

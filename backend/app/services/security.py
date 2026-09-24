@@ -30,10 +30,13 @@ def hash_verification_code(channel: str, purpose: str, target: str, code: str) -
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def create_access_token(subject: str, token_version: int = 0) -> str:
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        minutes=settings.access_token_expire_minutes
-    )
+def create_access_token(
+    subject: str,
+    token_version: int = 0,
+    expires_delta: timedelta | None = None,
+) -> str:
+    token_lifetime = expires_delta or timedelta(minutes=settings.access_token_expire_minutes)
+    expires_at = datetime.now(timezone.utc) + token_lifetime
     payload = {"sub": subject, "exp": expires_at, "tv": int(token_version or 0)}
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 

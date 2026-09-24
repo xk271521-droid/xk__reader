@@ -12,7 +12,6 @@ import {
   FolderClosed,
   FolderPlus,
   LibraryBig,
-  Network,
   Moon,
   MoreHorizontal,
   Package2,
@@ -25,7 +24,6 @@ import {
   TimerReset,
   Trash2,
 } from 'lucide-react'
-import { fetchResearchMatrixRuns } from '../../services/paperReaderApi'
 import {
   DEFAULT_RESOURCE_BRANCH_ORIGIN,
   buildResourceBranchPath,
@@ -39,6 +37,7 @@ import {
   matchesLibraryAdvancedFilters,
 } from './libraryWorkflowModel'
 import '../../styles/home-library.css'
+import '../../styles/home-redesign.css'
 
 const LiteratureSearchPage = lazy(() =>
   loadHomeSectionComponent('literature-search').then((component) => ({ default: component })),
@@ -49,17 +48,12 @@ const PaperFormatPage = lazy(() =>
 const ReadingInsightSection = lazy(() =>
   loadHomeSectionComponent('insights').then((component) => ({ default: component })),
 )
-const ResearchMatrixPage = lazy(() =>
-  loadHomeSectionComponent('matrix').then((component) => ({ default: component })),
-)
-
 const homeSections = [
   { id: 'recent', label: '阅读记录', icon: Clock3 },
   { id: 'library', label: '我的文献', icon: LibraryBig },
   { id: 'literature-search', label: '文献检索', icon: SearchCheck },
   { id: 'paper-format', label: '格式正规化', icon: FileCheck2 },
   { id: 'insights', label: '阅读信息站', icon: Radar },
-  { id: 'matrix', label: '文献矩阵', icon: Network },
   { id: 'trash', label: '回收站', icon: Trash2 },
 ]
 
@@ -67,18 +61,14 @@ const LIBRARY_STATUS_FILTERS = [
   { id: 'all', label: '全部' },
   { id: 'unread', label: '待阅读' },
   { id: 'reading', label: '阅读中' },
-  { id: 'summary-pending', label: '待总结' },
   { id: 'notes', label: '有笔记' },
-  { id: 'summary', label: '已总结' },
   { id: 'translation', label: '已翻译' },
   { id: 'stale', label: '待更新' },
 ]
 
 const PENDING_TASK_ORDER = [
-  'summary-pending',
   'stale',
   'unread',
-  'matrix-pending',
   'trash-soon',
 ]
 const HOME_PENDING_VISIBLE_COUNT = 5
@@ -95,6 +85,31 @@ function formatDateTime(timestamp) {
     minute: '2-digit',
     hour12: false,
   }).format(timestamp)
+}
+
+function compactHomeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim()
+}
+
+function stripPdfExtension(value) {
+  return compactHomeText(value).replace(/\.pdf$/i, '')
+}
+
+function cleanPaperTitleForDisplay(title, fileName = '') {
+  let value = compactHomeText(title) || stripPdfExtension(fileName)
+  const fallback = stripPdfExtension(fileName) || '未命名文献'
+  if (!value) return fallback
+
+  value = value.replace(/^[\u3400-\u9fff]{2,14}\s*[（(]\s*中英文\s*[）)]\s+[A-Za-z][A-Za-z\s-]{4,48}\s+/, '')
+  value = value.split(/\s+(?:摘要|摘\s*要|关键词|关键字|Abstract\b|Keywords?\b)/i)[0]
+  value = value.replace(/\s*[（(]\s*\d+\s*[.．、].*$/, '')
+  value = value.replace(/\s+\d+(?:\s*[，,]\s*\d+)+\s*\*?.*$/, '')
+  value = value.replace(/\s+[\u3400-\u9fff]{2,4}(?:[，、,]\s*[\u3400-\u9fff]{2,4}){1,}.*$/, '')
+  value = compactHomeText(value).replace(/[，,;；:.：、\s]+$/, '')
+
+  if (!value) return fallback
+  if (value.length > 96) return `${value.slice(0, 96).trim()}...`
+  return value
 }
 
 function formatDaysLeft(timestamp) {
@@ -193,16 +208,7 @@ function getPaperResourceEntry(resources, type) {
   return resources.find((resource) => resource.type === type) || null
 }
 
-function hasAnyResourceType(resources, types) {
-  return types.some((type) => resources.some((resource) => resource.type === type))
-}
-
 function getResourceLabel(resourceType) {
-  if (resourceType === 'summary_annotations') return '标注总结'
-  if (resourceType === 'summary_overview') return '整篇总结'
-  if (resourceType === 'summary_review') return '综述卡片'
-  if (resourceType === 'summary_reproduction') return '复现总结'
-  if (resourceType === 'summary_meeting') return '组会稿'
   if (resourceType === 'translation') return '全文翻译'
   if (resourceType === 'annotations') return '原文标注'
   if (resourceType === 'notes') return '笔记'
@@ -212,31 +218,25 @@ function getResourceLabel(resourceType) {
 function getPaperStatusFlags(paper, resources = []) {
   const annotationEntry = getPaperResourceEntry(resources, 'annotations')
   const notesEntry = getPaperResourceEntry(resources, 'notes')
-  const summaryEntry = resources.find((resource) => String(resource.type || '').startsWith('summary_')) || null
   const translationEntry = getPaperResourceEntry(resources, 'translation')
   const staleResource = resources.find((resource) => resource.status === 'stale') || null
   const hasAnnotations = Boolean(annotationEntry)
   const hasNotes = Boolean(notesEntry)
-  const hasSummary = Boolean(summaryEntry)
   const hasTranslation = Boolean(translationEntry)
   const isStale = Boolean(staleResource)
   const lastViewedAt = Number(paper?.lastViewedAt || 0)
   const ageHours = lastViewedAt ? (Date.now() - lastViewedAt) / (1000 * 60 * 60) : Number.POSITIVE_INFINITY
   const isUnread = !Number.isFinite(lastViewedAt) || ageHours > 24 * 14
-  const isReading = !isUnread && (!hasSummary || !hasNotes)
-  const summaryPending = (hasAnnotations || hasNotes) && !hasSummary
+  const isReading = !isUnread && !hasNotes
   return {
     isUnread,
     isReading,
     hasAnnotations,
     hasNotes,
-    hasSummary,
     hasTranslation,
     isStale,
-    summaryPending,
     annotationCount: Number(annotationEntry?.count || 0),
     noteCount: Number(notesEntry?.count || 0),
-    summaryStatus: summaryEntry?.status || '',
     translationStatus: translationEntry?.status || '',
     staleResourceType: staleResource?.type || '',
     staleResourceLabel: staleResource?.label || getResourceLabel(staleResource?.type || ''),
@@ -245,10 +245,9 @@ function getPaperStatusFlags(paper, resources = []) {
 }
 
 function getPaperStatusLabel(flags) {
-  if (flags.summaryPending) return '待补总结'
   if (flags.isStale) return `${flags.staleResourceLabel || '资源'}待更新`
   if (flags.isUnread) return '待阅读'
-  if (flags.hasTranslation && flags.hasSummary) return '资料齐全'
+  if (flags.hasTranslation && flags.hasNotes) return '资料齐全'
   if (flags.isReading) return '阅读中'
   if (flags.hasNotes) return '有笔记'
   return '继续阅读'
@@ -259,29 +258,17 @@ function matchesLibraryStatusFilter(filterId, paper, paperResourcesById) {
   const flags = getPaperStatusFlags(paper, getPaperResourceEntries(paper.id, paperResourcesById))
   if (filterId === 'unread') return flags.isUnread
   if (filterId === 'reading') return flags.isReading
-  if (filterId === 'summary-pending') return flags.summaryPending
   if (filterId === 'notes') return flags.hasNotes
-  if (filterId === 'summary') return flags.hasSummary
   if (filterId === 'translation') return flags.hasTranslation
   if (filterId === 'stale') return flags.isStale
   return true
 }
 
-function buildContinueWorkItem(recentPapers, paperResourcesById) {
+function buildContinueWorkItem(recentPapers) {
   const currentPaper = recentPapers[0]
   if (!currentPaper) return null
-  const resources = getPaperResourceEntries(currentPaper.id, paperResourcesById)
-  const flags = getPaperStatusFlags(currentPaper, resources)
-  const hintParts = []
-  if (flags.summaryPending) hintParts.push('还没整理总结')
-  if (flags.hasNotes) hintParts.push(`${flags.noteCount || 0} 条笔记可回看`)
-  if (flags.hasTranslation) hintParts.push('已有全文翻译')
-  if (flags.isStale) hintParts.push(flags.staleResourcePreview || `${flags.staleResourceLabel || '资源'}已经过期，建议重新生成`)
   return {
     paper: currentPaper,
-    statusLabel: getPaperStatusLabel(flags),
-    statusHint: hintParts[0] || '回到刚才的阅读现场，继续往下推进',
-    statusTags: hintParts.filter((item) => item !== hintParts[0]).slice(0, 3),
   }
 }
 
@@ -290,13 +277,9 @@ function buildPendingTasks({
   paperResourcesById,
   readingDashboard,
   trashPapers,
-  matrixRuns,
 }) {
   const tasks = []
   const overview = readingDashboard?.overview || {}
-  const summaryPendingCount = recentPapers.filter((paper) =>
-    matchesLibraryStatusFilter('summary-pending', paper, paperResourcesById),
-  ).length
   const unreadCount = recentPapers.filter((paper) =>
     matchesLibraryStatusFilter('unread', paper, paperResourcesById),
   ).length
@@ -308,17 +291,6 @@ function buildPendingTasks({
     const ms = Number(paper.expiresAt) - Date.now()
     return ms > 0 && ms <= 3 * 24 * 60 * 60 * 1000
   }).length
-  const pendingMatrixRun = (matrixRuns || []).find((run) => ['queued', 'running', 'failed'].includes(run?.status))
-
-  if (summaryPendingCount > 0) {
-    tasks.push({
-      id: 'summary-pending',
-      count: summaryPendingCount,
-      title: '篇还没做总结',
-      helper: '适合补成可回看的结论卡片',
-      tone: 'violet',
-    })
-  }
   if (staleCount > 0) {
     tasks.push({
       id: 'stale',
@@ -335,16 +307,6 @@ function buildPendingTasks({
       title: '篇新文献待阅读',
       helper: '先挑一篇开读，首页就会开始记轨迹',
       tone: 'blue',
-    })
-  }
-  if (pendingMatrixRun) {
-    tasks.push({
-      id: 'matrix-pending',
-      count: Number(pendingMatrixRun.paper_count || pendingMatrixRun.total_count || 0),
-      title: '篇矩阵批次待继续',
-      helper: pendingMatrixRun.status === 'failed' ? '批次生成中断了，回去补齐最划算' : '矩阵还在后台处理，适合回去查看进度',
-      tone: pendingMatrixRun.status === 'failed' ? 'rose' : 'emerald',
-      label: pendingMatrixRun.title || '未命名批次',
     })
   }
   if (trashSoonCount > 0) {
@@ -793,27 +755,18 @@ function ContinueWorkSection({ item, onBrowseLibrary, onOpenPaper, onOpenResourc
   const paper = item.paper
   const resources = getPaperResourceEntries(paper.id, paperResourcesById)
   const previewResource = resources[0] || null
+  const displayTitle = cleanPaperTitleForDisplay(paper.title, paper.fileName)
 
   return (
     <section className="home-continue-card">
       <div className="home-continue-card__body">
         <div className="home-continue-card__copy">
           <p className="panel-label">继续上次工作</p>
-          <h3>{paper.title}</h3>
-          <p className="home-continue-card__meta">
-            {paper.folderName || '未分类'}
-            {paper.metadata?.author ? ` / ${paper.metadata.author}` : ''}
-          </p>
-          <div className="home-continue-card__meta-row" aria-label="阅读状态">
-            <span className="home-continue-card__meta-chip is-status">{item.statusLabel}</span>
-            <time className="home-continue-card__meta-chip is-time">
+          <h3 title={compactHomeText(paper.title) || displayTitle}>{displayTitle}</h3>
+          <div className="home-continue-card__meta-row" aria-label="最近阅读时间">
+            <time className="home-continue-card__time">
               {formatDateTime(paper.lastViewedAt)}
             </time>
-            {[item.statusHint, ...item.statusTags].filter(Boolean).map((tag, index) => (
-              <span key={`${tag}-${index}`} className="home-continue-card__meta-chip">
-                {tag}
-              </span>
-            ))}
           </div>
         </div>
 
@@ -842,7 +795,7 @@ function ContinueWorkSection({ item, onBrowseLibrary, onOpenPaper, onOpenResourc
   )
 }
 
-function PendingTaskSection({ tasks, onTaskClick, searchSlot = null }) {
+function PendingTaskSection({ tasks, onTaskClick }) {
   const [isExpanded, setIsExpanded] = useState(false)
   const visibleTasks = isExpanded ? tasks : tasks.slice(0, HOME_PENDING_VISIBLE_COUNT)
   const hiddenTaskCount = Math.max(tasks.length - HOME_PENDING_VISIBLE_COUNT, 0)
@@ -854,7 +807,6 @@ function PendingTaskSection({ tasks, onTaskClick, searchSlot = null }) {
           <h3>现在最值得处理的事</h3>
           <span>点一下直接跳到对应文献或工作区</span>
         </div>
-        {searchSlot ? <div className="home-pending-panel__search">{searchSlot}</div> : null}
       </div>
 
       {tasks.length ? (
@@ -892,6 +844,31 @@ function PendingTaskSection({ tasks, onTaskClick, searchSlot = null }) {
       ) : (
         <div className="home-inline-message">当前没有堆着不处理就会耽误的事，可以直接回到你的阅读列表继续推进。</div>
       )}
+    </section>
+  )
+}
+
+function WeeklyReadingSummary({ stats }) {
+  return (
+    <section className="home-weekly-summary" aria-label="本周阅读">
+      <div className="home-weekly-summary__label">本周阅读</div>
+      <div className="home-weekly-summary__items">
+        {stats.map((item) => {
+          const Icon = item.icon
+          const iconClass = item.period ? 'icon-animate-pulse' : ''
+          return (
+            <article key={item.id} className="home-weekly-summary__item">
+              <div className="home-weekly-summary__icon">
+                <Icon className={iconClass} />
+              </div>
+              <div className="home-weekly-summary__copy">
+                <p>{item.label}</p>
+                <strong>{item.value}</strong>
+              </div>
+            </article>
+          )
+        })}
+      </div>
     </section>
   )
 }
@@ -1440,7 +1417,6 @@ export function HomePage({
   onMovePaper,
   onOpenFilePicker,
   onOpenPaper,
-  onJumpToPaperEvidence,
   onOpenResource,
   onPermanentlyDeletePaper,
   onRefreshPaperMetadata,
@@ -1480,7 +1456,6 @@ export function HomePage({
   const [editFolderName, setEditFolderName] = useState('')
   const [highlightPaperId, setHighlightPaperId] = useState('')
   const [jumpPaperId, setJumpPaperId] = useState('')
-  const [matrixRuns, setMatrixRuns] = useState([])
   const visibleHomeSections = homeSections
   const deferredSearchTerm = useDeferredValue(searchTerm)
   const effectiveSearchTerm = searchTerm.trim() ? deferredSearchTerm : ''
@@ -1503,28 +1478,6 @@ export function HomePage({
       setShowImportMenu(false)
     }
   }, [activeSection])
-
-  useEffect(() => {
-    let cancelled = false
-
-    async function loadMatrixRuns() {
-      try {
-        const payload = await fetchResearchMatrixRuns()
-        if (!cancelled) {
-          setMatrixRuns(payload?.runs || [])
-        }
-      } catch {
-        if (!cancelled) {
-          setMatrixRuns([])
-        }
-      }
-    }
-
-    loadMatrixRuns()
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   const groupedPapers = useMemo(
     () => buildGroupedPapers(recentPapers, effectiveSearchTerm),
@@ -1565,10 +1518,7 @@ export function HomePage({
     [resourceOverview],
   )
 
-  const continueWorkItem = useMemo(
-    () => buildContinueWorkItem(recentPapers, paperResourcesById),
-    [paperResourcesById, recentPapers],
-  )
+  const continueWorkItem = useMemo(() => buildContinueWorkItem(recentPapers), [recentPapers])
 
   const pendingTasks = useMemo(
     () => buildPendingTasks({
@@ -1576,9 +1526,8 @@ export function HomePage({
       paperResourcesById,
       readingDashboard,
       trashPapers,
-      matrixRuns,
     }),
-    [matrixRuns, paperResourcesById, readingDashboard, recentPapers, trashPapers],
+    [paperResourcesById, readingDashboard, recentPapers, trashPapers],
   )
 
   const activeLibraryFilterLabel = useMemo(
@@ -1730,7 +1679,7 @@ export function HomePage({
   }
 
   function handleSelectSection(sectionId) {
-    if (isGuest && ['library', 'paper-format', 'insights', 'matrix', 'trash'].includes(sectionId)) {
+    if (isGuest && ['library', 'paper-format', 'insights', 'trash'].includes(sectionId)) {
       requireLogin(homeSections.find((item) => item.id === sectionId)?.label || '该功能')
       return
     }
@@ -1756,11 +1705,6 @@ export function HomePage({
 
   function handlePendingTaskClick(task) {
     if (requireLogin(task.title || '该功能')) return
-    if (task.id === 'matrix-pending') {
-      setActiveSection('matrix')
-      return
-    }
-
     if (task.id === 'trash-soon') {
       setActiveSection('trash')
       onRefreshTrash?.()
@@ -1775,7 +1719,7 @@ export function HomePage({
   }
 
   return (
-    <section className="home-shell">
+    <section className="home-shell home-shell--redesign">
       <aside className="home-sidebar">
         <div className="home-sidebar__group">
           {visibleHomeSections.map((item) => {
@@ -1944,7 +1888,7 @@ export function HomePage({
         </div>
       </aside>
 
-      <div className={`home-content${activeSection === 'library' ? ' is-library' : ''}${activeSection === 'matrix' ? ' is-matrix' : ''}${activeSection === 'literature-search' ? ' is-literature-search' : ''}${activeSection === 'paper-format' ? ' is-paper-format' : ''}`}>
+      <div className={`home-content${activeSection === 'recent' ? ' is-recent' : ''}${activeSection === 'library' ? ' is-library' : ''}${activeSection === 'literature-search' ? ' is-literature-search' : ''}${activeSection === 'paper-format' ? ' is-paper-format' : ''}`}>
         {activeSection === 'library' ? (
         <div className={`home-toolbar${activeSection === 'library' ? ' is-library' : ''}`}>
           {activeSection === 'library' ? (
@@ -2033,20 +1977,13 @@ export function HomePage({
                   paperResourcesById={paperResourcesById}
                 />
 
-                <PendingTaskSection
-                  tasks={pendingTasks}
-                  onTaskClick={handlePendingTaskClick}
-                  searchSlot={
-                    <HomeSearchControl
-                      activeSection={activeSection}
-                      searchTerm={searchTerm}
-                      onSearchChange={setSearchTerm}
-                      searchResults={globalSearchResults}
-                      onResultClick={handleGlobalSearchClick}
-                      className="home-search-wrap--pending"
-                    />
-                  }
-                />
+                <div className="home-overview-band">
+                  <PendingTaskSection
+                    tasks={pendingTasks}
+                    onTaskClick={handlePendingTaskClick}
+                  />
+                  <WeeklyReadingSummary stats={weeklyStats} />
+                </div>
               </>
             ) : null}
 
@@ -2065,42 +2002,7 @@ export function HomePage({
                   onRefreshTrash?.()
                 }}
               />
-            ) : (
-              <>
-                <div className="home-heading">
-                  <div>
-                    <p className="panel-label">阅读轨迹</p>
-                    <h2>最近打开过的文献</h2>
-                  </div>
-                  <div className="home-heading__meta">
-                    <LibraryBig />
-                    <span>{recentPapers.length} 篇阅读中的文献</span>
-                  </div>
-                </div>
-
-                <div className="home-stats-grid">
-                  {weeklyStats.map((item) => {
-                    const Icon = item.icon
-                    const cardClass = [
-                      'home-stat-card',
-                      item.period ? `home-stat-card--${item.period}` : '',
-                    ].filter(Boolean).join(' ')
-                    const iconClass = item.period ? 'icon-animate-pulse' : ''
-                    return (
-                      <article key={item.id} className={cardClass}>
-                        <div className="home-stat-card__icon">
-                          <Icon className={iconClass} />
-                        </div>
-                        <div>
-                          <p>{item.label}</p>
-                          <strong>{item.value}</strong>
-                        </div>
-                      </article>
-                    )
-                  })}
-                </div>
-              </>
-            )}
+            ) : null}
           </>
         ) : null}
 
@@ -2127,10 +2029,10 @@ export function HomePage({
           </Suspense>
         ) : null}
 
-        {activeSection !== 'matrix' && activeSection !== 'insights' && activeSection !== 'literature-search' && activeSection !== 'paper-format' && !showRecentWorkspaceEmpty ? (
+        {activeSection !== 'insights' && activeSection !== 'literature-search' && activeSection !== 'paper-format' && !showRecentWorkspaceEmpty ? (
         <div className={`home-section-head${activeSection === 'library' ? ' is-library' : ''}`}>
           <h3>
-            {activeSection === 'recent' && '阅读记录'}
+            {activeSection === 'recent' && '最近打开的文献'}
             {activeSection === 'library' && '我的文献'}
             {activeSection === 'trash' && '回收站'}
           </h3>
@@ -2142,6 +2044,16 @@ export function HomePage({
               {activeSection === 'trash' && '仅保留最近 7 天删除内容'}
             </span>
           )}
+          {activeSection === 'recent' ? (
+            <HomeSearchControl
+              activeSection={activeSection}
+              searchTerm={searchTerm}
+              onSearchChange={setSearchTerm}
+              searchResults={globalSearchResults}
+              onResultClick={handleGlobalSearchClick}
+              className="home-search-wrap--recent"
+            />
+          ) : null}
         </div>
         ) : null}
 
@@ -2158,19 +2070,20 @@ export function HomePage({
         {activeSection === 'library' ? (
           <>
             <div className="home-status-filter">
-              {LIBRARY_STATUS_FILTERS.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`home-status-filter__chip${libraryStatusFilter === item.id ? ' is-active' : ''}`}
-                  onClick={() => setLibraryStatusFilter(item.id)}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
+              <div className="home-status-filter__options">
+                {LIBRARY_STATUS_FILTERS.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`home-status-filter__chip${libraryStatusFilter === item.id ? ' is-active' : ''}`}
+                    onClick={() => setLibraryStatusFilter(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
 
-            <div className="home-library-advanced-filter">
+              <div className="home-library-advanced-filter">
               <label>
                 <span>作者</span>
                 <input
@@ -2210,6 +2123,7 @@ export function HomePage({
                 </button>
               ) : null}
             </div>
+            </div>
 
             <CategorySection
               folders={folders}
@@ -2240,20 +2154,6 @@ export function HomePage({
               uncategorizedFolderId={uncategorizedFolderId}
             />
           </>
-        ) : null}
-
-        {activeSection === 'matrix' ? (
-          <Suspense fallback={<SectionFallback message="正在加载文献矩阵..." />}>
-            <ResearchMatrixPage
-              folders={folders}
-            onJumpToPaperEvidence={(...args) => {
-              if (requireLogin('文献矩阵')) return
-              onJumpToPaperEvidence(...args)
-            }}
-            recentPapers={recentPapers}
-              uncategorizedFolderId={uncategorizedFolderId}
-            />
-          </Suspense>
         ) : null}
 
         {activeSection === 'trash' ? (

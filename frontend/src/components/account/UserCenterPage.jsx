@@ -60,9 +60,6 @@ const TEXT = {
   statusExpired: '\u5df2\u5230\u671f',
   statusCancelled: '\u5df2\u53d6\u6d88',
   quotaExplain: '\u5212\u8bcd\u89e3\u91ca',
-  quotaContext: '\u4e0a\u4e0b\u6587\u7406\u89e3',
-  quotaSummary: '\u5361\u7247\u603b\u7ed3',
-  quotaMatrix: '\u6587\u732e\u77e9\u9635',
   periodToday: '\u4eca\u65e5',
   periodMonth: '\u672c\u6708',
   remainingPrefix: '\u5269\u4f59',
@@ -146,16 +143,10 @@ const MEMBERSHIP_STATUS_LABELS = {
 
 const MEMBERSHIP_QUOTA_ORDER = [
   'selection_explain_daily',
-  'selection_context_daily',
-  'summary_card_monthly',
-  'matrix_run_monthly',
 ]
 
 const MEMBERSHIP_QUOTA_LABELS = {
   selection_explain_daily: { title: TEXT.quotaExplain, period: TEXT.periodToday },
-  selection_context_daily: { title: TEXT.quotaContext, period: TEXT.periodToday },
-  summary_card_monthly: { title: TEXT.quotaSummary, period: TEXT.periodMonth },
-  matrix_run_monthly: { title: TEXT.quotaMatrix, period: TEXT.periodMonth },
 }
 
 function formatDateTime(value) {

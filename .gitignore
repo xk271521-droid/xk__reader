@@ -46,3 +46,11 @@ tmp/
 # Local Claude worktrees
 .claude/worktrees/
 .worktrees/
+
+# Local database & dist builds
+backend/data/
+backend/backend-dist/
+backend/backend-dist-lite/
+backend/.venvs/
+output/
+frontend/.tmp/

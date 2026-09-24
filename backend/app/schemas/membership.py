@@ -13,9 +13,6 @@ MembershipPriorityLevel = Literal["free", "vip"]
 QuotaPeriodType = Literal["daily", "monthly"]
 QuotaKey = Literal[
     "selection_explain_daily",
-    "selection_context_daily",
-    "summary_card_monthly",
-    "matrix_run_monthly",
 ]
 
 

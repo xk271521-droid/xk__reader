@@ -268,6 +268,104 @@ export function getFullTranslationDownloadUrl(paperId) {
   return `${PAPERS_BASE}/${paperId}/full-translation/download`
 }
 
+export async function retranslateFullTranslation(paperId) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/full-translation/retranslate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({}),
+  })
+  return parseJsonResponse(response)
+}
+
+export function getFullTranslationFileUrl(paperId) {
+  return `${PAPERS_BASE}/${paperId}/full-translation/file`
+}
+
+export async function downloadFullTranslation(paperId, fallbackName = 'translation-zh.pdf') {
+  const response = await fetch(getFullTranslationDownloadUrl(paperId), {
+    headers: authHeaders(),
+  })
+  if (!response.ok) {
+    return parseJsonResponse(response)
+  }
+  return {
+    blob: await response.blob(),
+    fileName: parseDownloadFileName(response.headers.get('Content-Disposition'), fallbackName),
+  }
+}
+
+export async function fetchPaperReadingBrief(paperId) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/reading-brief`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function ensurePaperReadingBrief(paperId, providerId = null) {
+  const body = providerId ? { provider_id: Number(providerId) } : {}
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/reading-brief/ensure`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function retryPaperReadingBrief(paperId, providerId = null) {
+  const body = providerId ? { provider_id: Number(providerId) } : {}
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/reading-brief/retry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function refreshPaperReadingBrief(paperId, providerId = null) {
+  const body = providerId ? { provider_id: Number(providerId) } : {}
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/reading-brief/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function fetchPaperAiOutline(paperId) {
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/ai-outline`, {
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+function buildPaperAiOutlineRequest({ providerId = null, nativeOutline = null } = {}) {
+  const body = providerId ? { provider_id: Number(providerId) } : {}
+  if (Array.isArray(nativeOutline) && nativeOutline.length > 0) {
+    body.native_outline = { items: nativeOutline }
+  }
+  return body
+}
+
+export async function ensurePaperAiOutline(paperId, options = {}) {
+  const body = buildPaperAiOutlineRequest(options)
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/ai-outline/ensure`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function retryPaperAiOutline(paperId, options = {}) {
+  const body = buildPaperAiOutlineRequest(options)
+  const response = await fetch(`${PAPERS_BASE}/${paperId}/ai-outline/retry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  })
+  return parseJsonResponse(response)
+}
+
 export async function fetchPaperFormatProfiles() {
   const response = await fetch('/api/paper-format/profiles', {
     headers: authHeaders(),
@@ -379,161 +477,6 @@ export async function fetchResourceOverview() {
   return parseJsonResponse(response)
 }
 
-export async function fetchResearchDashboard() {
-  const response = await fetch('/api/research-matrix/dashboard', {
-    headers: authHeaders(),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function fetchResearchMatrixRuns() {
-  const response = await fetch('/api/research-matrix/runs', {
-    headers: authHeaders(),
-    cache: 'no-store',
-  })
-  return parseJsonResponse(response)
-}
-
-export async function fetchResearchMatrixRunStatuses() {
-  const response = await fetch('/api/research-matrix/runs/status', {
-    headers: authHeaders(),
-    cache: 'no-store',
-  })
-  return parseJsonResponse(response)
-}
-
-export async function createResearchMatrixRun(payload) {
-  const response = await fetch('/api/research-matrix/runs', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(payload),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function fetchResearchMatrixRun(runId) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}`, {
-    headers: authHeaders(),
-    cache: 'no-store',
-  })
-  return parseJsonResponse(response)
-}
-
-export async function updateResearchMatrixRun(runId, payload = {}) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(payload),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function updateResearchMatrixRunGroupingMode(runId, groupingMode) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}/grouping-mode`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ grouping_mode: groupingMode }),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function refreshResearchMatrixRun(runId, payload = {}) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}/refresh`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(payload),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function updateResearchMatrixRunPaper(runId, paperId, payload = {}) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}/papers/${paperId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(payload),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function retryResearchMatrixRunPaperReview(runId, paperId, payload = {}) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}/papers/${paperId}/retry-review`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(payload),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function updateResearchMatrixRunOutline(runId, payload = {}) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}/outline`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(payload),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function rewriteResearchMatrixDraftSection(runId, payload = {}) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}/drafts:rewrite-section`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(payload),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function prepareResearchMatrixDraftSources(runId, payload = {}) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}/drafts:prepare-sources`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(payload),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function refreshResearchMatrixInsights(runId) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}/insights:refresh`, {
-    method: 'POST',
-    headers: authHeaders(),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function retryPendingResearchMatrixRun(runId) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}/retry-pending`, {
-    method: 'POST',
-    headers: authHeaders(),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function deleteResearchMatrixRun(runId) {
-  const response = await fetch(`/api/research-matrix/runs/${runId}`, {
-    method: 'DELETE',
-    headers: authHeaders(),
-  })
-  if (!response.ok) {
-    let detail = '删除矩阵记录失败'
-    try {
-      const payload = await response.json()
-      if (typeof payload?.detail === 'string') detail = payload.detail
-    } catch {
-      void 0
-    }
-    throw new Error(detail)
-  }
-  return null
-}
-
-export async function generateMissingReviewSummaries(payload) {
-  const response = await fetch('/api/research-matrix/generate-missing', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(payload),
-  })
-  return parseJsonResponse(response)
-}
-
 export async function saveResourceLayout(paperId, layout) {
   const response = await fetch(`/api/resources/${paperId}/layout`, {
     method: 'PUT',
@@ -569,15 +512,6 @@ export async function fetchSelectionInsight(payload) {
       'Content-Type': 'application/json',
       ...authHeaders(),
     },
-    body: JSON.stringify(payload),
-  })
-  return parseJsonResponse(response)
-}
-
-export async function fetchSelectionInsightExplain(payload) {
-  const response = await fetch('/api/selection-insight/explain', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
   })
   return parseJsonResponse(response)
@@ -628,34 +562,44 @@ export async function deleteAiProvider(id) {
   return null
 }
 
-export async function fetchPaperSummary(text, providerId) {
-  const response = await fetch('/api/summarize', {
+export async function testAiProvider(data) {
+  const response = await fetch('/api/providers/test', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ text, provider_id: providerId }),
+    body: JSON.stringify(data),
   })
   return parseJsonResponse(response)
 }
 
-export async function fetchPaperSummaries(paperId) {
-  const response = await fetch(`${PAPERS_BASE}/${paperId}/summaries`, {
+export async function fetchTranslationConfig() {
+  const response = await fetch('/api/translation/config', {
     headers: authHeaders(),
   })
   return parseJsonResponse(response)
 }
 
-export async function generatePaperSummary(paperId, summaryType, payload = {}) {
-  const response = await fetch(`${PAPERS_BASE}/${paperId}/summaries/${summaryType}/generate`, {
+export async function updateTranslationConfig(data) {
+  const response = await fetch('/api/translation/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(data),
   })
   return parseJsonResponse(response)
 }
 
-export async function fetchPaperSummaryStatus(paperId, summaryType) {
-  const response = await fetch(`${PAPERS_BASE}/${paperId}/summaries/${summaryType}/status`, {
+export async function deleteTranslationConfig() {
+  const response = await fetch('/api/translation/config', {
+    method: 'DELETE',
     headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}
+
+export async function testBaiduTranslation(data) {
+  const response = await fetch('/api/translation/baidu/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
   })
   return parseJsonResponse(response)
 }

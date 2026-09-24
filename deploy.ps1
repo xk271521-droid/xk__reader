@@ -229,8 +229,11 @@ try:
     remote_commands.extend([
         "nginx -t",
         "systemctl reload nginx",
-        "sleep 2",
-        "curl -fsS http://127.0.0.1:8000/api/health >/tmp/xk-reader-health.txt",
+        "for i in $(seq 1 60); do "
+        "if curl -fsS http://127.0.0.1:8000/api/health >/tmp/xk-reader-health.txt; then break; fi; "
+        "if [ \"$i\" -eq 60 ]; then systemctl status xk-reader-backend --no-pager -l; exit 1; fi; "
+        "sleep 2; "
+        "done",
         "curl -fsS -I http://127.0.0.1/ >/tmp/xk-reader-frontend-head.txt",
         "curl -fsS -I http://127.0.0.1/downloads/xk-reader-setup.exe >/tmp/xk-reader-desktop-download-head.txt",
         f"echo backup={remote_backup}",

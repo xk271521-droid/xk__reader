@@ -1,4 +1,8 @@
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+# The local API has one supported entrypoint. Keep this in sync with the
+# frontend proxy and do not silently move to another backend port.
+$backendHost = '127.0.0.1'
+$backendPort = 8000
 $tunnelScript = Join-Path $projectRoot 'scripts\db_ssh_tunnel.py'
 $backendOut = Join-Path $projectRoot 'backend-local-fixed.out.log'
 $backendErr = Join-Path $projectRoot 'backend-local-fixed.err.log'
@@ -40,10 +44,18 @@ Import-EnvFile -Path (Join-Path $projectRoot '.env')
 Import-EnvFile -Path (Join-Path $projectRoot '.env.local') -Overwrite
 
 $pythonExe = if ($env:PYTHON_EXE) { $env:PYTHON_EXE } else { 'C:\Python314\python.exe' }
-$databaseUrl = if ($env:XK_READER_LOCAL_DATABASE_URL) { $env:XK_READER_LOCAL_DATABASE_URL } else { $env:DATABASE_URL }
+$isStandaloneLocal = $env:XK_READER_USE_LOCAL_DATABASE -match '^(1|true|yes)$'
+$databaseUrl = if ($isStandaloneLocal) {
+  # The tunnel-only URL can use a server account without local MySQL permission.
+  $env:DATABASE_URL
+} elseif ($env:XK_READER_LOCAL_DATABASE_URL) {
+  $env:XK_READER_LOCAL_DATABASE_URL
+} else {
+  $env:DATABASE_URL
+}
 $uploadPublicBaseUrl = $env:UPLOAD_PUBLIC_BASE_URL
 $localTunnelPort = if ($env:DB_TUNNEL_LOCAL_PORT) { [int]$env:DB_TUNNEL_LOCAL_PORT } else { 3307 }
-$usesLocalTunnel = -not [string]::IsNullOrWhiteSpace($databaseUrl) -and $databaseUrl -match "@(127\.0\.0\.1|localhost):$localTunnelPort\b"
+$usesLocalTunnel = -not $isStandaloneLocal -and -not [string]::IsNullOrWhiteSpace($databaseUrl) -and $databaseUrl -match "@(127\.0\.0\.1|localhost):$localTunnelPort\b"
 $enableReload = $env:XK_BACKEND_RELOAD -match '^(1|true|yes)$'
 
 if ($usesLocalTunnel) {
@@ -62,7 +74,7 @@ if ($usesLocalTunnel) {
 }
 
 $backendProcesses = Get-CimInstance Win32_Process |
-  Where-Object { $_.CommandLine -like '*uvicorn main:app*8000*' }
+  Where-Object { $_.CommandLine -like "*uvicorn main:app*$backendPort*" }
 foreach ($process in $backendProcesses) {
   Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
 }
@@ -79,7 +91,7 @@ if (-not [string]::IsNullOrWhiteSpace($uploadPublicBaseUrl)) {
   [Environment]::SetEnvironmentVariable('UPLOAD_PUBLIC_BASE_URL', $uploadPublicBaseUrl, 'Process')
 }
 
-$uvicornArgs = @('-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8000')
+$uvicornArgs = @('-m', 'uvicorn', 'main:app', '--host', $backendHost, '--port', "$backendPort")
 if ($enableReload) {
   $uvicornArgs += '--reload'
 }

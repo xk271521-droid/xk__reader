@@ -54,6 +54,20 @@ function getPageFrameFromElement(element) {
     : null
 }
 
+function getNormalizedAnchorClientRect(element, anchorRect) {
+  const pageRect = element?.getBoundingClientRect?.()
+  if (!pageRect || pageRect.width <= 0 || pageRect.height <= 0) return null
+  if (!anchorRect || ![anchorRect.left, anchorRect.top, anchorRect.width, anchorRect.height].every(Number.isFinite)) {
+    return null
+  }
+  return {
+    left: pageRect.left + anchorRect.left * pageRect.width,
+    top: pageRect.top + anchorRect.top * pageRect.height,
+    width: anchorRect.width * pageRect.width,
+    height: anchorRect.height * pageRect.height,
+  }
+}
+
 function createEmptySelection() {
   return {
     visible: false,
@@ -1008,6 +1022,7 @@ export function PdfViewport({
     cancelTransientFrameIfIdle()
     setSelectionState(selection)
     if (shouldNotify && selection.visible) {
+      const anchorElement = readerRef.current?.querySelector(`[data-page-number="${selection.pageNumber}"]`) || null
       onSelect?.({
         text: selection.copyText || selection.text,
         pageNumber: selection.pageNumber,
@@ -1015,6 +1030,8 @@ export function PdfViewport({
         endChar: selection.endChar,
         rects: selection.rects,
         anchorRect: selection.anchorRect,
+        anchorElement,
+        anchorClientRect: getNormalizedAnchorClientRect(anchorElement, selection.anchorRect),
         contextBefore: selection.contextBefore,
         contextAfter: selection.contextAfter,
       })

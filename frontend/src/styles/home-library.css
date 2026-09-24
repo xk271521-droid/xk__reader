@@ -15,6 +15,8 @@
 .home-content.is-library .home-category-table {
   flex: 0 1 auto;
   min-height: 0;
+  /* Row action menus are absolutely positioned and must escape the table edge. */
+  overflow: visible;
 }
 
 .home-content.is-library .home-pagination {
@@ -32,6 +34,26 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.app-shell:not(.app-shell--auth) .home-shell--redesign .home-status-filter {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 18px;
+}
+
+.app-shell:not(.app-shell--auth) .home-shell--redesign .home-status-filter__options {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+}
+
+.app-shell:not(.app-shell--auth) .home-shell--redesign .home-status-filter .home-library-advanced-filter {
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
+  margin-left: auto;
+  padding: 0;
 }
 
 .home-library-advanced-filter {
@@ -92,11 +114,32 @@
   justify-content: center;
 }
 
+.app-shell:not(.app-shell--auth) .home-shell--redesign .home-sidebar-folder-tree__item.is-active {
+  position: relative;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #111827;
+}
+
+.app-shell:not(.app-shell--auth) .home-shell--redesign .home-sidebar-folder-tree__item.is-active::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: #15485a;
+  content: '';
+}
+
 .home-category-table__row.is-selected {
   background: rgba(37, 99, 235, 0.06);
 }
 
 @media (max-width: 760px) {
+  .app-shell:not(.app-shell--auth) .home-shell--redesign .home-status-filter .home-library-advanced-filter {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+
   .home-content.is-library .home-category-table__head,
   .home-content.is-library .home-category-table__row {
     grid-template-columns: 1fr;

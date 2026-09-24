@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models import Annotation, Paper, PaperSummary, User
+from app.models import Annotation, Paper, User
 from app.schemas.annotation import (
     AnnotationBatchEraseRequest,
     AnnotationCreate,
@@ -105,96 +105,6 @@ def _cleanup_fragmented_annotations(paper_id: int, db: Session) -> bool:
     return changed
 
 
-def _invalidate_annotation_summary(paper_id: int, user_id: int, db: Session) -> None:
-    item = db.scalar(
-        select(PaperSummary).where(
-            PaperSummary.paper_id == paper_id,
-            PaperSummary.user_id == user_id,
-            PaperSummary.summary_type == "annotations",
-        )
-    )
-    if not item or item.status == "running":
-        return
-    if item.status == "generated" and item.content_json:
-        # Keep the last generated result visible; the old source_hash lets the
-        # summary API surface it as "stale" until the user manually updates it.
-        item.error_message = None
-        db.add(item)
-        return
-    item.status = "idle"
-    item.stage = "idle"
-    item.progress = 0
-    item.source_hash = ""
-    item.content_json = {}
-    item.error_message = None
-    db.add(item)
-
-
-def _slice_quote_text(quote: str | None, old_start: int, old_end: int, new_start: int, new_end: int) -> str:
-    text = str(quote or "")
-    if not text or old_end <= old_start or new_end <= new_start:
-        return ""
-    span = max(1, old_end - old_start)
-    left = max(0, min(len(text), round((new_start - old_start) / span * len(text))))
-    right = max(left, min(len(text), round((new_end - old_start) / span * len(text))))
-    return text[left:right].strip()
-
-
-def _apply_erase_range(
-    paper_id: int,
-    page_number: int,
-    start_char: int,
-    end_char: int,
-    db: Session,
-) -> None:
-    annotations = db.scalars(
-        select(Annotation)
-        .where(
-            Annotation.paper_id == paper_id,
-            Annotation.page_number == page_number,
-            Annotation.end_char > start_char,
-            Annotation.start_char < end_char,
-        )
-        .order_by(Annotation.start_char, Annotation.id)
-    ).all()
-
-    for annotation in annotations:
-        old_start = annotation.start_char
-        old_end = annotation.end_char
-        old_quote = annotation.quote_text
-        if start_char <= annotation.start_char and end_char >= annotation.end_char:
-            db.delete(annotation)
-            continue
-
-        if start_char <= annotation.start_char:
-            annotation.quote_text = _slice_quote_text(old_quote, old_start, old_end, end_char, old_end)
-            annotation.start_char = end_char
-        elif end_char >= annotation.end_char:
-            annotation.quote_text = _slice_quote_text(old_quote, old_start, old_end, old_start, start_char)
-            annotation.end_char = start_char
-        else:
-            right_quote = _slice_quote_text(old_quote, old_start, old_end, end_char, old_end)
-            right_piece = Annotation(
-                user_id=annotation.user_id,
-                paper_id=annotation.paper_id,
-                page_number=annotation.page_number,
-                start_char=end_char,
-                end_char=annotation.end_char,
-                quote_text=right_quote,
-                rects_json=annotation.rects_json,
-                type=annotation.type,
-                color=annotation.color,
-                source=annotation.source,
-                geometry_version="v2",
-            )
-            annotation.quote_text = _slice_quote_text(old_quote, old_start, old_end, old_start, start_char)
-            annotation.end_char = start_char
-            db.add(right_piece)
-
-        annotation.geometry_version = "v2"
-        db.add(annotation)
-
-
 @router.get("", response_model=AnnotationListResponse)
 def list_annotations(
     paper_id: int,
@@ -202,10 +112,8 @@ def list_annotations(
     db: Annotated[Session, Depends(get_db)],
 ) -> AnnotationListResponse:
     _ensure_owned_paper(paper_id, user, db)
-    if _dedupe_paper_annotations(paper_id, db):
-        _invalidate_annotation_summary(paper_id, user.id, db)
-    if _cleanup_fragmented_annotations(paper_id, db):
-        _invalidate_annotation_summary(paper_id, user.id, db)
+    _dedupe_paper_annotations(paper_id, db)
+    _cleanup_fragmented_annotations(paper_id, db)
     db.commit()
     annotations = _list_paper_annotations(paper_id, db)
     return AnnotationListResponse(
@@ -236,7 +144,6 @@ def create_annotation(
         geometry_version=payload.geometry_version,
     )
     db.add(annotation)
-    _invalidate_annotation_summary(paper_id, user.id, db)
     db.commit()
     db.refresh(annotation)
     return _build_response(annotation)
@@ -265,7 +172,6 @@ def erase_annotations(
     db.commit()
     _dedupe_paper_annotations(paper_id, db)
     _cleanup_fragmented_annotations(paper_id, db)
-    _invalidate_annotation_summary(paper_id, user.id, db)
     db.commit()
 
     updated = _list_paper_annotations(paper_id, db)
@@ -301,7 +207,6 @@ def erase_annotations_batch(
     db.commit()
     _dedupe_paper_annotations(paper_id, db)
     _cleanup_fragmented_annotations(paper_id, db)
-    _invalidate_annotation_summary(paper_id, user.id, db)
     db.commit()
 
     updated = _list_paper_annotations(paper_id, db)
@@ -344,8 +249,6 @@ def restore_annotations(
                 geometry_version=item.geometry_version,
             )
         )
-
-    _invalidate_annotation_summary(paper_id, user.id, db)
     db.commit()
 
     restored = _list_paper_annotations(paper_id, db)
@@ -368,8 +271,6 @@ def clear_annotations(
     ).all()
     for annotation in current_annotations:
         db.delete(annotation)
-
-    _invalidate_annotation_summary(paper_id, user.id, db)
     db.commit()
     return AnnotationListResponse(annotations=[])
 
@@ -394,5 +295,4 @@ def delete_annotation(
         raise HTTPException(status_code=404, detail="标注不存在或无权删除")
 
     db.delete(annotation)
-    _invalidate_annotation_summary(paper_id, user.id, db)
     db.commit()

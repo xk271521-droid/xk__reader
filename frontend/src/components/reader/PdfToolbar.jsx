@@ -11,31 +11,54 @@ import {
   Download,
   Eraser,
   Hash,
+  Highlighter,
   Languages,
+  MessageSquareText,
   MousePointer2,
   Pencil,
+  Redo2,
   ScanLine,
   Search,
   SlidersHorizontal,
   Square,
+  Strikethrough,
   Type,
   Undo2,
+  Underline,
+  Waves,
   X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
 import { DEFAULT_SHAPE_OPTIONS, SHAPE_COLOR_PALETTE, SHAPE_TOOL_IDS } from './shapeAnnotationModel'
+import {
+  DEFAULT_MARKUP_OPTIONS,
+  MARKUP_COLOR_PALETTE,
+  MARKUP_TOOL_IDS,
+} from './pdfMarkupStyleModel'
+import './readerToolbarLayout.css'
 
 const toolItems = [
   { id: 'select', label: '选择', icon: MousePointer2 },
+  { id: 'highlight', label: '高亮', icon: Highlighter },
+  { id: 'strikeout', label: '删除线', icon: Strikethrough },
+  { id: 'underline', label: '下划线', icon: Underline },
+  { id: 'squiggly', label: '波浪线', icon: Waves },
+  { id: 'ink', label: '手写', icon: Pencil },
+  { id: 'ink_highlighter', label: '荧光笔', icon: Highlighter },
+  { id: 'comment', label: '评论', icon: MessageSquareText },
   { id: 'text', label: '文本', icon: Type },
+  { id: 'line', label: '直线', icon: ArrowRight },
   { id: 'arrow', label: '箭头', icon: ArrowRight },
   { id: 'rect', label: '矩形', icon: Square },
   { id: 'circle', label: '圆形', icon: Circle },
   { id: 'pin', label: '编号', icon: Hash },
-  { id: 'ink', label: '手写', icon: Pencil },
   { id: 'screenshot', label: '截图', icon: Camera },
 ]
+
+// Keep the reader working surface flat: every concrete tool is always visible
+// in the single toolbar row. Category switching previously hid most tools and
+// made the toolbar look like an oversized tool collection.
 
 const eraserModeItems = [
   { id: 'brush', label: '笔刷擦除', tool: 'eraser', icon: Eraser },
@@ -49,17 +72,11 @@ const downloadItems = [
   { id: 'bibtex', label: 'BibTeX' },
 ]
 
-const parseModeItems = [
-  { id: 'auto', label: '自动' },
-  { id: 'local', label: '本地' },
-  { id: 'aliyun', label: '阿里云' },
-]
-
-function ToolbarIconButton({ children, label, onClick, active = false, disabled = false }) {
+function ToolbarIconButton({ children, label, onClick, active = false, disabled = false, className = '' }) {
   return (
     <button
       type="button"
-      className={`toolbar-icon-button${active ? ' is-active' : ''}`}
+      className={`toolbar-icon-button${active ? ' is-active' : ''}${className ? ` ${className}` : ''}`}
       onClick={onClick}
       title={label}
       aria-label={label}
@@ -80,11 +97,60 @@ function ColorPalette({ colors, activeColor, onChange }) {
           className={`toolbar-ink-color${activeColor === color ? ' is-active' : ''}`}
           style={{ backgroundColor: color }}
           title={color}
+          aria-label={`批注颜色 ${color}`}
           onClick={() => onChange?.(color)}
         >
           {activeColor === color ? <Check /> : null}
         </button>
       ))}
+    </div>
+  )
+}
+
+function DownloadControl({ onDownload }) {
+  const wrapRef = useRef(null)
+  const [isOpen, setIsOpen] = useState(false)
+
+  useEffect(() => {
+    if (!isOpen) return undefined
+    function handlePointerDown(event) {
+      if (!wrapRef.current?.contains(event.target)) setIsOpen(false)
+    }
+    document.addEventListener('pointerdown', handlePointerDown)
+    return () => document.removeEventListener('pointerdown', handlePointerDown)
+  }, [isOpen])
+
+  return (
+    <div className="toolbar-download" ref={wrapRef}>
+      <button
+        type="button"
+        className="toolbar-tool toolbar-tool--download"
+        title="下载"
+        aria-label="下载"
+        aria-expanded={isOpen}
+        onClick={() => setIsOpen((value) => !value)}
+      >
+        <Download />
+        <span>下载</span>
+      </button>
+
+      {isOpen ? (
+        <div className="toolbar-download-menu">
+          {downloadItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="toolbar-download-menu__item"
+              onClick={() => {
+                setIsOpen(false)
+                onDownload?.(item.id)
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -106,33 +172,37 @@ export function PdfToolbar({
   onSearchPrev,
   onSearchNext,
   canUndo = false,
+  canRedo = false,
   onUndo,
+  onRedo,
   onDownload,
   fullTranslateVisible = false,
   fullTranslateActive = false,
   fullTranslateStatus = 'idle',
   fullTranslateProgress = 0,
-  fullTranslateParseMode = 'auto',
-  onFullTranslateParseModeChange,
   onFullTranslate,
   inkOptions = { color: '#15803D', opacity: 0.85, strokeWidth: 6 },
   onInkOptionsChange,
+  markupOptions = DEFAULT_MARKUP_OPTIONS,
+  onMarkupOptionsChange,
   shapeOptions = DEFAULT_SHAPE_OPTIONS,
   onShapeOptionsChange,
   activeEraserMode = 'brush',
   onEraserModeChange,
 }) {
-  const downloadWrapRef = useRef(null)
   const eraserWrapRef = useRef(null)
   const inkWrapRef = useRef(null)
+  const markupWrapRef = useRef(null)
   const shapeWrapRef = useRef(null)
-  const [isDownloadOpen, setIsDownloadOpen] = useState(false)
   const [isEraserOpen, setIsEraserOpen] = useState(false)
   const [isInkOpen, setIsInkOpen] = useState(false)
+  const [isMarkupOpen, setIsMarkupOpen] = useState(false)
   const [isShapeOpen, setIsShapeOpen] = useState(false)
   const isShapeToolActive = SHAPE_TOOL_IDS.includes(activeTool)
   const fullTranslateLabel = fullTranslateStatus === 'running'
-    ? `翻译中 ${Math.round(fullTranslateProgress || 0)}%`
+    ? fullTranslateProgress > 0
+      ? `翻译中 ${Math.round(fullTranslateProgress)}%`
+      : '正在保版翻译…'
     : fullTranslateStatus === 'completed' || fullTranslateActive
       ? '看译文'
       : fullTranslateStatus === 'partial_failed'
@@ -147,18 +217,18 @@ export function PdfToolbar({
     : '启动全文翻译 Beta'
 
   useEffect(() => {
-    if (!isDownloadOpen && !isEraserOpen && !isInkOpen && !isShapeOpen) return undefined
+    if (!isEraserOpen && !isInkOpen && !isMarkupOpen && !isShapeOpen) return undefined
 
     function handlePointerDown(event) {
-      if (isDownloadOpen && !downloadWrapRef.current?.contains(event.target)) setIsDownloadOpen(false)
       if (isEraserOpen && !eraserWrapRef.current?.contains(event.target)) setIsEraserOpen(false)
       if (isInkOpen && !inkWrapRef.current?.contains(event.target)) setIsInkOpen(false)
+      if (isMarkupOpen && !markupWrapRef.current?.contains(event.target)) setIsMarkupOpen(false)
       if (isShapeOpen && !shapeWrapRef.current?.contains(event.target)) setIsShapeOpen(false)
     }
 
     document.addEventListener('pointerdown', handlePointerDown)
     return () => document.removeEventListener('pointerdown', handlePointerDown)
-  }, [isDownloadOpen, isEraserOpen, isInkOpen, isShapeOpen])
+  }, [isEraserOpen, isInkOpen, isMarkupOpen, isShapeOpen])
 
   function handleSearchInput(event) {
     onSearchChange?.(event.target.value)
@@ -186,6 +256,13 @@ export function PdfToolbar({
     })
   }
 
+  function updateMarkupOptions(partial) {
+    onMarkupOptionsChange?.({
+      ...markupOptions,
+      ...partial,
+    })
+  }
+
   function selectEraserMode(item) {
     onEraserModeChange?.(item.id)
     onToolChange(item.tool)
@@ -198,9 +275,10 @@ export function PdfToolbar({
     <div className="reader-toolbar">
       <div className="toolbar-group toolbar-group--file">
         <ToolbarIconButton
-          label={isThumbnailsOpen ? '隐藏缩略图' : '显示缩略图'}
+          label={isThumbnailsOpen ? '隐藏阅读导航' : '显示阅读导航'}
           onClick={onToggleThumbnails}
           active={isThumbnailsOpen}
+          className="toolbar-icon-button--navigation"
         >
           <Columns />
         </ToolbarIconButton>
@@ -221,6 +299,7 @@ export function PdfToolbar({
                   onClick={() => {
                     onToolChange(item.id)
                     setIsInkOpen((value) => !value)
+                    setIsMarkupOpen(false)
                     setIsShapeOpen(false)
                     setIsEraserOpen(false)
                   }}
@@ -286,6 +365,7 @@ export function PdfToolbar({
                 onToolChange(item.id)
                 setIsShapeOpen(false)
                 setIsInkOpen(false)
+                setIsMarkupOpen(false)
                 setIsEraserOpen(false)
               }}
             >
@@ -294,6 +374,145 @@ export function PdfToolbar({
             </button>
           )
         })}
+      </div>
+
+      <div className="toolbar-quick-actions">
+        <div className="toolbar-popover-wrap" ref={eraserWrapRef}>
+          <button
+            type="button"
+            className={`toolbar-tool toolbar-tool--eraser${
+              activeTool === 'eraser' || activeTool === 'erase_box' ? ' is-active' : ''
+            }`}
+            title={`擦除：${activeEraserLabel}`}
+            aria-label={`擦除：${activeEraserLabel}`}
+            aria-expanded={isEraserOpen}
+            onClick={() => {
+              onToolChange(activeEraserMode === 'box' ? 'erase_box' : 'eraser')
+              setIsEraserOpen((value) => !value)
+              setIsInkOpen(false)
+              setIsMarkupOpen(false)
+              setIsShapeOpen(false)
+            }}
+          >
+            <Eraser />
+            <span>擦除</span>
+            <ChevronDown className="toolbar-tool__chevron" />
+          </button>
+
+          {isEraserOpen ? (
+            <div className="toolbar-popover toolbar-eraser-menu">
+              {eraserModeItems.map((item) => {
+                const Icon = item.icon
+                const isActive = activeEraserMode === item.id
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`toolbar-menu-item${isActive ? ' is-active' : ''}`}
+                    onClick={() => selectEraserMode(item)}
+                  >
+                    <Icon />
+                    <span>{item.label}</span>
+                    {isActive ? <Check /> : null}
+                  </button>
+                )
+              })}
+            </div>
+          ) : null}
+        </div>
+
+        {fullTranslateVisible ? (
+          <button
+            type="button"
+            className={`toolbar-tool toolbar-tool--full-translate toolbar-tool--full-translate-${fullTranslateStatus}${
+              fullTranslateActive ? ' is-active' : ''
+            }`}
+            title={fullTranslateTitle}
+            aria-label={fullTranslateTitle}
+            onClick={onFullTranslate}
+          >
+            {fullTranslateStatus === 'running' ? (
+              <span
+                className="toolbar-progress-ring"
+                style={{ '--progress': `${Math.max(0, Math.min(100, fullTranslateProgress || 0))}%` }}
+              />
+            ) : (
+              <Languages />
+            )}
+            <span>{fullTranslateLabel}</span>
+            <small>PDF</small>
+          </button>
+        ) : null}
+      </div>
+
+      <div className="toolbar-group toolbar-group--tool-options">
+        {MARKUP_TOOL_IDS.includes(activeTool) ? (
+          <div className="toolbar-popover-wrap" ref={markupWrapRef}>
+            <button
+              type="button"
+              className={`toolbar-tool toolbar-tool--markup-style${isMarkupOpen ? ' is-active' : ''}`}
+              title="批注样式"
+              aria-label="批注样式"
+              aria-expanded={isMarkupOpen}
+              onClick={() => {
+                setIsMarkupOpen((value) => !value)
+                setIsInkOpen(false)
+                setIsShapeOpen(false)
+                setIsEraserOpen(false)
+              }}
+            >
+              <SlidersHorizontal />
+              <span>样式</span>
+              <ChevronDown className="toolbar-tool__chevron" />
+            </button>
+
+            {isMarkupOpen ? (
+              <div className="toolbar-popover toolbar-ink-panel">
+                <div className="toolbar-popover__title">批注样式</div>
+                <ColorPalette
+                  colors={MARKUP_COLOR_PALETTE}
+                  activeColor={markupOptions.color}
+                  onChange={(color) => updateMarkupOptions({ color })}
+                />
+                <label className="toolbar-ink-slider">
+                  <span>不透明度</span>
+                  <input
+                    type="range"
+                    min="20"
+                    max="100"
+                    value={Math.round((markupOptions.opacity ?? DEFAULT_MARKUP_OPTIONS.opacity) * 100)}
+                    onChange={(event) => updateMarkupOptions({ opacity: Number(event.target.value) / 100 })}
+                  />
+                  <strong>{Math.round((markupOptions.opacity ?? DEFAULT_MARKUP_OPTIONS.opacity) * 100)}%</strong>
+                </label>
+                {activeTool === 'ink_highlighter' ? (
+                  <label className="toolbar-ink-slider">
+                    <span>粗细</span>
+                    <input
+                      type="range"
+                      min="6"
+                      max="36"
+                      value={markupOptions.strokeWidth ?? DEFAULT_MARKUP_OPTIONS.strokeWidth}
+                      onChange={(event) => updateMarkupOptions({ strokeWidth: Number(event.target.value) })}
+                    />
+                    <strong>{markupOptions.strokeWidth ?? DEFAULT_MARKUP_OPTIONS.strokeWidth}px</strong>
+                  </label>
+                ) : null}
+                <div className="toolbar-ink-preview">
+                  <span
+                    style={{
+                      backgroundColor: markupOptions.color || DEFAULT_MARKUP_OPTIONS.color,
+                      height: activeTool === 'ink_highlighter'
+                        ? Math.max(6, Math.min(24, markupOptions.strokeWidth ?? DEFAULT_MARKUP_OPTIONS.strokeWidth))
+                        : 4,
+                      opacity: markupOptions.opacity ?? DEFAULT_MARKUP_OPTIONS.opacity,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         {isShapeToolActive ? (
           <div className="toolbar-popover-wrap" ref={shapeWrapRef}>
@@ -306,6 +525,7 @@ export function PdfToolbar({
               onClick={() => {
                 setIsShapeOpen((value) => !value)
                 setIsInkOpen(false)
+                setIsMarkupOpen(false)
                 setIsEraserOpen(false)
               }}
             >
@@ -361,122 +581,6 @@ export function PdfToolbar({
           </div>
         ) : null}
 
-        <div className="toolbar-popover-wrap" ref={eraserWrapRef}>
-          <button
-            type="button"
-            className={`toolbar-tool toolbar-tool--eraser${
-              activeTool === 'eraser' || activeTool === 'erase_box' ? ' is-active' : ''
-            }`}
-            title={`擦除：${activeEraserLabel}`}
-            aria-label={`擦除：${activeEraserLabel}`}
-            aria-expanded={isEraserOpen}
-            onClick={() => {
-              onToolChange(activeEraserMode === 'box' ? 'erase_box' : 'eraser')
-              setIsEraserOpen((value) => !value)
-              setIsInkOpen(false)
-              setIsShapeOpen(false)
-            }}
-          >
-            <Eraser />
-            <span>擦除</span>
-            <small>{activeEraserLabel}</small>
-            <ChevronDown className="toolbar-tool__chevron" />
-          </button>
-
-          {isEraserOpen ? (
-            <div className="toolbar-popover toolbar-eraser-menu">
-              {eraserModeItems.map((item) => {
-                const Icon = item.icon
-                const isActive = activeEraserMode === item.id
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={`toolbar-menu-item${isActive ? ' is-active' : ''}`}
-                    onClick={() => selectEraserMode(item)}
-                  >
-                    <Icon />
-                    <span>{item.label}</span>
-                    {isActive ? <Check /> : null}
-                  </button>
-                )
-              })}
-            </div>
-          ) : null}
-        </div>
-
-        {fullTranslateVisible ? (
-          <>
-            <button
-              type="button"
-              className={`toolbar-tool toolbar-tool--full-translate toolbar-tool--full-translate-${fullTranslateStatus}${
-                fullTranslateActive ? ' is-active' : ''
-              }`}
-              title={fullTranslateTitle}
-              aria-label={fullTranslateTitle}
-              onClick={onFullTranslate}
-            >
-              {fullTranslateStatus === 'running' ? (
-                <span
-                  className="toolbar-progress-ring"
-                  style={{ '--progress': `${Math.max(0, Math.min(100, fullTranslateProgress || 0))}%` }}
-                />
-              ) : (
-                <Languages />
-              )}
-              <span>
-                {fullTranslateLabel}
-              </span>
-              <small>Beta</small>
-            </button>
-
-            <select
-              className="toolbar-parse-mode"
-              title="解析模式"
-              aria-label="解析模式"
-              value={fullTranslateParseMode || 'auto'}
-              onChange={(event) => onFullTranslateParseModeChange?.(event.target.value)}
-            >
-              {parseModeItems.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-          </>
-        ) : null}
-
-        <div className="toolbar-download" ref={downloadWrapRef}>
-          <button
-            type="button"
-            className="toolbar-tool toolbar-tool--download"
-            title="下载"
-            aria-label="下载"
-            aria-expanded={isDownloadOpen}
-            onClick={() => setIsDownloadOpen((value) => !value)}
-          >
-            <Download />
-            <span>下载</span>
-          </button>
-
-          {isDownloadOpen ? (
-            <div className="toolbar-download-menu">
-              {downloadItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className="toolbar-download-menu__item"
-                  onClick={() => {
-                    setIsDownloadOpen(false)
-                    onDownload?.(item.id)
-                  }}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </div>
       </div>
 
       <div className="toolbar-group toolbar-group--compact">
@@ -486,6 +590,13 @@ export function PdfToolbar({
           disabled={!canUndo}
         >
           <Undo2 />
+        </ToolbarIconButton>
+        <ToolbarIconButton
+          label="重做标注"
+          onClick={onRedo}
+          disabled={!canRedo}
+        >
+          <Redo2 />
         </ToolbarIconButton>
 
         <div className="toolbar-search">
@@ -528,6 +639,7 @@ export function PdfToolbar({
         <ToolbarIconButton label="放大" onClick={onZoomIn}>
           <ZoomIn />
         </ToolbarIconButton>
+        <DownloadControl onDownload={onDownload} />
       </div>
     </div>
   )

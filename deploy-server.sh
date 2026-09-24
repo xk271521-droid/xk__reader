@@ -51,11 +51,16 @@ server {
 
     root /www/xk-reader/frontend;
     index index.html;
-    client_max_body_size 50m;
+    client_max_body_size 100m;
+    client_body_timeout 300s;
+    send_timeout 300s;
 
     location /api/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

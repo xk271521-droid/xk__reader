@@ -17,9 +17,17 @@ function normalizeTitle(value) {
 
 export function isWeakImportedTitle(title, fileName = '') {
   const normalizedTitle = normalizeTitle(title)
+  const compactTitle = compact(title)
   if (!normalizedTitle) return true
   if (normalizedTitle.length < 8) return true
   if (/^(untitled|document|paper|pdf|scan|new document|microsoft word)$/i.test(normalizedTitle)) {
+    return true
+  }
+  if (compactTitle.length > 180) return true
+  if (
+    compactTitle.length > 80
+    && /(摘要|关键词|关键字|Abstract\b|Keywords?\b|大学|学院|研究中心|中国[；;])/i.test(compactTitle)
+  ) {
     return true
   }
 

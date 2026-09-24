@@ -23,8 +23,10 @@ import {
 import {
   TASK_FILTERS,
   buildTaskFailureCopyText,
+  canClearFinishedTasks,
   filterTaskItems,
   getTaskFilterCounts,
+  isTaskArchivable,
   normalizeTaskSummary,
 } from './taskCenterModel'
 
@@ -51,9 +53,9 @@ function getStatusIcon(statusGroup) {
 }
 
 function getTaskKindLabel(sourceKind = '') {
-  if (sourceKind === 'paper_summary') return '摘要'
-  if (sourceKind === 'research_matrix') return '文献矩阵'
   if (sourceKind === 'full_translation') return '全文翻译'
+  if (sourceKind === 'reading_brief') return '文献速读'
+  if (sourceKind === 'ai_outline') return 'AI 目录'
   return '任务'
 }
 
@@ -94,6 +96,7 @@ export function TaskCenterSheet({
   loading = false,
   onCancelTask,
   onClearCompletedTasks,
+  onClearFinishedTasks,
   onDeleteTask,
   onOpenChange,
   onOpenTask,
@@ -109,6 +112,8 @@ export function TaskCenterSheet({
   const items = Array.isArray(payload?.items) ? payload.items : []
   const hasItems = items.length > 0
   const hasActionBusy = Boolean(actionBusyId)
+  const clearFinishedHandler = onClearFinishedTasks || onClearCompletedTasks
+  const canClearFinished = canClearFinishedTasks(summary, { loading, hasActionBusy })
   const filteredItems = useMemo(() => filterTaskItems(items, activeFilter), [activeFilter, items])
   const filterCounts = getTaskFilterCounts(items, summary)
   const queuePositions = useMemo(() => {
@@ -164,7 +169,7 @@ export function TaskCenterSheet({
             <div className="task-center-sheet__hero-copy">
               <span className="task-center-sheet__eyebrow">后台任务</span>
               <SheetTitle>任务中心</SheetTitle>
-              <SheetDescription>摘要和文献矩阵会在这里显示实时状态。</SheetDescription>
+              <SheetDescription>后台任务会在这里显示实时状态。</SheetDescription>
             </div>
           </div>
 
@@ -194,10 +199,10 @@ export function TaskCenterSheet({
             <button
               type="button"
               className="task-center-sheet__refresh is-danger"
-              onClick={onClearCompletedTasks}
-              disabled={loading || hasActionBusy || summary.completed_count <= 0}
-              aria-label="清理已完成任务"
-              title="清理已完成任务"
+              onClick={clearFinishedHandler}
+              disabled={!canClearFinished}
+              aria-label="清理已结束任务"
+              title="清理已结束任务"
             >
               <Trash2 size={14} />
             </button>
@@ -320,7 +325,7 @@ export function TaskCenterSheet({
                           {isActionBusy ? <LoaderCircle size={14} className="is-spinning" /> : <XCircle size={14} />}
                         </button>
                       ) : null}
-                      {item.status_group === 'completed' ? (
+                      {isTaskArchivable(item) ? (
                         <button
                           type="button"
                           className="task-center-item__command is-danger"
@@ -357,7 +362,7 @@ export function TaskCenterSheet({
             <div className="task-center-sheet__empty">
               <Activity size={18} />
               <strong>当前没有后台任务</strong>
-              <span>新的摘要和矩阵生成任务会出现在这里。</span>
+              <span>新的全文翻译、文献速读和 AI 目录任务会出现在这里。</span>
             </div>
           )}
         </div>

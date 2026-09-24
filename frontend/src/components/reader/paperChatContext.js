@@ -70,6 +70,7 @@ export function buildNotebookCitationDigest(notebooks = [], maxItems = 8) {
 }
 
 export function buildPaperChatContextPayload({
+  paperId = null,
   fileName = '',
   fullText = '',
   metadata = {},
@@ -91,6 +92,7 @@ export function buildPaperChatContextPayload({
   ].filter(Boolean)
 
   return {
+    paper_id: Number.isInteger(Number(paperId)) && Number(paperId) > 0 ? Number(paperId) : null,
     paper_title: title,
     provider_id: providerId,
     selected_text: compact(selectedText),

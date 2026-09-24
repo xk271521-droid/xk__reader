@@ -31,6 +31,19 @@ export function getTaskFilterCounts(items = [], summary = {}) {
   }
 }
 
+export function isTaskArchivable(item = {}) {
+  return item?.status_group === 'failed' || item?.status_group === 'completed'
+}
+
+export function getFinishedTaskCount(summary = {}) {
+  const normalized = normalizeTaskSummary(summary)
+  return normalized.failed_count + normalized.completed_count
+}
+
+export function canClearFinishedTasks(summary = {}, options = {}) {
+  return !options.loading && !options.hasActionBusy && getFinishedTaskCount(summary) > 0
+}
+
 export function buildTaskFailureCopyText(item = {}) {
   const parts = [
     item.title ? `任务：${item.title}` : '',

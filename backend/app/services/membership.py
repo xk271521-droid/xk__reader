@@ -7,11 +7,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import Select, and_, case, func, or_, select, update
+from sqlalchemy import Select, and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import MembershipRedeemCode, PaperSummary, ResearchMatrixRun, UsageCounter, User, UserMembership
+from app.models import MembershipRedeemCode, UsageCounter, User, UserMembership
 from app.schemas.membership import (
     MembershipFeatures,
     MembershipInfo,
@@ -37,36 +37,16 @@ FREE_TEMPLATE_IDS = {
 }
 
 QUOTA_SELECTION_EXPLAIN_DAILY = "selection_explain_daily"
-QUOTA_SELECTION_CONTEXT_DAILY = "selection_context_daily"
-QUOTA_SUMMARY_CARD_MONTHLY = "summary_card_monthly"
-QUOTA_MATRIX_RUN_MONTHLY = "matrix_run_monthly"
 ALL_QUOTA_KEYS = (
     QUOTA_SELECTION_EXPLAIN_DAILY,
-    QUOTA_SELECTION_CONTEXT_DAILY,
-    QUOTA_SUMMARY_CARD_MONTHLY,
-    QUOTA_MATRIX_RUN_MONTHLY,
 )
 DAILY_QUOTAS = {
     QUOTA_SELECTION_EXPLAIN_DAILY,
-    QUOTA_SELECTION_CONTEXT_DAILY,
 }
-MONTHLY_QUOTAS = {
-    QUOTA_SUMMARY_CARD_MONTHLY,
-    QUOTA_MATRIX_RUN_MONTHLY,
-}
+MONTHLY_QUOTAS: set[str] = set()
 
 MEMBERSHIP_SOURCE_ADMIN = "admin_assign"
 MEMBERSHIP_SOURCE_REDEEM = "redeem_code"
-
-PRIORITY_FREE = 0
-PRIORITY_VIP = 1
-
-SUMMARY_RUNNING_LIMIT = 2
-SUMMARY_VIP_RESERVED = 1
-SUMMARY_PER_USER_RUNNING_LIMIT = 1
-MATRIX_RUNNING_LIMIT = 2
-MATRIX_VIP_RESERVED = 1
-MATRIX_PER_USER_RUNNING_LIMIT = 1
 
 ACTION_KIND_OPEN_MEMBERSHIP = "open-membership"
 SOURCE_KIND_MEMBERSHIP = "membership"
@@ -95,9 +75,6 @@ PLAN_CONFIGS: dict[str, PlanConfig] = {
         description="适合日常阅读、基础标注和基础笔记。",
         quotas={
             QUOTA_SELECTION_EXPLAIN_DAILY: 100,
-            QUOTA_SELECTION_CONTEXT_DAILY: 50,
-            QUOTA_SUMMARY_CARD_MONTHLY: 25,
-            QUOTA_MATRIX_RUN_MONTHLY: 3,
         },
         can_export_notes=False,
         can_use_all_templates=False,
@@ -110,12 +87,9 @@ PLAN_CONFIGS: dict[str, PlanConfig] = {
         code=PLAN_VIP_MONTHLY,
         name=VIP_PLAN_NAME,
         price_label="10元 / 月",
-        description="适合高频阅读、卡片总结、矩阵综述和导出场景。",
+        description="适合高频论文阅读、全文翻译和笔记导出场景。",
         quotas={
             QUOTA_SELECTION_EXPLAIN_DAILY: 300,
-            QUOTA_SELECTION_CONTEXT_DAILY: 100,
-            QUOTA_SUMMARY_CARD_MONTHLY: 100,
-            QUOTA_MATRIX_RUN_MONTHLY: 10,
         },
         can_export_notes=True,
         can_use_all_templates=True,
@@ -173,7 +147,6 @@ def build_membership_info(active_membership: UserMembership | None, *, now: date
         badge_tone="muted",
     )
 
-
 def build_membership_features(plan_code: str | None) -> MembershipFeatures:
     config = get_plan_config(plan_code)
     return MembershipFeatures(
@@ -229,14 +202,6 @@ def get_effective_plan_code(db: Session, user_id: int, *, now: datetime | None =
     if membership:
         return get_plan_config(membership.plan_code).code
     return DEFAULT_PLAN_CODE
-
-
-def get_priority_value_for_plan(plan_code: str | None) -> int:
-    return PRIORITY_VIP if get_plan_config(plan_code).is_vip else PRIORITY_FREE
-
-
-def get_priority_value_for_user(db: Session, user_id: int) -> int:
-    return get_priority_value_for_plan(get_effective_plan_code(db, user_id))
 
 
 def is_template_allowed_for_user(db: Session, user_id: int, template_id: str) -> bool:
@@ -724,160 +689,4 @@ def create_membership_notification(
         message=message,
         action_kind=ACTION_KIND_OPEN_MEMBERSHIP,
         action_payload=dict(payload or {}),
-    )
-
-
-def _priority_case_for_users(user_id_column) -> Any:
-    active_memberships = (
-        select(UserMembership.user_id)
-        .where(
-            UserMembership.user_id == user_id_column,
-            UserMembership.plan_code == PLAN_VIP_MONTHLY,
-            UserMembership.status == "active",
-            UserMembership.expires_at > now_utc(),
-        )
-        .limit(1)
-        .correlate_except(UserMembership)
-    )
-    return case((active_memberships.exists(), PRIORITY_VIP), else_=PRIORITY_FREE)
-
-
-def count_running_summaries_by_priority(db: Session) -> dict[str, int]:
-    rows = db.execute(
-        select(
-            _priority_case_for_users(PaperSummary.user_id).label("priority_value"),
-            func.count(PaperSummary.id),
-        ).where(PaperSummary.status == "running").group_by("priority_value")
-    ).all()
-    counts = {"vip": 0, "free": 0}
-    for priority_value, total in rows:
-        if int(priority_value or 0) >= PRIORITY_VIP:
-            counts["vip"] = int(total or 0)
-        else:
-            counts["free"] = int(total or 0)
-    return counts
-
-
-def count_running_matrix_runs_by_priority(db: Session) -> dict[str, int]:
-    rows = db.execute(
-        select(
-            _priority_case_for_users(ResearchMatrixRun.user_id).label("priority_value"),
-            func.count(ResearchMatrixRun.id),
-        )
-        .where(ResearchMatrixRun.status == "running")
-        .group_by("priority_value")
-    ).all()
-    counts = {"vip": 0, "free": 0}
-    for priority_value, total in rows:
-        if int(priority_value or 0) >= PRIORITY_VIP:
-            counts["vip"] = int(total or 0)
-        else:
-            counts["free"] = int(total or 0)
-    return counts
-
-
-def count_running_summaries_for_user(db: Session, user_id: int) -> int:
-    return int(
-        db.scalar(
-            select(func.count(PaperSummary.id)).where(
-                PaperSummary.user_id == user_id,
-                PaperSummary.status == "running",
-            )
-        )
-        or 0
-    )
-
-
-def count_running_matrix_runs_for_user(db: Session, user_id: int) -> int:
-    return int(
-        db.scalar(
-            select(func.count(ResearchMatrixRun.id)).where(
-                ResearchMatrixRun.user_id == user_id,
-                ResearchMatrixRun.status == "running",
-            )
-        )
-        or 0
-    )
-
-
-def can_start_background_task(
-    *,
-    priority_value: int,
-    counts: dict[str, int],
-    total_limit: int,
-    vip_reserved: int,
-    user_running: int,
-    per_user_limit: int,
-) -> bool:
-    if total_limit <= 0:
-        return False
-    if per_user_limit > 0 and user_running >= per_user_limit:
-        return False
-    vip_running = int(counts.get("vip", 0) or 0)
-    free_running = int(counts.get("free", 0) or 0)
-    total_running = vip_running + free_running
-    if priority_value >= PRIORITY_VIP:
-        return total_running < total_limit
-    reserved_slots = max(0, min(vip_reserved, total_limit) - vip_running)
-    free_capacity = max(0, total_limit - reserved_slots)
-    return total_running < free_capacity
-
-
-def should_start_summary_immediately(db: Session, user_id: int) -> bool:
-    priority_value = get_priority_value_for_user(db, user_id)
-    counts = count_running_summaries_by_priority(db)
-    user_running = count_running_summaries_for_user(db, user_id)
-    return can_start_background_task(
-        priority_value=priority_value,
-        counts=counts,
-        total_limit=SUMMARY_RUNNING_LIMIT,
-        vip_reserved=SUMMARY_VIP_RESERVED,
-        user_running=user_running,
-        per_user_limit=SUMMARY_PER_USER_RUNNING_LIMIT,
-    )
-
-
-def should_start_matrix_immediately(db: Session, user_id: int) -> bool:
-    priority_value = get_priority_value_for_user(db, user_id)
-    counts = count_running_matrix_runs_by_priority(db)
-    user_running = count_running_matrix_runs_for_user(db, user_id)
-    return can_start_background_task(
-        priority_value=priority_value,
-        counts=counts,
-        total_limit=MATRIX_RUNNING_LIMIT,
-        vip_reserved=MATRIX_VIP_RESERVED,
-        user_running=user_running,
-        per_user_limit=MATRIX_PER_USER_RUNNING_LIMIT,
-    )
-
-
-def get_next_summary_to_start(db: Session) -> PaperSummary | None:
-    priority_value = _priority_case_for_users(PaperSummary.user_id)
-    return db.scalar(
-        select(PaperSummary)
-        .where(PaperSummary.status == "queued")
-        .order_by(priority_value.desc(), PaperSummary.created_at.asc(), PaperSummary.id.asc())
-        .limit(1)
-    )
-
-
-def get_next_matrix_run_to_start(db: Session) -> ResearchMatrixRun | None:
-    priority_value = _priority_case_for_users(ResearchMatrixRun.user_id)
-    return db.scalar(
-        select(ResearchMatrixRun)
-        .where(ResearchMatrixRun.status == "queued")
-        .order_by(priority_value.desc(), ResearchMatrixRun.created_at.asc(), ResearchMatrixRun.id.asc())
-        .limit(1)
-    )
-
-
-def get_matrix_runs_to_start(db: Session, *, limit: int = 20) -> list[ResearchMatrixRun]:
-    priority_value = _priority_case_for_users(ResearchMatrixRun.user_id)
-    return list(
-        db.scalars(
-            select(ResearchMatrixRun)
-            .where(ResearchMatrixRun.status == "queued")
-            .order_by(priority_value.desc(), ResearchMatrixRun.created_at.asc(), ResearchMatrixRun.id.asc())
-            .limit(limit)
-        ).all()
     )

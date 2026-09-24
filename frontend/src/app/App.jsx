@@ -1,9 +1,22 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { Bell, Crown, Download, ListChecks, LogIn, Sparkles, Trash2, X } from 'lucide-react'
+import {
+  Bell,
+  Crown,
+  Download,
+  ListChecks,
+  LogIn,
+  PanelRightOpen,
+  Sparkles,
+  Trash2,
+  X,
+} from 'lucide-react'
 import { TaskCenterSheet } from '../components/layout/TaskCenterSheet'
 import { UserHoverMenu } from '../components/layout/UserHoverMenu'
 import { UtilityRail } from '../components/layout/UtilityRail'
 import { DEFAULT_SHAPE_OPTIONS } from '../components/reader/shapeAnnotationModel'
+import { DEFAULT_MARKUP_OPTIONS } from '../components/reader/pdfMarkupStyleModel'
+import { SelectionFollowPanel } from '../components/reader/SelectionFollowPanel'
+import { isEmbedPdfPreviewEnabled } from '../components/reader/pdfEngineMode'
 import {
   readReadingSessionSnapshot,
   saveReadingSessionSnapshot,
@@ -16,6 +29,7 @@ import { usePdfSearch } from '../hooks/usePdfSearch'
 import { useResizableWidth } from '../hooks/useResizableWidth'
 import { useShapeAnnotations } from '../hooks/useShapeAnnotations'
 import { useSelectionInsight } from '../hooks/useSelectionInsight'
+import { usePaperReadingBrief } from '../hooks/usePaperReadingBrief'
 import {
   createImageBlockDraft,
   createQuoteBlockDraft,
@@ -25,6 +39,7 @@ import {
 } from '../components/reader/noteTree'
 import { buildNoteAnchorFocus } from '../components/reader/noteAnchorModel'
 import { buildPaperChatContextPayload } from '../components/reader/paperChatContext'
+import { buildPaperAnswerRequest } from '../components/reader/paperChatRequest'
 import {
   clearStoredAuthToken,
   deleteCurrentUser,
@@ -43,7 +58,7 @@ import {
   markNotificationRead,
 } from '../services/notificationApi'
 import {
-  archiveCompletedTaskCenterItems,
+  archiveFinishedTaskCenterItems,
   archiveTaskCenterItems,
   cancelTask,
   fetchTaskCenter,
@@ -59,20 +74,15 @@ import {
   UI_FONT_SIZE_DEFAULT,
 } from '../services/uiPreferences'
 import {
-  cancelFullTranslation,
   downloadPaperExport,
   fetchFullTranslation,
   fetchReadingDashboard,
   fetchResourceOverview,
-  retryFullTranslation,
+  retranslateFullTranslation,
   saveResourceLayout,
   startFullTranslation,
   streamFullTranslation,
 } from '../services/paperReaderApi'
-import {
-  buildFullTranslationPages,
-  hashTranslationPages,
-} from '../components/reader/fullTranslationLayout'
 import { resolveAssetUrl } from '../utils/assetUrl'
 import { countLogicalAnnotations } from '../utils/annotationAggregation'
 import { isDesktopShell } from '../utils/desktopShell'
@@ -93,6 +103,7 @@ import {
   SheetTitle,
 } from '../components/ui/sheet'
 import '../styles/app.css'
+import '../components/reader/readerSessionLayout.css'
 
 const AdminPage = lazy(() =>
   import('../components/account/AdminPage').then((module) => ({ default: module.AdminPage })),
@@ -299,35 +310,40 @@ function getFullTranslationProgress(payload) {
   const total = Number(payload?.total_units) || 0
   const completed = Number(payload?.completed_units) || 0
   if (payload?.status === 'completed' || payload?.status === 'partial_failed') return 100
-  if (total <= 0) return payload?.status === 'running' ? 3 : 0
-  return Math.max(3, Math.min(99, (completed / total) * 100))
+  // PDFMathTranslate is an external renderer. Until it supplies a real stage
+  // update, showing a frozen percentage is more misleading than useful.
+  if (total <= 0) return 0
+  if (completed <= 0) return 0
+  return Math.min(99, (completed / total) * 100)
 }
 
 function hasReadableFullTranslationCache(payload) {
-  return Boolean(
-    ['completed', 'partial_failed'].includes(payload?.status)
-    && payload?.pages?.length
-  )
+  return Boolean(payload?.artifact_ready)
 }
 
-const READER_LAYOUT_GAP = 8
-const RESIZER_WIDTH = 10
-const WORKSPACE_RAIL_EXPANDED_WIDTH = 72
-const WORKSPACE_RAIL_COLLAPSED_WIDTH = 46
+const READER_LAYOUT_GAP = 4
+const RESIZER_WIDTH = 8
+const WORKSPACE_RAIL_EXPANDED_WIDTH = 60
+const WORKSPACE_RAIL_COLLAPSED_WIDTH = 40
 const READER_MIN_WIDTH = 640
 const INSIGHT_MIN_WIDTH = 180
 const INSIGHT_MAX_WIDTH = 460
+const INSIGHT_PANEL_COLLAPSED_STORAGE_KEY = 'xk-reader.selection-insight-collapsed.v1'
+const INITIAL_SUGGESTION_CACHE_PREFIX = 'xk-reader.ai-initial-suggestions.v1'
 const WORKSPACE_MIN_WIDTH = 300
-const WORKSPACE_DEFAULT_WIDTH = 380
-const WORKSPACE_MAX_WIDTH = 620
+const WORKSPACE_DEFAULT_WIDTH = 400
+const WORKSPACE_MAX_WIDTH = 640
 const NOTIFICATION_SUMMARY_POLL_MS = 30000
 const NOTIFICATION_DRAWER_POLL_MS = 15000
 const NOTIFICATION_LIST_LIMIT = 20
 const TASK_CENTER_SUMMARY_POLL_MS = 30000
 const TASK_CENTER_LIST_POLL_MS = 10000
 const TASK_CENTER_LIST_LIMIT = 50
-const FULL_TRANSLATION_FEATURE_ENABLED = false
-const TASK_EVENT_SOURCE_KINDS = new Set(['paper_summary', 'research_matrix'])
+// Translation stays feature-gated until the separate PDFMathTranslate runtime
+// has been configured on the server.  Once enabled, completed PDFs are cached
+// per paper and no browser-side block extraction is performed.
+const FULL_TRANSLATION_FEATURE_ENABLED = import.meta.env.VITE_FULL_TRANSLATION_ENABLED === 'true'
+const TASK_EVENT_SOURCE_KINDS = new Set()
 const AUTH_INVALID_EVENT = 'xk-auth-invalid'
 const NOTIFICATION_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
   month: '2-digit',
@@ -539,18 +555,49 @@ function createTransientId(prefix = 'temp') {
   return `${prefix}-${getNow()}-${transientIdCounter}`
 }
 
+function initialSuggestionCacheKey(userId, paperId) {
+  if (!userId || !paperId) return ''
+  return `${INITIAL_SUGGESTION_CACHE_PREFIX}:${userId}:${paperId}`
+}
+
+function readInitialSuggestionCache(key) {
+  if (!key || typeof window === 'undefined') return []
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(key) || 'null')
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string' && item.trim()) : []
+  } catch {
+    return []
+  }
+}
+
+function writeInitialSuggestionCache(key, questions) {
+  if (!key || typeof window === 'undefined' || !Array.isArray(questions) || !questions.length) return
+  try {
+    window.localStorage.setItem(key, JSON.stringify(questions.slice(0, 3)))
+  } catch {
+    // A full/private storage area must not turn a successful AI response into
+    // a visible error; the in-memory result remains usable for this session.
+  }
+}
+
 function App() {
   const isDesktop = isDesktopShell()
   const readerRef = useRef(null)
+  const readerFrameRef = useRef(null)
   const readerLayoutRef = useRef(null)
   const userMenuRef = useRef(null)
   const [activeWorkspacePanel, setActiveWorkspacePanel] = useState('')
   const [activeTool, setActiveTool] = useState('select')
   const [activeEraserMode, setActiveEraserMode] = useState('brush')
   const [inkOptions, setInkOptions] = useState({ color: '#15803D', opacity: 0.85, strokeWidth: 6 })
+  const [markupOptions, setMarkupOptions] = useState(DEFAULT_MARKUP_OPTIONS)
   const [shapeOptions, setShapeOptions] = useState(DEFAULT_SHAPE_OPTIONS)
   const [isThumbnailsOpen, setIsThumbnailsOpen] = useState(false)
   const [isUtilityRailCollapsed, setIsUtilityRailCollapsed] = useState(false)
+  const [isInsightPanelCollapsed, setIsInsightPanelCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return window.localStorage.getItem(INSIGHT_PANEL_COLLAPSED_STORAGE_KEY) === 'true'
+  })
   const [authMode, setAuthMode] = useState('login')
   const [isAuthViewOpen, setIsAuthViewOpen] = useState(false)
   const [isSessionRestoring, setIsSessionRestoring] = useState(() => Boolean(getStoredAuthToken()))
@@ -570,7 +617,6 @@ function App() {
   const [fullTranslationStatus, setFullTranslationStatus] = useState('idle')
   const [fullTranslationProgress, setFullTranslationProgress] = useState(0)
   const [fullTranslationBusy, setFullTranslationBusy] = useState(false)
-  const [fullTranslationParseMode, setFullTranslationParseMode] = useState('auto')
   const [isFullTranslationOpen, setIsFullTranslationOpen] = useState(false)
   const [fullTranslationOpenPaperId, setFullTranslationOpenPaperId] = useState(null)
   const [resourceOverview, setResourceOverview] = useState(EMPTY_RESOURCE_OVERVIEW)
@@ -578,7 +624,6 @@ function App() {
   const [insightTimeframe, setInsightTimeframe] = useState('month')
   const [resourcePreview, setResourcePreview] = useState(null)
   const [homeInitialSection, setHomeInitialSection] = useState('recent')
-  const [summaryInitialType, setSummaryInitialType] = useState('')
   const [isNotificationOpen, setIsNotificationOpen] = useState(false)
   const [notificationSummary, setNotificationSummary] = useState(() => normalizeNotificationSummary())
   const [notificationItems, setNotificationItems] = useState([])
@@ -587,6 +632,7 @@ function App() {
   const [notificationActionBusy, setNotificationActionBusy] = useState('')
   const [notificationToast, setNotificationToast] = useState(null)
   const [isTaskCenterOpen, setIsTaskCenterOpen] = useState(false)
+  const [readerNavigationTabRequest, setReaderNavigationTabRequest] = useState(null)
   const [taskCenterPayload, setTaskCenterPayload] = useState(() => normalizeTaskCenter())
   const [taskCenterLoading, setTaskCenterLoading] = useState(false)
   const [taskCenterError, setTaskCenterError] = useState('')
@@ -595,6 +641,7 @@ function App() {
   const [isMembershipModalOpen, setIsMembershipModalOpen] = useState(false)
   const chatMessageCounterRef = useRef(0)
   const chatRequestCounterRef = useRef(0)
+  const chatAbortControllersRef = useRef({})
   const initialSuggestionRequestRef = useRef({})
   const initialSuggestionBatchRef = useRef({})
   const followupSuggestionRequestRef = useRef({})
@@ -667,7 +714,6 @@ function App() {
 
     const canLeave = await ensureNotesSavedBeforeLeaving()
     if (!canLeave) return
-    setSummaryInitialType('')
     setHomeInitialSection('recent')
     setAccountSection(currentUser?.is_admin ? 'admin-feedback' : 'feedback')
     closeFullTranslationReader()
@@ -746,6 +792,7 @@ function App() {
     fileName,
     fitToWidth,
     folders,
+    getPaperReaderState,
     goHome,
     handleFileChange,
     importConflict,
@@ -773,6 +820,7 @@ function App() {
     scale,
     savePaperMetadata,
     setCurrentPage,
+    syncPdfiumReaderState,
     switchToPaper,
     totalPages,
     trashPapers,
@@ -780,11 +828,17 @@ function App() {
     zoomIn,
     zoomOut,
     zoomBy,
-    activePaperSummary,
-    activePaperFullText,
-  } = usePdfReader({ currentUser })
+  } = usePdfReader({
+    currentUser,
+    loadPdfDocument: !isEmbedPdfPreviewEnabled(),
+  })
   const pdfSearch = usePdfSearch(readerRef, { pdfDocument, pageNumbers })
   const activePaperId = activeView !== 'home' ? Number(activeView) : null
+  const {
+    brief: activePaperReadingBrief,
+    retry: retryActivePaperReadingBrief,
+    refresh: refreshActivePaperReadingBrief,
+  } = usePaperReadingBrief(activePaperId, currentUser?.uid)
   const isHomeView = activeView === 'home'
   const isReaderView = activeView !== 'home'
   const isAccountView = Boolean(accountSection)
@@ -931,19 +985,33 @@ function App() {
     })
   }, [activePaperSessionKey, activeWorkspacePanel, workspacePanel.width])
 
-  const { selectionCard, handleSelection, aiEnabled, toggleAI } = useSelectionInsight({
+  const {
+    selectionCard,
+    handleSelection,
+    translationProvider,
+    changeTranslationProvider,
+    followTranslationEnabled,
+    changeFollowTranslationEnabled,
+    followPanelVisible,
+    dismissFollowPanel,
+  } = useSelectionInsight({
     readerRef,
     paperTitle: metadata.title || fileName,
-    paperSummary: activePaperSummary,
-    activePaperFullText,
   })
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(
+      INSIGHT_PANEL_COLLAPSED_STORAGE_KEY,
+      String(isInsightPanelCollapsed),
+    )
+  }, [isInsightPanelCollapsed])
   const latestRecentOpenedAt = recentReadings?.[0]?.openedAt ?? null
   const weeklyOpens = readingStats?.weekly_opens ?? 0
   const weeklyDistinctPapers = readingStats?.weekly_distinct_papers ?? 0
   const dominantReadingPeriod = readingStats?.dominant_period ?? ''
   const annotationCount = resourceOverview?.stats?.annotation_count ?? 0
   const noteCount = resourceOverview?.stats?.note_count ?? 0
-  const summaryCount = resourceOverview?.stats?.summary_count ?? 0
   const translationCount = resourceOverview?.stats?.translation_count ?? 0
   const visibleResourceOverview = currentUser ? resourceOverview : EMPTY_RESOURCE_OVERVIEW
   const visibleReadingDashboard = currentUser ? readingDashboard : null
@@ -1011,7 +1079,6 @@ function App() {
     readingDurationVersion,
     annotationCount,
     noteCount,
-    summaryCount,
     translationCount,
     insightTimeframe,
   ])
@@ -1145,17 +1212,11 @@ function App() {
     if (!opened) return
     setAccountSection('')
     setHomeInitialSection('recent')
-    setSummaryInitialType('')
     closeFullTranslationReader()
 
     const resourceType = resource?.type || ''
     if (resourceType === 'notes') {
       setActiveWorkspacePanel('notes')
-      return true
-    }
-
-    if (resourceType.startsWith('summary_')) {
-      setActiveWorkspacePanel('summary')
       return true
     }
 
@@ -1617,23 +1678,6 @@ function App() {
     const actionKind = String(item?.action_kind || '')
     const payload = item?.action_payload || {}
 
-    if (actionKind === 'open-summary') {
-      const paperId = Number(payload.paper_id || 0)
-      const summaryType = String(payload.summary_type || '').trim()
-      if (!paperId) {
-        showNotificationToast({ id: createTransientId('missing'), title: '提示', message: '目标内容已不存在或无权限访问' })
-        return
-      }
-      const opened = await switchToPaperSafely(paperId)
-      if (!opened) return
-      setAccountSection('')
-      setHomeInitialSection('recent')
-      setSummaryInitialType(summaryType)
-      closeFullTranslationReader()
-      setActiveWorkspacePanel('summary')
-      return
-    }
-
     if (actionKind === 'open-full-translation') {
       if (!FULL_TRANSLATION_FEATURE_ENABLED) return
       const paperId = Number(payload.paper_id || 0)
@@ -1645,19 +1689,8 @@ function App() {
       if (!opened) return
       setAccountSection('')
       setHomeInitialSection('recent')
-      setSummaryInitialType('')
       setActiveWorkspacePanel('')
       openFullTranslationReader(paperId)
-      return
-    }
-
-    if (actionKind === 'open-matrix') {
-      const opened = await goHomeSafely()
-      if (!opened) return
-      setSummaryInitialType('')
-      setAccountSection('')
-      closeFullTranslationReader()
-      setHomeInitialSection('matrix')
       return
     }
 
@@ -1668,8 +1701,34 @@ function App() {
 
   async function handleTaskCenterOpen(item) {
     if (!item) return
+    const paperId = Number(item?.action_payload?.paper_id || 0)
+    if (!paperId) return
+    const opened = await switchToPaperSafely(paperId)
+    if (!opened) return
+
     setIsTaskCenterOpen(false)
-    await navigateFromNotification(item)
+    setAccountSection('')
+    setHomeInitialSection('recent')
+    if (item.action_kind === 'open-full-translation') {
+      setActiveWorkspacePanel('')
+      openFullTranslationReader(paperId)
+      return
+    }
+    if (item.action_kind === 'open-reading-brief') {
+      closeFullTranslationReader()
+      setActiveWorkspacePanel('summary')
+      return
+    }
+    if (item.action_kind === 'open-ai-outline') {
+      closeFullTranslationReader()
+      setActiveWorkspacePanel('')
+      setIsThumbnailsOpen(true)
+      setReaderNavigationTabRequest({
+        tab: 'outline',
+        paperId,
+        requestId: createTransientId('outline'),
+      })
+    }
   }
 
   async function handleTaskCenterAction(item, action) {
@@ -1692,8 +1751,8 @@ function App() {
   }
 
   async function handleDeleteTaskCenterItem(item) {
-    if (!item?.id || item.status_group !== 'completed') return
-    if (!confirmDangerAction('确定从任务中心移除这条已完成记录吗？')) return
+    if (!item?.id || !['failed', 'completed'].includes(item.status_group)) return
+    if (!confirmDangerAction('确定从任务中心移除这条已结束记录吗？')) return
     setTaskCenterActionBusyId(item.id)
     setTaskCenterError('')
     try {
@@ -1706,19 +1765,19 @@ function App() {
     }
   }
 
-  async function handleClearCompletedTasks() {
-    const completedIds = (taskCenterPayloadRef.current.items || [])
-      .filter((item) => item.status_group === 'completed')
+  async function handleClearFinishedTasks() {
+    const finishedIds = (taskCenterPayloadRef.current.items || [])
+      .filter((item) => ['failed', 'completed'].includes(item.status_group))
       .map((item) => String(item.id))
-    if (!completedIds.length) return
-    if (!confirmDangerAction(`确定清理 ${completedIds.length} 条已完成任务记录吗？`)) return
-    setTaskCenterActionBusyId('__archive_completed__')
+    if (!finishedIds.length) return
+    if (!confirmDangerAction(`确定清理 ${finishedIds.length} 条已结束任务记录吗？`)) return
+    setTaskCenterActionBusyId('__archive_finished__')
     setTaskCenterError('')
     try {
-      await archiveCompletedTaskCenterItems()
+      await archiveFinishedTaskCenterItems()
       await loadTaskCenter({ background: true })
     } catch (error) {
-      setTaskCenterError(toUserMessage(error, '清理已完成任务失败'))
+      setTaskCenterError(toUserMessage(error, '清理已结束任务失败'))
     } finally {
       setTaskCenterActionBusyId('')
     }
@@ -1959,22 +2018,13 @@ function App() {
   const notificationHasItems = notificationItems.length > 0
   const visibleTaskCenterPayload = buildVisibleTaskCenterPayload(taskCenterPayload)
   const taskCenterSummary = visibleTaskCenterPayload.summary || normalizeTaskCenterSummary()
-  const paperReaderState = {
-    error,
-    fileName,
-    fitToWidth,
-    isLoading,
-    metadata,
-    pageMetrics,
-    pageNumber,
-    pageNumbers,
-    pdfDocument,
-    scale,
-    setCurrentPage,
-    totalPages,
-    zoomIn,
-    zoomOut,
-  }
+  // Keep every user-controlled document tab mounted. The active session comes
+  // first so DOM-based keyboard and E2E selectors never hit an inert reader.
+  const readerSessionTabs = activePaperId
+    ? [...openTabs].sort((left, right) => (
+        Number(right.id) === activePaperId ? 1 : Number(left.id) === activePaperId ? -1 : 0
+      ))
+    : openTabs
   const canUndoAnnotation = activePaperId
     ? (annotationUndoStacks[activePaperId]?.length || 0) > 0
     : false
@@ -2242,28 +2292,13 @@ function App() {
 
   function buildPaperChatContext() {
     return buildPaperChatContextPayload({
+      paperId: activePaperId,
       fileName,
-      fullText: activePaperFullText,
       metadata,
       notebooks,
       providerId: activeProviderId,
       selectedText: selectionCard.text,
-      summary: activePaperSummary,
     })
-  }
-
-  function buildRecentChatMessages(messages) {
-    return (messages || [])
-      .filter(function (message) {
-        return (message.role === 'user' || message.role === 'assistant') && (message.text || '').trim()
-      })
-      .slice(-6)
-      .map(function (message) {
-        return {
-          role: message.role === 'assistant' ? 'assistant' : 'user',
-          text: (message.text || '').trim(),
-        }
-      })
   }
 
   function clearMessageFollowups(messages) {
@@ -2283,13 +2318,13 @@ function App() {
   }
 
   function handleAskAIText(text) {
-    if (!text) return
+    const selectedText = String(text || '').trim()
+    if (!selectedText) return
+    preloadSideWorkspacePanel()
     setActiveWorkspacePanel('ask')
-    setChatInput(function (previous) {
-      return {
-        ...previous,
-        [activeView]: text,
-      }
+    void handleChatSubmit(selectedText, {
+      requestKind: 'deep_read',
+      selectedText,
     })
   }
 
@@ -2298,7 +2333,7 @@ function App() {
     setActiveWorkspacePanel(nextPanel)
   }
 
-  async function handleDownloadOption(format) {
+  async function handleDownloadOption(format, options = {}) {
     const baseName = sanitizeDownloadName(metadata.title || fileName)
     const suffixMap = {
       pdf: 'pdf',
@@ -2306,7 +2341,11 @@ function App() {
       'citation-md': 'md',
       bibtex: 'bib',
     }
-    const hasExportableAnnotations = (annotations?.length || 0) > 0 || (inkAnnotations?.length || 0) > 0
+    const hasExportableAnnotations = (
+      (annotations?.length || 0) > 0
+      || (inkAnnotations?.length || 0) > 0
+      || Boolean(options.hasAnnotations)
+    )
     if (!activePaperId || Number.isNaN(activePaperId) || !suffixMap[format]) {
       window.alert('当前文献暂时没有可下载地址')
       return
@@ -2334,6 +2373,15 @@ function App() {
     }
 
     try {
+      if (format === 'pdf' && options.localPdfExporter) {
+        const buffer = await options.localPdfExporter()
+        if (!buffer) throw new Error('新阅读器尚未完成 PDF 导出初始化，请稍后重试。')
+        triggerBlobDownload(
+          new Blob([buffer], { type: 'application/pdf' }),
+          `${baseName}-annotated.pdf`,
+        )
+        return
+      }
       const result = await downloadPaperExport(
         activePaperId,
         format,
@@ -2363,17 +2411,11 @@ function App() {
     }
 
     if (fullTranslationStatus === 'running') {
-      const shouldCancel = window.confirm('全文翻译正在进行，确定要取消吗？')
-      if (!shouldCancel) {
+      if (hasReadableFullTranslationCache(fullTranslation)) {
+        openFullTranslationReader(activePaperId)
+      } else {
+        window.alert('全文翻译正在后台生成。完成后会自动保存，此时不需要重复提交。')
         beginFullTranslationPolling(activePaperId)
-        return
-      }
-      try {
-        const result = await cancelFullTranslation(activePaperId)
-        applyFullTranslationState(result)
-        clearFullTranslationPolling()
-      } catch (err) {
-        window.alert(err?.message || '取消全文翻译失败，请稍后再试。')
       }
       return
     }
@@ -2382,48 +2424,25 @@ function App() {
       return
     }
 
-    if (!pdfDocument) {
-      window.alert('PDF 还在加载，稍等一下再启动全文翻译。')
-      return
-    }
-
-    const shouldRetry = force
-      || fullTranslationStatus === 'error'
-      || fullTranslationStatus === 'partial_failed'
-      || Number(fullTranslation?.pending_blocks_count || 0) > 0
-    const shouldPatchFailedBlocks = fullTranslationStatus === 'partial_failed' && hasReadableFullTranslationCache(fullTranslation)
-    const confirmMessage = shouldRetry
-      ? shouldPatchFailedBlocks
-        ? '将优先补译未完成的段落，已完成译文会保留。任务会在后台运行，可在任务中心查看进度。继续吗？'
-        : '将重新生成全文翻译 Beta。任务会在后台运行，可在任务中心查看进度；旧译文会被新的结果覆盖。继续吗？'
-      : '将启动全文翻译 Beta。当前版本会优先生成右侧重排译文，版式对照仅在解析质量足够时启用；任务可在任务中心查看和取消。继续吗？'
+    const confirmMessage = force
+      ? '确定重新翻译全文吗？这会重新调用翻译服务。当前译文会一直保留，只有新译文 PDF 成功生成后才替换。'
+      : '开始全文翻译吗？系统会在后台生成并保存一份版式保留的中文译文 PDF；以后直接打开，不会再次翻译。'
     if (!window.confirm(confirmMessage)) {
       return
     }
 
     setFullTranslationBusy(true)
     try {
-      const pages = await buildFullTranslationPages(pdfDocument, pageMetrics)
-      if (!pages.length) {
-        window.alert('没有提取到可翻译的正文内容。')
-        return
-      }
-      const payload = {
-        source_hash: hashTranslationPages(pages),
-        pages,
-        provider_id: activeProviderId || null,
-        parse_mode: fullTranslationParseMode,
-      }
-      const request = shouldRetry ? retryFullTranslation : startFullTranslation
-      const result = await request(activePaperId, payload)
+      const request = force ? retranslateFullTranslation : startFullTranslation
+      const result = force ? await request(activePaperId) : await request(activePaperId, {})
       applyFullTranslationState(result)
-      if (result?.status === 'completed') {
+      if (result?.artifact_ready) {
         openFullTranslationReader(activePaperId)
       } else {
         beginFullTranslationPolling(activePaperId)
       }
     } catch (err) {
-      window.alert(err?.message || '全文翻译启动失败，请检查 AI 配置后重试。')
+      window.alert(err?.message || '全文翻译启动失败，请检查翻译服务配置后重试。')
       setFullTranslationStatus('error')
     } finally {
       setFullTranslationBusy(false)
@@ -2437,9 +2456,17 @@ function App() {
     const existingMessages = chatMessages[viewKey] || []
     const existingSuggestions = chatInitialSuggestions[viewKey] || []
     const isLoading = chatInitialSuggestionsLoading[viewKey] || false
+    const cacheKey = initialSuggestionCacheKey(currentUser?.uid, viewKey)
 
     if (!force) {
       if (existingMessages.length > 0 || existingSuggestions.length > 0 || isLoading) {
+        return
+      }
+      const cachedSuggestions = readInitialSuggestionCache(cacheKey)
+      if (cachedSuggestions.length > 0) {
+        setChatInitialSuggestions(function (previous) {
+          return { ...previous, [viewKey]: cachedSuggestions }
+        })
         return
       }
     }
@@ -2482,6 +2509,7 @@ function App() {
       const questions = (!aiQuestions.length || (force && sameQuestionSet(aiQuestions, existingSuggestions)))
         ? fallbackQuestions
         : aiQuestions
+      writeInitialSuggestionCache(cacheKey, questions)
       setChatInitialSuggestions(function (previous) {
         return {
           ...previous,
@@ -2492,6 +2520,7 @@ function App() {
       if (initialSuggestionRequestRef.current[viewKey] !== requestToken) {
         return
       }
+      writeInitialSuggestionCache(cacheKey, fallbackQuestions)
       setChatInitialSuggestions(function (previous) {
         return {
           ...previous,
@@ -2515,7 +2544,6 @@ function App() {
     assistantMessageId,
     lastUserQuestion,
     lastAssistantAnswer,
-    messages,
     chatContext,
   }) {
     if (!viewKey || !assistantMessageId || !lastAssistantAnswer.trim()) return
@@ -2550,7 +2578,9 @@ function App() {
           ...chatContext,
           last_user_question: lastUserQuestion,
           last_assistant_answer: lastAssistantAnswer,
-          recent_messages: buildRecentChatMessages(messages),
+          // Suggestions stay scoped to the current answer; prior chat history is
+          // display-only and is intentionally not sent back to the model.
+          recent_messages: [],
         }),
       })
       const data = await response.json().catch(function () { return null })
@@ -2609,18 +2639,25 @@ function App() {
     }
   }
 
-  async function handleChatSubmit(rawQuestion) {
+  async function handleChatSubmit(rawQuestion, options = {}) {
     const chatView = activeView
     const question = String(rawQuestion || chatInput[chatView] || '').trim()
     if (!question || !chatView || chatView === 'home') return
+    if (chatAsking[chatView]) return
 
     const chatContext = buildPaperChatContext()
+    const requestKind = options.requestKind === 'deep_read' ? 'deep_read' : 'question'
+    const selectedText = requestKind === 'deep_read'
+      ? String(options.selectedText || question).trim()
+      : ''
     const baseMessages = clearMessageFollowups(chatMessages[chatView] || [])
     const userMessage = {
       id: createChatMessageId('user'),
       role: 'user',
       text: question,
       status: 'done',
+      messageType: requestKind,
+      selectedText,
     }
     const assistantMessageId = createChatMessageId('assistant')
     const assistantMessage = {
@@ -2659,6 +2696,8 @@ function App() {
 
     let aiText = ''
     let streamFailed = false
+    const abortController = new AbortController()
+    chatAbortControllersRef.current[chatView] = abortController
 
     try {
       const token = getStoredAuthToken()
@@ -2668,17 +2707,22 @@ function App() {
       const response = await fetch('/api/ask-stream', {
         method: 'POST',
         headers,
-        body: JSON.stringify({
+        signal: abortController.signal,
+        body: JSON.stringify(buildPaperAnswerRequest({
+          paperId: chatContext.paper_id,
           question,
-          selected_text: chatContext.selected_text,
-          paper_title: chatContext.paper_title,
-          summary: chatContext.summary,
-          provider_id: chatContext.provider_id,
-        }),
+          selectedText,
+          requestKind,
+          providerId: chatContext.provider_id,
+        })),
       })
 
-      if (!response.ok || !response.body) {
-        throw new Error('stream failed')
+      if (!response.ok) {
+        const payload = await response.json().catch(function () { return null })
+        throw new Error(payload?.detail || 'AI 请求失败')
+      }
+      if (!response.body) {
+        throw new Error('AI 没有返回可读取的内容')
       }
 
       const reader = response.body.getReader()
@@ -2696,7 +2740,12 @@ function App() {
         for (let i = 0; i < parts.length; i += 1) {
           const line = parts[i]
           if (!line.startsWith('data: ')) continue
-          aiText += line.slice(6)
+          const eventData = line.slice(6)
+          try {
+            aiText += JSON.parse(eventData)
+          } catch {
+            aiText += eventData
+          }
 
           updateChatMessagesForView(chatView, function (entries) {
             return entries.map(function (entry) {
@@ -2713,12 +2762,19 @@ function App() {
           await new Promise(function (resolve) { setTimeout(resolve, 0) })
         }
       }
-    } catch {
+    } catch (error) {
+      if (abortController.signal.aborted) return
       streamFailed = true
+      aiText = error?.message || ''
+    }
+
+    if (abortController.signal.aborted) return
+    if (chatAbortControllersRef.current[chatView] === abortController) {
+      delete chatAbortControllersRef.current[chatView]
     }
 
     const finalAssistantText = streamFailed
-      ? 'AI 回答失败，请稍后再试。'
+      ? (aiText.trim() || 'AI 回答失败，请稍后再试。')
       : (aiText.trim() || 'AI 暂时没有返回内容。')
     const finalAssistantStatus = streamFailed ? 'error' : 'done'
     const finalMessages = baseMessages.concat([
@@ -2749,7 +2805,6 @@ function App() {
         assistantMessageId,
         lastUserQuestion: question,
         lastAssistantAnswer: finalAssistantText,
-        messages: finalMessages,
         chatContext,
       })
     }
@@ -2774,7 +2829,6 @@ function App() {
     activeInitialSuggestionsLoading,
     metadata.title,
     fileName,
-    activePaperSummary,
     selectionCard.text,
   ])
 
@@ -2796,11 +2850,6 @@ function App() {
   async function handleInsertSelectionNote(payload) {
     if (!activePaperId || !payload?.text) return
     applyNoteInsert(createQuoteBlockDraft(payload))
-  }
-
-  async function handleInsertSummaryNote(content) {
-    if (!activePaperId || !content) return
-    applyNoteInsert(createTextBlockDraft(0, content))
   }
 
   function handleCreateNotebook(kind) {
@@ -2827,7 +2876,7 @@ function App() {
     setNoteFocus(focus)
   }
 
-  function handleJumpToSummaryEvidence(source) {
+  function handleJumpToEvidence(source) {
     const focus = buildNoteAnchorFocus(source, createTransientId('summary-focus'))
     if (!focus) return
     setCurrentPage(focus.pageNumber)
@@ -2836,23 +2885,14 @@ function App() {
 
   async function handleJumpToPreviewEvidence(source) {
     if (!resourcePreview?.paperId) {
-      handleJumpToSummaryEvidence(source)
+      handleJumpToEvidence(source)
       return
     }
-    const opened = await openPaperResource(resourcePreview.paperId, { type: resourcePreview.resourceType || 'summary_review' })
+    const opened = await switchToPaperSafely(resourcePreview.paperId)
     if (!opened) return
     closeResourcePreview()
     window.setTimeout(() => {
-      handleJumpToSummaryEvidence(source)
-    }, 80)
-  }
-
-  async function handleJumpToPaperEvidence(paperId, source) {
-    if (!paperId) return
-    const opened = await openPaperResource(paperId, { type: 'summary_review' })
-    if (!opened) return
-    window.setTimeout(() => {
-      handleJumpToSummaryEvidence(source)
+      handleJumpToEvidence(source)
     }, 80)
   }
 
@@ -2973,8 +3013,43 @@ function App() {
       const canClose = await ensureNotesSavedBeforeLeaving()
       if (!canClose) return
     }
+    chatAbortControllersRef.current[paperId]?.abort()
+    delete chatAbortControllersRef.current[paperId]
     clearAnnotationUndo(paperId)
     closePaper(paperId)
+    setChatMessages((previous) => {
+      const next = { ...previous }
+      delete next[paperId]
+      return next
+    })
+    setChatInput((previous) => {
+      const next = { ...previous }
+      delete next[paperId]
+      return next
+    })
+    setChatAsking((previous) => {
+      const next = { ...previous }
+      delete next[paperId]
+      return next
+    })
+    setChatInitialSuggestions((previous) => {
+      const next = { ...previous }
+      delete next[paperId]
+      return next
+    })
+    setChatInitialSuggestionsLoading((previous) => {
+      const next = { ...previous }
+      delete next[paperId]
+      return next
+    })
+    setChatFollowupLoadingMessageId((previous) => {
+      const next = { ...previous }
+      delete next[paperId]
+      return next
+    })
+    delete initialSuggestionRequestRef.current[paperId]
+    delete initialSuggestionBatchRef.current[paperId]
+    delete followupSuggestionRequestRef.current[paperId]
   }
 
   async function handleLogout() {
@@ -2984,6 +3059,8 @@ function App() {
     clearNotificationDrawerPolling()
     clearNotificationToastTimer()
     clearRealtimeEventStream()
+    Object.values(chatAbortControllersRef.current).forEach((controller) => controller.abort())
+    chatAbortControllersRef.current = {}
     clearStoredAuthToken()
     localStorage.removeItem('xk_read_recent')
     setAnnotationUndoStacks({})
@@ -3008,7 +3085,6 @@ function App() {
     setTaskCenterError('')
     setTaskCenterActionBusyId('')
     setHomeInitialSection('recent')
-    setSummaryInitialType('')
     setAccountSection('')
     setAuthMode('login')
     setIsAuthViewOpen(false)
@@ -3122,7 +3198,7 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
     <div
       className={`app-shell${shouldShowAuthView ? ' app-shell--auth' : ''}${
         !shouldShowAuthView && isAccountView ? ' app-shell--account' : ''
-      }`}
+      }${isCurrentPaperFullTranslationOpen ? ' app-shell--full-translation' : ''}`}
       style={appShellStyle}
     >
       <input
@@ -3134,7 +3210,7 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
         type="file"
       />
 
-      {!shouldShowAuthView && !isAccountView ? (
+      {!shouldShowAuthView && !isAccountView && !isCurrentPaperFullTranslationOpen ? (
         <header className="topbar">
           <div className="brand-tabs">
             <div className="brand-mark">xk</div>
@@ -3306,8 +3382,8 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
               <Login
                 key={authMode}
                 initialMode={authMode}
-                onAuthSuccess={(authPayload) => {
-                  storeAuthToken(authPayload.access_token)
+                onAuthSuccess={(authPayload, loginOptions = {}) => {
+                  storeAuthToken(authPayload.access_token, { remember: loginOptions.remember !== false })
                   setCurrentUser(authPayload.user)
                   setIsAuthViewOpen(false)
                 }}
@@ -3336,7 +3412,6 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
               onMovePaper={assignPaperToFolder}
               onOpenFilePicker={openFilePicker}
               onOpenPaper={switchToPaperSafely}
-              onJumpToPaperEvidence={handleJumpToPaperEvidence}
               onOpenResource={openResourcePreview}
               onPermanentlyDeletePaper={permanentlyDeletePaper}
               onRefreshPaperMetadata={refreshPaperMetadata}
@@ -3369,102 +3444,162 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
         <div
           className={`workspace-view workspace-view--reader${
             isReaderWorkspaceActive ? ' is-active' : ' is-hidden'
-          }`}
+          }${readerSessionTabs.length ? ' is-kept-alive' : ''}`}
           ref={readerLayoutRef}
         >
-          {isReaderWorkspaceActive ? (
+          {readerSessionTabs.length ? (
             <Suspense fallback={<ViewFallback message="正在加载阅读器..." />}>
+              <div
+                aria-hidden={isCurrentPaperFullTranslationOpen ? 'true' : undefined}
+                className={`reader-session-stack${isCurrentPaperFullTranslationOpen ? ' is-hidden' : ''}`}
+                inert={isCurrentPaperFullTranslationOpen}
+              >
+                {readerSessionTabs.map((paper) => {
+                  const sessionPaperId = Number(paper.id)
+                  const isActiveSession = (
+                    isReaderWorkspaceActive
+                    && !isCurrentPaperFullTranslationOpen
+                    && sessionPaperId === activePaperId
+                  )
+                  const sessionReaderState = getPaperReaderState(paper.id)
+
+                  return (
+                    <div
+                      aria-hidden={isActiveSession ? undefined : 'true'}
+                      className={`reader-session${isActiveSession ? ' is-active' : ' is-hidden'}`}
+                      inert={!isActiveSession}
+                      key={`paper-reader-session:${paper.id}`}
+                    >
+                      <PaperReader
+                        pdfReader={sessionReaderState}
+                        readerRef={isActiveSession ? readerRef : undefined}
+                        readerFrameRef={isActiveSession ? readerFrameRef : undefined}
+                        activeTool={activeTool}
+                        isThumbnailsOpen={isThumbnailsOpen}
+                        thumbnailWidth={thumbnailPanel.width}
+                        onThumbnailResizeStart={thumbnailPanel.startResizeLeft}
+                        onToggleThumbnails={() => setIsThumbnailsOpen((v) => !v)}
+                        onToolChange={setActiveTool}
+                        activeEraserMode={activeEraserMode}
+                        onEraserModeChange={setActiveEraserMode}
+                        inkOptions={inkOptions}
+                        onInkOptionsChange={setInkOptions}
+                        markupOptions={markupOptions}
+                        onMarkupOptionsChange={setMarkupOptions}
+                        shapeOptions={shapeOptions}
+                        onShapeOptionsChange={setShapeOptions}
+                        onSelect={isActiveSession ? handleSelection : undefined}
+                        onThumbnailPageClick={(pageNum) => {
+                          sessionReaderState.setCurrentPage(pageNum)
+                          const el = readerRef.current?.querySelector(`[data-page-number="${pageNum}"]`)
+                          if (el) el.scrollIntoView({ block: 'start', behavior: 'instant' })
+                        }}
+                        onWheelZoom={zoomBy}
+                        searchTerm={isActiveSession ? pdfSearch.searchTerm : ''}
+                        onSearchChange={isActiveSession ? pdfSearch.onSearchChange : undefined}
+                        matchIndex={isActiveSession ? pdfSearch.matchIndex : 0}
+                        matches={isActiveSession ? pdfSearch.matches : []}
+                        noteFocus={isActiveSession ? noteFocus : null}
+                        onSearchExecute={isActiveSession ? pdfSearch.performSearch : undefined}
+                        totalMatches={isActiveSession ? pdfSearch.totalMatches : 0}
+                        onSearchPrev={isActiveSession ? pdfSearch.onSearchPrev : undefined}
+                        onSearchNext={isActiveSession ? pdfSearch.onSearchNext : undefined}
+                        canUndoAnnotation={isActiveSession ? canUndoAnnotation : false}
+                        onUndoAnnotation={isActiveSession ? handleUndoAnnotation : undefined}
+                        currentPaperId={sessionPaperId}
+                        annotationOwnerKey={currentUser?.uid}
+                        annotations={isActiveSession ? annotations : []}
+                        inkAnnotations={isActiveSession ? inkAnnotations : []}
+                        shapeAnnotations={isActiveSession ? shapeAnnotations : []}
+                        onCreateAnnotation={isActiveSession ? handleCreateAnnotation : undefined}
+                        onDeleteAnnotation={isActiveSession ? handleDeleteAnnotation : undefined}
+                        onEraseAnnotationRange={isActiveSession ? handleEraseAnnotationRange : undefined}
+                        onCreateInkAnnotation={isActiveSession ? handleCreateInkAnnotation : undefined}
+                        onDeleteInkAnnotation={isActiveSession ? handleDeleteInkAnnotation : undefined}
+                        onCreateShapeAnnotation={isActiveSession ? handleCreateShapeAnnotation : undefined}
+                        onUpdateShapeAnnotation={isActiveSession ? handleUpdateShapeAnnotation : undefined}
+                        onDeleteShapeAnnotation={isActiveSession ? handleDeleteShapeAnnotation : undefined}
+                        onInsertSelectionNote={isActiveSession ? handleInsertSelectionNote : undefined}
+                        onAskAI={isActiveSession ? function (selectedText) {
+                          const text = String(selectedText || selectionCard.text || '').trim()
+                          if (text) handleAskAIText(text)
+                        } : undefined}
+                        onScreenshotTranslate={isActiveSession ? handleScreenshotTranslate : undefined}
+                        onScreenshotAskAI={isActiveSession ? handleAskAIText : undefined}
+                        onScreenshotInsertNote={isActiveSession ? handleInsertScreenshotNote : undefined}
+                        onDownload={isActiveSession ? handleDownloadOption : undefined}
+                        fullTranslateVisible={isActiveSession && isFullTranslationBetaEnabled}
+                        fullTranslateActive={
+                          isActiveSession && hasReadableFullTranslationCache(fullTranslation)
+                        }
+                        fullTranslateStatus={
+                          isActiveSession && fullTranslationBusy ? 'running' : fullTranslationStatus
+                        }
+                        fullTranslateProgress={fullTranslationProgress}
+                        onFullTranslate={isActiveSession ? handleFullTranslate : undefined}
+                        navigationTabRequest={isActiveSession ? readerNavigationTabRequest : null}
+                        isActive={isActiveSession}
+                        // Hidden sessions still receive layout events from
+                        // PDFium. They must never overwrite the active
+                        // document's confirmed page/zoom with page one.
+                        onPdfiumViewerState={isActiveSession ? syncPdfiumReaderState : undefined}
+                      />
+                    </div>
+                  )
+                })}
+              </div>
+
               {isCurrentPaperFullTranslationOpen ? (
                 <FullTranslationReader
-              paperId={activePaperId}
-              fileName={fileName}
-              metadata={metadata}
-              pageMetrics={pageMetrics}
-              pageNumbers={pageNumbers}
-              pdfDocument={pdfDocument}
-              translation={fullTranslation}
-              parseMode={fullTranslationParseMode}
-              uiFontScale={uiFontScale}
-              onParseModeChange={setFullTranslationParseMode}
+                  paperId={activePaperId}
+                  fileName={fileName}
+                  translation={fullTranslation}
+                  uiFontScale={uiFontScale}
                   onRegenerate={() => handleFullTranslate({ force: true })}
                   onBack={closeFullTranslationReader}
                 />
               ) : (
                 <>
-                  <PaperReader
-                key={`paper-reader:${activePaperId || 'none'}`}
-                pdfReader={paperReaderState}
-                readerRef={readerRef}
-                activeTool={activeTool}
-                isThumbnailsOpen={isThumbnailsOpen}
-                thumbnailWidth={thumbnailPanel.width}
-                onThumbnailResizeStart={thumbnailPanel.startResizeLeft}
-                onToggleThumbnails={() => setIsThumbnailsOpen((v) => !v)}
-                onToolChange={setActiveTool}
-                activeEraserMode={activeEraserMode}
-                onEraserModeChange={setActiveEraserMode}
-                inkOptions={inkOptions}
-                onInkOptionsChange={setInkOptions}
-                shapeOptions={shapeOptions}
-                onShapeOptionsChange={setShapeOptions}
-                onSelect={handleSelection}
-                onThumbnailPageClick={(pageNum) => {
-                  setCurrentPage(pageNum)
-                  const el = readerRef.current?.querySelector(`[data-page-number="${pageNum}"]`)
-                  if (el) el.scrollIntoView({ block: 'start', behavior: 'instant' })
-                }}
-                onWheelZoom={zoomBy}
-                searchTerm={pdfSearch.searchTerm}
-                onSearchChange={pdfSearch.onSearchChange}
-                matchIndex={pdfSearch.matchIndex}
-                matches={pdfSearch.matches}
-                noteFocus={noteFocus}
-                onSearchExecute={pdfSearch.performSearch}
-                totalMatches={pdfSearch.totalMatches}
-                onSearchPrev={pdfSearch.onSearchPrev}
-                onSearchNext={pdfSearch.onSearchNext}
-                canUndoAnnotation={canUndoAnnotation}
-                onUndoAnnotation={handleUndoAnnotation}
-                currentPaperId={activePaperId}
-                annotations={annotations}
-                inkAnnotations={inkAnnotations}
-                shapeAnnotations={shapeAnnotations}
-                onCreateAnnotation={handleCreateAnnotation}
-                onDeleteAnnotation={handleDeleteAnnotation}
-                onEraseAnnotationRange={handleEraseAnnotationRange}
-                onCreateInkAnnotation={handleCreateInkAnnotation}
-                onDeleteInkAnnotation={handleDeleteInkAnnotation}
-                onCreateShapeAnnotation={handleCreateShapeAnnotation}
-                onUpdateShapeAnnotation={handleUpdateShapeAnnotation}
-                onDeleteShapeAnnotation={handleDeleteShapeAnnotation}
-                onInsertSelectionNote={handleInsertSelectionNote}
-                onAskAI={function () { if (selectionCard.text) handleAskAIText(selectionCard.text) }}
-                onScreenshotTranslate={handleScreenshotTranslate}
-                onScreenshotAskAI={handleAskAIText}
-                onScreenshotInsertNote={handleInsertScreenshotNote}
-                onDownload={handleDownloadOption}
-                fullTranslateVisible={isFullTranslationBetaEnabled}
-                fullTranslateActive={hasReadableFullTranslationCache(fullTranslation)}
-              fullTranslateStatus={fullTranslationBusy ? 'running' : fullTranslationStatus}
-              fullTranslateProgress={fullTranslationProgress}
-              fullTranslateParseMode={fullTranslationParseMode}
-              onFullTranslateParseModeChange={setFullTranslationParseMode}
-              onFullTranslate={handleFullTranslate}
-            />
+                  {isInsightPanelCollapsed ? (
+                <button
+                  aria-label="展开即时理解面板"
+                  aria-expanded="false"
+                  className="insight-panel-toggle-tab"
+                  onClick={() => setIsInsightPanelCollapsed(false)}
+                  title="展开即时理解面板"
+                  type="button"
+                >
+                  <PanelRightOpen aria-hidden="true" />
+                </button>
+              ) : (
+                <>
+                  <div
+                    aria-label="调整即时理解面板宽度"
+                    aria-orientation="vertical"
+                    className="workspace-resizer"
+                    onPointerDown={insightPanel.startResize}
+                    role="separator"
+                  />
 
-              <div
-                aria-label="调整即时理解面板宽度"
-                aria-orientation="vertical"
-                className="workspace-resizer"
-                onPointerDown={insightPanel.startResize}
-                role="separator"
-              />
+                  <SelectionInsightPanel
+                    selectionCard={selectionCard}
+                    translationProvider={translationProvider}
+                    onTranslationProviderChange={changeTranslationProvider}
+                    followTranslationEnabled={followTranslationEnabled}
+                    onFollowTranslationEnabledChange={changeFollowTranslationEnabled}
+                    onCollapse={() => setIsInsightPanelCollapsed(true)}
+                    onOpenAiConfig={() => openAccountSection('ai-config')}
+                    width={insightPanel.width}
+                  />
+                </>
+              )}
 
-              <SelectionInsightPanel
+              {/* Keep the portal mounted so hiding the sidebar never dismisses a follow translation. */}
+              <SelectionFollowPanel
+                boundsRef={readerFrameRef}
+                enabled={followPanelVisible}
+                onDismiss={dismissFollowPanel}
                 selectionCard={selectionCard}
-                width={insightPanel.width}
-                aiEnabled={aiEnabled}
-                onToggleAI={toggleAI}
               />
 
               {activeWorkspacePanel ? (
@@ -3486,9 +3621,6 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
                     metadata={metadata}
                     onSaveMetadata={savePaperMetadata}
                     onRefreshMetadata={refreshPaperMetadata}
-                    annotations={annotations}
-                    activePaperFullText={activePaperFullText}
-                    providerId={activeProviderId}
                     currentUser={currentUser}
                     width={workspacePanel.width}
                     notebooks={notebooks}
@@ -3505,8 +3637,6 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
                     onSetActiveNoteTarget={setActiveNoteTarget}
                     onJumpToNote={handleJumpToNoteAnchor}
                     onRequireVip={openMembershipModal}
-                    onJumpToEvidence={handleJumpToSummaryEvidence}
-                    onClearAnnotations={handleClearAnnotations}
                     chatMessages={activeChatMessages}
                     chatInput={activeChatInput}
                     chatAsking={activeChatAsking}
@@ -3524,16 +3654,18 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
                     }}
                     onChatSubmit={handleChatSubmit}
                     onRefreshInitialSuggestions={function () { fetchInitialSuggestions(true) }}
-                    onInsertSummaryNote={handleInsertSummaryNote}
-                    initialSummaryId={summaryInitialType}
+                    paperReadingBrief={activePaperReadingBrief}
+                    onRetryPaperReadingBrief={retryActivePaperReadingBrief}
+                    onRefreshPaperReadingBrief={refreshActivePaperReadingBrief}
                   />
                 </Suspense>
               ) : null}
 
-              <UtilityRail
-                activeItem={activeWorkspacePanel}
-                collapsed={isUtilityRailCollapsed}
-                onSelect={handleWorkspacePanelSelect}
+                <UtilityRail
+                  activeItem={activeWorkspacePanel}
+                  collapsed={isUtilityRailCollapsed}
+                  briefStatus={activePaperReadingBrief.status}
+                  onSelect={handleWorkspacePanelSelect}
                 onItemIntent={preloadSideWorkspacePanel}
                 onToggleCollapsed={() => setIsUtilityRailCollapsed((value) => !value)}
               />
@@ -3721,7 +3853,7 @@ if (!shouldShowAuthView && currentUser?.is_admin) {
         error={taskCenterError}
         actionBusyId={taskCenterActionBusyId}
         onRefresh={() => void loadTaskCenter()}
-        onClearCompletedTasks={handleClearCompletedTasks}
+        onClearFinishedTasks={handleClearFinishedTasks}
         onDeleteTask={handleDeleteTaskCenterItem}
         onOpenTask={handleTaskCenterOpen}
         onCancelTask={(item) => void handleTaskCenterAction(item, 'cancel')}

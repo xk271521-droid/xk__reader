@@ -1,0 +1,412 @@
+.reader-navigation-panel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.reader-navigation-panel__tabs {
+  display: flex;
+  flex: 0 0 38px;
+  align-items: stretch;
+  justify-content: center;
+  border-bottom: 1px solid #dfe6ed;
+  background: #fff;
+}
+
+.reader-navigation-panel__tab {
+  position: relative;
+  flex: 0 0 84px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #667085;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.reader-navigation-panel__tab:hover {
+  color: #1f2937;
+  background: #f7f8fa;
+}
+
+.reader-navigation-panel__tab.is-active {
+  color: #144d5f;
+}
+
+.reader-navigation-panel__tab.is-active::after {
+  position: absolute;
+  right: 12px;
+  bottom: -1px;
+  left: 12px;
+  height: 2px;
+  border-radius: 0;
+  background: #144d5f;
+  content: '';
+}
+
+/* The ring sits beside, rather than inside, the label's layout so "目录" stays centred. */
+.reader-navigation-panel__outline-progress {
+  position: absolute;
+  top: 50%;
+  left: calc(50% + 14px);
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: conic-gradient(#144d5f var(--outline-progress), #d8e3e7 0);
+  transform: translateY(-50%);
+}
+
+.reader-navigation-panel__outline-progress::after {
+  position: absolute;
+  inset: 2px;
+  border-radius: inherit;
+  background: #fff;
+  content: '';
+}
+
+.reader-navigation-panel__outline-progress.is-indeterminate {
+  border: 2px solid #d8e3e7;
+  border-top-color: #144d5f;
+  background: transparent;
+  animation: reader-outline-progress-spin 800ms linear infinite;
+}
+
+.reader-navigation-panel__outline-progress.is-indeterminate::after {
+  display: none;
+}
+
+@keyframes reader-outline-progress-spin {
+  to {
+    transform: translateY(-50%) rotate(1turn);
+  }
+}
+
+.reader-navigation-panel__tab:focus-visible,
+.reader-outline__expand:focus-visible,
+.reader-outline__link:focus-visible,
+.reader-outline-state button:focus-visible,
+.reader-outline__retry button:focus-visible {
+  z-index: 1;
+  outline: 2px solid #144d5f;
+  outline-offset: -2px;
+}
+
+/* Keep the navigation toggle visually equivalent to the sidebar tabs: a line, not a filled rounded button. */
+.app-shell:not(.app-shell--auth) .reader-toolbar .toolbar-icon-button.toolbar-icon-button--navigation.is-active {
+  border-color: transparent;
+  background: transparent;
+  color: #144d5f;
+  box-shadow: none;
+}
+
+.app-shell:not(.app-shell--auth) .reader-toolbar .toolbar-icon-button.toolbar-icon-button--navigation.is-active::after {
+  position: absolute;
+  right: 3px;
+  bottom: 0;
+  left: 3px;
+  height: 2px;
+  border-radius: 0;
+  background: #144d5f;
+  content: '';
+}
+
+.reader-navigation-panel__content {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.reader-navigation-panel__content > .thumbnail-panel,
+.reader-navigation-panel__content > .embedpdf-thumbnail-panel {
+  min-height: 0;
+  flex: 1;
+  width: 100% !important;
+}
+
+.reader-outline {
+  width: 100%;
+  overflow: auto;
+  padding: 8px 8px 20px;
+  scrollbar-gutter: stable;
+}
+
+.reader-outline__source {
+  margin: 2px 6px 8px;
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.reader-outline__retry {
+  display: flex;
+  margin: 10px 6px 0 32px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  color: #b42318;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.reader-outline__retry button {
+  display: inline-flex;
+  min-height: 26px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 1px solid #d0d5dd;
+  border-radius: 3px;
+  background: #fff;
+  color: #144d5f;
+  font: inherit;
+  cursor: pointer;
+}
+
+.reader-outline__retry button:hover {
+  border-color: #144d5f;
+  background: #eef4f5;
+}
+
+.reader-outline__retry button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.reader-outline__tree {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  flex-direction: column;
+  list-style: none;
+}
+
+.reader-outline__item {
+  min-width: 0;
+}
+
+.reader-outline__row {
+  display: flex;
+  min-width: 0;
+  min-height: 30px;
+  align-items: stretch;
+  padding-left: calc(var(--outline-depth, 0) * 12px);
+}
+
+.reader-outline__expand,
+.reader-outline__indent {
+  display: grid;
+  width: 26px;
+  min-width: 26px;
+  padding: 0;
+  border: 0;
+  place-items: center;
+  background: transparent;
+  color: #667085;
+}
+
+.reader-outline__expand {
+  cursor: pointer;
+}
+
+.reader-outline__expand svg {
+  width: 15px;
+  height: 15px;
+}
+
+.reader-outline__link {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px 5px 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #344054;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reader-outline__link:hover:not(:disabled) {
+  background: #eef4f5;
+  color: #144d5f;
+}
+
+.reader-outline__link:disabled {
+  color: #98a2b3;
+  cursor: default;
+}
+
+.reader-outline__title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-weight: 580;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-outline__translation {
+  position: absolute;
+  z-index: 2;
+  top: calc(100% + 2px);
+  left: 0;
+  max-width: min(280px, calc(100vw - 24px));
+  padding: 5px 7px;
+  border: 1px solid #b8c8d0;
+  border-radius: 3px;
+  background: #fff;
+  color: #144d5f;
+  font-size: 11px;
+  font-weight: 520;
+  line-height: 1.45;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 120ms ease-out, transform 120ms ease-out, visibility 120ms linear;
+  visibility: hidden;
+  white-space: normal;
+}
+
+.reader-outline__link:hover .reader-outline__translation,
+.reader-outline__link:focus-visible .reader-outline__translation {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
+
+.reader-outline__page {
+  flex: 0 0 auto;
+  color: #667085;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reader-outline__translation {
+    transition: none;
+  }
+
+  .reader-navigation-panel__outline-progress.is-indeterminate {
+    animation: none;
+  }
+}
+
+.reader-outline-state {
+  display: flex;
+  width: 100%;
+  min-height: 150px;
+  box-sizing: border-box;
+  padding: 20px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.reader-outline-state svg {
+  width: 20px;
+  height: 20px;
+  color: #144d5f;
+}
+
+.reader-outline-state p {
+  margin: 0;
+}
+
+.reader-outline-state span {
+  color: #98a2b3;
+  font-variant-numeric: tabular-nums;
+}
+
+.reader-outline-state.is-error {
+  color: #b42318;
+}
+
+.reader-outline-state.is-error svg {
+  color: #b42318;
+}
+
+.reader-outline-state button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid #ccd8df;
+  border-radius: 3px;
+  background: #fff;
+  color: #144d5f;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.reader-outline-state button:hover {
+  border-color: #144d5f;
+  background: #eef4f5;
+}
+
+.reader-outline-state button svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* The active-page signal is intentionally a straight underline only. */
+.reader-navigation-panel .thumbnail-panel__item.is-active,
+.reader-navigation-panel .embedpdf-thumbnail-panel__item.is-active {
+  background: transparent;
+}
+
+.reader-navigation-panel .thumbnail-panel__item.is-active .thumbnail-panel__canvas-wrap,
+.reader-navigation-panel .embedpdf-thumbnail-panel__item.is-active .embedpdf-thumbnail-panel__image {
+  box-shadow: 0 1px 4px rgb(18 30 46 / 10%);
+}
+
+.reader-navigation-panel .thumbnail-panel__item.is-active::after,
+.reader-navigation-panel .embedpdf-thumbnail-panel__item.is-active::after {
+  position: absolute;
+  right: 12px;
+  bottom: 0;
+  left: 12px;
+  height: 2px;
+  border-radius: 0;
+  background: #144d5f;
+  content: '';
+}
+
+@media (max-width: 720px) {
+  .reader-navigation-panel__tab {
+    flex-basis: 72px;
+  }
+
+  .reader-outline__row {
+    min-height: 36px;
+  }
+
+  .reader-outline__expand,
+  .reader-outline__indent {
+    width: 30px;
+    min-width: 30px;
+  }
+}

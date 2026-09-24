@@ -4,8 +4,10 @@ import {
   Bold,
   Bot,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   ClipboardCopy,
+  Copy,
   Crown,
   Download,
   FileText,
@@ -23,18 +25,14 @@ import {
   Presentation,
   RefreshCw,
   Save,
+  Send,
   Sparkles,
   Trash2,
   Type,
   X,
 } from 'lucide-react'
 import { getStoredAuthToken } from '../../services/authApi'
-import {
-  checkNotesExportAllowed,
-  fetchPaperSummaries,
-  fetchPaperSummaryStatus,
-  generatePaperSummary,
-} from '../../services/paperReaderApi'
+import { checkNotesExportAllowed } from '../../services/paperReaderApi'
 import {
   addChildNode,
   addRootNode,
@@ -78,14 +76,20 @@ import {
 } from '../ui/tabs'
 import { resolveAssetUrl } from '../../utils/assetUrl'
 import { resolveApiErrorMessage } from '../../utils/errorMessage'
-import {
-  buildAnnotationSummaryGroupsFromAnnotations,
-  countLogicalAnnotations,
-} from '../../utils/annotationAggregation'
+import { PaperReadingBriefPanel } from './PaperReadingBriefPanel'
 
 function buildPaperTitle(fileName) {
   if (!fileName) return 'Untitled paper'
   return fileName.replace(/\.pdf$/i, '')
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
 }
 
 const NOTEBOOK_TEMPLATE_ICON_MAP = {
@@ -1051,10 +1055,10 @@ function renderRichNoteHtml(value) {
   const segments = buildRichTextSegments(doc)
   const html = segments
     .map((segment) => {
-      const text = escapeSummaryHtml(segment.text || '')
+      const text = escapeHtml(segment.text || '')
       if (!text) return ''
       if (segment.color && segment.color !== DEFAULT_NOTE_TEXT_COLOR) {
-        return `<span style="color:${escapeSummaryHtml(segment.color)}">${text}</span>`
+        return `<span style="color:${escapeHtml(segment.color)}">${text}</span>`
       }
       return text
     })
@@ -1068,8 +1072,8 @@ function renderNoteBlockHtml(block) {
   if (block.type === 'quote') {
     return `
       <blockquote class="export-note-quote">
-        ${source ? `<span class="export-note-source">${escapeSummaryHtml(source)}</span>` : ''}
-        <p>${escapeSummaryHtml(block.content || '').replace(/\n/g, '<br />')}</p>
+        ${source ? `<span class="export-note-source">${escapeHtml(source)}</span>` : ''}
+        <p>${escapeHtml(block.content || '').replace(/\n/g, '<br />')}</p>
       </blockquote>
     `
   }
@@ -1078,8 +1082,8 @@ function renderNoteBlockHtml(block) {
     const src = resolveNoteExportImageUrl(block.image_url)
     return `
       <figure class="export-note-image">
-        ${src ? `<img src="${escapeSummaryHtml(src)}" alt="笔记截图" />` : '<div class="export-note-image__empty">图片未保存</div>'}
-        ${source || block.content ? `<figcaption>${escapeSummaryHtml([source, block.content].filter(Boolean).join(' / '))}</figcaption>` : ''}
+        ${src ? `<img src="${escapeHtml(src)}" alt="笔记截图" />` : '<div class="export-note-image__empty">图片未保存</div>'}
+        ${source || block.content ? `<figcaption>${escapeHtml([source, block.content].filter(Boolean).join(' / '))}</figcaption>` : ''}
       </figure>
     `
   }
@@ -1099,8 +1103,8 @@ function renderNoteNodeHtml(node, indexPath = []) {
   return `
     <section class="export-note-node export-note-node--level-${level}" style="${notePaletteStyle(palette)}">
       <div class="export-note-heading export-note-heading--level-${level}">
-        <span>${escapeSummaryHtml(marker || '•')}</span>
-        <h${headingLevel}>${escapeSummaryHtml(node.title || '未命名标题')}</h${headingLevel}>
+        <span>${escapeHtml(marker || '•')}</span>
+        <h${headingLevel}>${escapeHtml(node.title || '未命名标题')}</h${headingLevel}>
       </div>
       <div class="export-note-node__body">
         ${blocks || '<p class="export-note-muted">暂无内容。</p>'}
@@ -1124,8 +1128,8 @@ function buildNoteExportHtml(notebooks, fileName, metadata) {
     const palette = getNoteExportPalette(index)
     return `
       <div class="export-note-stat" style="${notePaletteStyle(palette)}">
-        <span>${escapeSummaryHtml(label)}</span>
-        <strong>${escapeSummaryHtml(value)}</strong>
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
       </div>
     `
   }).join('')
@@ -1135,7 +1139,7 @@ function buildNoteExportHtml(notebooks, fileName, metadata) {
     return `
       <div class="export-note-toc-item" style="${notePaletteStyle(palette)}">
         <b>${String(index + 1).padStart(2, '0')}</b>
-        <span>${escapeSummaryHtml(notebook.title || '未命名笔记本')}</span>
+        <span>${escapeHtml(notebook.title || '未命名笔记本')}</span>
         <small>${treeStats.nodes} 个标题 / ${treeStats.blocks} 条内容</small>
       </div>
     `
@@ -1148,7 +1152,7 @@ function buildNoteExportHtml(notebooks, fileName, metadata) {
         <div class="export-note-book__header">
           <span>${String(index + 1).padStart(2, '0')}</span>
           <div>
-            <h2>${escapeSummaryHtml(notebook.title || '未命名笔记本')}</h2>
+            <h2>${escapeHtml(notebook.title || '未命名笔记本')}</h2>
             <p>${tree.length} 个一级标题</p>
           </div>
         </div>
@@ -1161,7 +1165,7 @@ function buildNoteExportHtml(notebooks, fileName, metadata) {
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <title>${escapeSummaryHtml(title)} - 阅读笔记</title>
+  <title>${escapeHtml(title)} - 阅读笔记</title>
   <style>
     @page { size: A4; margin: 17mm 15mm; }
     * { box-sizing: border-box; }
@@ -1394,8 +1398,8 @@ function buildNoteExportHtml(notebooks, fileName, metadata) {
   <main class="export-note-document">
     <header class="export-note-cover">
       <span class="export-note-type">阅读笔记</span>
-      <h1>${escapeSummaryHtml(title)}</h1>
-      <div class="export-note-meta">导出时间：${escapeSummaryHtml(generatedAt)}</div>
+      <h1>${escapeHtml(title)}</h1>
+      <div class="export-note-meta">导出时间：${escapeHtml(generatedAt)}</div>
       <div class="export-note-overview">${overviewHtml}</div>
     </header>
     ${tocHtml ? `<section class="export-note-toc"><h2 class="export-note-toc-title">笔记目录</h2>${tocHtml}</section>` : ''}
@@ -2122,6 +2126,93 @@ function NotesPanel({
   )
 }
 
+const ASK_INLINE_TOKEN_RE = /(\*\*[^*]+\*\*|`[^`]+`|\[第\s*\d+\s*页\])/g
+
+function renderAskInline(value) {
+  const text = String(value || '')
+  return text.split(ASK_INLINE_TOKEN_RE).filter(Boolean).map((token, index) => {
+    if (token.startsWith('**') && token.endsWith('**')) {
+      return <strong key={`strong-${index}`}>{token.slice(2, -2)}</strong>
+    }
+    if (token.startsWith('`') && token.endsWith('`')) {
+      return <code key={`code-${index}`}>{token.slice(1, -1)}</code>
+    }
+    if (/^\[第\s*\d+\s*页\]$/.test(token)) {
+      return (
+        <span className="ask-citation-pill" key={`citation-${index}`}>
+          <FileText size={12} aria-hidden="true" />
+          {token.replace(/\s+/g, ' ')}
+        </span>
+      )
+    }
+    return <span key={`text-${index}`}>{token}</span>
+  })
+}
+
+function renderAskMarkdown(value) {
+  const lines = String(value || '').replace(/\r/g, '').split('\n')
+  const blocks = []
+  let paragraph = []
+  let list = []
+
+  function flushParagraph() {
+    if (!paragraph.length) return
+    blocks.push(
+      <p key={`paragraph-${blocks.length}`}>
+        {renderAskInline(paragraph.join(' '))}
+      </p>,
+    )
+    paragraph = []
+  }
+
+  function flushList() {
+    if (!list.length) return
+    blocks.push(
+      <ul key={`list-${blocks.length}`}>
+        {list.map((item, index) => (
+          <li key={`list-item-${index}`}>{renderAskInline(item)}</li>
+        ))}
+      </ul>,
+    )
+    list = []
+  }
+
+  lines.forEach((line) => {
+    const trimmed = line.trim()
+    if (!trimmed) {
+      flushParagraph()
+      flushList()
+      return
+    }
+
+    const heading = trimmed.match(/^(#{1,3})\s+(.+)$/)
+    if (heading) {
+      flushParagraph()
+      flushList()
+      blocks.push(
+        <h4 key={`heading-${blocks.length}`}>
+          {renderAskInline(heading[2])}
+        </h4>,
+      )
+      return
+    }
+
+    const listItem = trimmed.match(/^(?:[-*]|\d+\.)\s+(.+)$/)
+    if (listItem) {
+      flushParagraph()
+      list.push(listItem[1])
+      return
+    }
+
+    flushList()
+    paragraph.push(trimmed)
+  })
+
+  flushParagraph()
+  flushList()
+  return blocks.length ? blocks : renderAskInline(value)
+}
+
 function AskPanel({
   currentUser,
   asking,
@@ -2154,6 +2245,15 @@ function AskPanel({
       return <span>{userInitials}</span>
     }
     return <Bot size={16} />
+  }
+
+  async function copyAnswer(text) {
+    if (!text || typeof navigator === 'undefined' || !navigator.clipboard) return
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // Clipboard permissions are optional; keep the answer usable when denied.
+    }
   }
 
   function renderFollowups(message) {
@@ -2189,10 +2289,11 @@ function AskPanel({
               ))}
             </div>
 
-            <div className="ask-followup-card__head">
-              <strong>{activeGroup.title || '推荐问题'}</strong>
-              {activeGroup.rationale ? <p>{activeGroup.rationale}</p> : null}
-            </div>
+            {activeGroup.rationale ? (
+              <div className="ask-followup-card__head">
+                <p>{activeGroup.rationale}</p>
+              </div>
+            ) : null}
 
             <div className="ask-followup-card__questions">
               {(activeGroup.questions || []).map((question, questionIndex) => (
@@ -2203,6 +2304,7 @@ function AskPanel({
                   onClick={() => onSubmit?.(question)}
                 >
                   {question}
+                  <ChevronRight size={16} aria-hidden="true" />
                 </button>
               ))}
             </div>
@@ -2291,13 +2393,39 @@ function AskPanel({
               {!isUser ? <div className="ask-avatar">{renderAvatar(false)}</div> : null}
 
               <div className="ask-msg__content">
+                {!isUser ? (
+                  <div className="ask-message-meta">
+                    <span>AI 回答</span>
+                    {message.status === 'streaming' ? <span className="ask-message-meta__state">正在生成</span> : null}
+                  </div>
+                ) : null}
+                {isUser && message.messageType === 'deep_read' ? (
+                  <span className="ask-selection-context">
+                    <Highlighter size={12} aria-hidden="true" />
+                    围绕选中文字
+                  </span>
+                ) : null}
                 <div
                   className={`ask-bubble${
                     message.status === 'error' ? ' is-error' : ''
                   }${message.status === 'streaming' ? ' is-streaming' : ''}`}
                 >
-                  {bubbleText || (message.status === 'streaming' ? <span className="ask-typing">...</span> : '')}
+                  {bubbleText ? renderAskMarkdown(bubbleText) : (
+                    message.status === 'streaming' ? <span className="ask-typing">正在整理回答</span> : ''
+                  )}
                 </div>
+                {!isUser && bubbleText ? (
+                  <div className="ask-answer-actions">
+                    <button
+                      type="button"
+                      title="复制回答"
+                      aria-label="复制回答"
+                      onClick={() => void copyAnswer(bubbleText)}
+                    >
+                      <Copy size={14} aria-hidden="true" />
+                    </button>
+                  </div>
+                ) : null}
                 {!isUser ? renderFollowups(message) : null}
               </div>
 
@@ -2309,14 +2437,14 @@ function AskPanel({
 
       <div className="ask-composer">
         <div className="ask-input-row">
-          <input
-            type="text"
+          <textarea
             className="ask-input"
-            placeholder="问这篇论文..."
+            placeholder="围绕这篇论文提问..."
             value={inputText || ''}
+            rows={1}
             onChange={(event) => onInputChange?.(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') {
+              if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault()
                 onSubmit?.()
               }
@@ -2325,10 +2453,12 @@ function AskPanel({
           <button
             type="button"
             className="ask-send-btn"
+            title="发送问题"
+            aria-label="发送问题"
             onClick={() => onSubmit?.()}
             disabled={asking || !(inputText || '').trim()}
           >
-            发送
+            <Send size={17} aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -2363,1449 +2493,11 @@ function FullTranslatePanelV2() {
   )
 }
 
-const SUMMARY_TYPES = [
-  {
-    id: 'overview',
-    title: '整篇总结',
-    subtitle: '快速理解论文主线、方法、实验和结论',
-    emptyHint: '生成一份结构化总览，适合第一次快速读懂全文。',
-    themeClass: 'summary-theme--overview',
-    Icon: FileText,
-  },
-  {
-    id: 'annotations',
-    title: '我的标注总结',
-    subtitle: '只归纳你高亮、下划线和重点标记过的内容',
-    emptyHint: '把你自己划过的重点重新整理成可复习的摘要。',
-    themeClass: 'summary-theme--annotations',
-    Icon: Highlighter,
-  },
-  {
-    id: 'review',
-    title: '文献综述卡片',
-    subtitle: '研究问题、方法、结果、不足和优点统一成卡',
-    emptyHint: '适合多篇论文横向对比，后面能直接服务综述写作。',
-    themeClass: 'summary-theme--review',
-    Icon: Layers3,
-  },
-  {
-    id: 'reproduction',
-    title: '复现总结',
-    subtitle: '模型结构、数据集、参数、环境和公式逻辑',
-    emptyHint: '给后续实验复现和代码阅读准备一份工程向清单。',
-    themeClass: 'summary-theme--reproduction',
-    Icon: FlaskConical,
-  },
-  {
-    id: 'meeting',
-    title: '组会汇报稿',
-    subtitle: '按研究生组会口径生成可直接开口讲的稿子',
-    emptyHint: '自动整理背景、创新点、实验结果、局限和下周计划。',
-    themeClass: 'summary-theme--meeting',
-    Icon: Presentation,
-  },
-]
-
-const SUMMARY_STATUS_LABELS = {
-  idle: '未生成',
-  generating: '生成中',
-  generated: '已生成',
-  failed: '失败',
-}
-
-function buildSummarySections(typeId, paperTitle) {
-  const safeTitle = paperTitle || '当前文献'
-  const sectionsByType = {
-    overview: [
-      ['论文主要讲什么', `围绕《${safeTitle}》建立全局阅读框架，先抓论文主题、研究对象和核心贡献。`],
-      ['要解决什么问题', '提炼作者想解决的学术痛点、现有方法不足，以及论文为什么有必要做。'],
-      ['用了什么方法', '概括模型、算法、实验流程或理论分析路径，保留关键术语，避免把方法讲散。'],
-      ['做了什么实验', '整理数据来源、对比对象、评价指标和主要实验设置。'],
-      ['得出什么结论', '压缩出论文最重要的发现，并标明哪些结论可以服务你的研究。'],
-      ['论文有哪些不足', '指出适用场景、实验验证、泛化能力和未来工作里的潜在问题。'],
-    ],
-    annotations: [
-      ['标注重点概览', '只读取你标过的高亮、下划线、波浪线内容，生成属于你自己的重点摘要。'],
-      ['方法相关重点', '把标注中的模型、步骤、变量、公式含义集中到一个模块，方便复习。'],
-      ['结果相关重点', '归纳你标出的实验结果、性能提升、对比结论和作者解释。'],
-      ['可继续追问', '根据标注内容生成后续可以问 AI 的问题，帮助继续深读。'],
-    ],
-    review: [
-      ['研究问题', '用一句话说明论文研究的问题、对象和场景。'],
-      ['核心方法', '固定格式整理论文使用的核心方法，便于多篇文献横向比较。'],
-      ['实验结果', '提取关键结果、指标变化、对比结论和有效性证据。'],
-      ['研究不足/空白', '总结论文没解决的问题，为你后续选题和创新点提供入口。'],
-      ['优点', '归纳论文值得借鉴的思路、结构、实验设计或论证方式。'],
-    ],
-    reproduction: [
-      ['模型结构', '抽取网络结构、模块组成、输入输出关系和整体流程。'],
-      ['用到的数据集', '列出数据集、样本来源、划分方式和预处理信息。'],
-      ['实验参数', '整理训练参数、评价指标、消融设置和对比基线。'],
-      ['实验环境', '记录框架、硬件、软件环境等可能影响复现的条件。'],
-      ['关键公式逻辑', '解释公式变量和推导用途，优先服务代码实现和实验复现。'],
-    ],
-    meeting: [
-      ['本周阅读论文简介', `这周阅读了一篇与《${safeTitle}》相关的论文，主要围绕研究问题和方法改进展开。`],
-      ['研究背景 & 现存问题', '用组会口吻说明领域痛点，以及传统方法目前解决不了的地方。'],
-      ['论文核心创新点', '突出导师最关心的创新点：相比旧方法改了哪里，新思路是什么。'],
-      ['研究方法/模型思路', '用大白话讲清楚作者方法从输入到输出的实现流程。'],
-      ['实验结果 & 效果表现', '说明在哪些数据集上验证、效果提升多少、结论是否可靠。'],
-      ['论文不足 & 局限性', '主动总结适用限制、实验不足和未来改进空间。'],
-      ['对自己课题的启发 + 下周计划', '把论文思路连接到自己的课题，并形成下一步阅读或实验计划。'],
-    ],
-  }
-  return (sectionsByType[typeId] || sectionsByType.overview).map(([title, body]) => ({ title, body }))
-}
-
-function formatSummaryMarkdown(type, sections) {
-  return [`# ${type.title}`, ...sections.map((section, index) => `\n## ${String(index + 1).padStart(2, '0')} ${section.title}\n${section.body}`)].join('\n')
-}
-
-function LiteratureSummaryPanel({ fileName, metadata }) {
-  const paperTitle = metadata?.title || buildPaperTitle(fileName)
-  const timersRef = useRef([])
-  const [activeSummaryId, setActiveSummaryId] = useState('')
-  const [summaryState, setSummaryState] = useState(() =>
-    SUMMARY_TYPES.reduce((acc, type) => {
-      acc[type.id] = { status: 'idle', sections: [], updatedAt: '', justCompleted: false }
-      return acc
-    }, {}),
-  )
-
-  useEffect(() => {
-    return () => {
-      timersRef.current.forEach((timerId) => window.clearTimeout(timerId))
-      timersRef.current = []
-    }
-  }, [])
-
-  const activeType = SUMMARY_TYPES.find((type) => type.id === activeSummaryId)
-  const activeSummary = activeType ? summaryState[activeType.id] : null
-  const generatedCount = SUMMARY_TYPES.filter((type) => summaryState[type.id]?.status === 'generated').length
-  const generatingCount = SUMMARY_TYPES.filter((type) => summaryState[type.id]?.status === 'generating').length
-
-  function schedule(callback, delay) {
-    const timerId = window.setTimeout(() => {
-      timersRef.current = timersRef.current.filter((id) => id !== timerId)
-      callback()
-    }, delay)
-    timersRef.current.push(timerId)
-  }
-
-  function finishGenerate(typeId) {
-    setSummaryState((current) => ({
-      ...current,
-      [typeId]: {
-        status: 'generated',
-        sections: buildSummarySections(typeId, paperTitle),
-        updatedAt: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-        justCompleted: true,
-      },
-    }))
-    schedule(() => {
-      setSummaryState((current) => ({
-        ...current,
-        [typeId]: { ...current[typeId], justCompleted: false },
-      }))
-    }, 1000)
-  }
-
-  function beginGenerate(typeId, options = {}) {
-    if (summaryState[typeId]?.status === 'generating') return
-    if (options.open) setActiveSummaryId(typeId)
-    setSummaryState((current) => ({
-      ...current,
-      [typeId]: { ...current[typeId], status: 'generating', justCompleted: false },
-    }))
-    schedule(() => finishGenerate(typeId), options.delay || 760)
-  }
-
-  function handleCardClick(type) {
-    const current = summaryState[type.id]
-    setActiveSummaryId(type.id)
-    if (current?.status === 'idle' || current?.status === 'failed') beginGenerate(type.id, { open: true })
-  }
-
-  function handleRegenerate(typeId) {
-    const current = summaryState[typeId]
-    if (current?.status === 'generated' && !window.confirm('会覆盖当前总结，确定重新生成吗？')) return
-    beginGenerate(typeId, { open: true })
-  }
-
-  function handleGenerateAll() {
-    SUMMARY_TYPES.forEach((type, index) => {
-      const current = summaryState[type.id]
-      if (current?.status === 'generated' || current?.status === 'generating') return
-      schedule(() => beginGenerate(type.id, { delay: 720 }), index * 260)
-    })
-  }
-
-  async function handleCopy(type, sections) {
-    if (!sections.length) return
-    try {
-      await navigator.clipboard.writeText(formatSummaryMarkdown(type, sections))
-    } catch (error) {
-      console.warn('copy summary failed', error)
-    }
-  }
-
-  if (activeType) {
-    const isGenerating = activeSummary?.status === 'generating'
-    const sections = activeSummary?.sections || []
-    const Icon = activeType.Icon
-    return (
-      <div className={`workspace-panel__content summary-panel ${activeType.themeClass}`}>
-        <section className="summary-detail">
-          <div className="summary-detail__hero">
-            <button className="summary-back-btn" type="button" onClick={() => setActiveSummaryId('')}>
-              <ArrowLeft size={16} />
-              <span>返回总结列表</span>
-            </button>
-            <div className="summary-detail__title-row">
-              <div className="summary-detail__icon">
-                <Icon size={22} />
-              </div>
-              <div>
-                <h3>{activeType.title}</h3>
-                <p>{activeType.subtitle}</p>
-              </div>
-            </div>
-          </div>
-          <div className="summary-detail__actions">
-            <button className="summary-primary-action" type="button" disabled={isGenerating} onClick={() => handleRegenerate(activeType.id)}>
-              {isGenerating ? <Loader2 size={15} className="summary-spin" /> : <RefreshCw size={15} />}
-              {isGenerating ? '生成中...' : sections.length ? '重新生成' : '生成'}
-            </button>
-            <button className="summary-secondary-action" type="button" disabled={!sections.length || isGenerating} onClick={() => handleCopy(activeType, sections)}>
-              <ClipboardCopy size={15} />
-              复制
-            </button>
-            <button
-              className="summary-secondary-action"
-              type="button"
-              disabled={!sections.length || isGenerating}
-              onClick={() => window.alert('插入阅读笔记入口已预留，下一步会接入笔记树。')}
-            >
-              <NotebookPen size={15} />
-              插入笔记
-            </button>
-          </div>
-          {isGenerating ? (
-            <div className="summary-detail__loading">
-              <Sparkles size={18} />
-              <strong>正在生成结构化总结</strong>
-              <p>先搭建模块骨架，再逐段填充重点内容。</p>
-            </div>
-          ) : null}
-          <div className="summary-section-list">
-            {(sections.length ? sections : buildSummarySections(activeType.id, paperTitle).slice(0, 3)).map((section, index) => (
-              <article className={`summary-section ${!sections.length ? 'is-preview' : ''}`} key={`${section.title}-${index}`} style={{ '--summary-section-index': index }}>
-                <span className="summary-section__index">{String(index + 1).padStart(2, '0')}</span>
-                <div>
-                  <h4>{section.title}</h4>
-                  <p>{sections.length ? section.body : '生成后这里会展示该模块的正式内容。'}</p>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-      </div>
-    )
-  }
-
-  return (
-    <div className="workspace-panel__content summary-panel">
-      <section className="summary-home">
-        <div className="summary-home__hero">
-          <h3>文献总结</h3>
-          <p>把一篇论文拆成不同用途的总结卡片：速读、标注复盘、综述写作、复现实验和组会汇报。</p>
-          <div className="summary-home__meta">
-            <strong>{generatedCount}/5 已生成</strong>
-            <span>{generatingCount ? `${generatingCount} 个正在生成` : '点击卡片开始生成'}</span>
-          </div>
-          <button className="summary-generate-all" type="button" disabled={generatingCount > 0} onClick={handleGenerateAll}>
-            <Sparkles size={15} />
-            全部生成
-          </button>
-        </div>
-        <div className="summary-card-grid">
-          {SUMMARY_TYPES.map((type) => {
-            const state = summaryState[type.id]
-            const status = state?.status || 'idle'
-            const preview = state?.sections?.[0]?.body || type.emptyHint
-            const Icon = type.Icon
-            return (
-              <button
-                className={`summary-card ${type.themeClass} is-${status} ${state?.justCompleted ? 'is-complete-flash' : ''}`}
-                type="button"
-                key={type.id}
-                onClick={() => handleCardClick(type)}
-              >
-                <div className="summary-card__top">
-                  <span className="summary-card__icon">
-                    <Icon size={19} />
-                  </span>
-                  <span className={`summary-status summary-status--${status}`}>
-                    {status === 'generating' ? <Loader2 size={12} className="summary-spin" /> : null}
-                    {SUMMARY_STATUS_LABELS[status]}
-                  </span>
-                </div>
-                <h4>{type.title}</h4>
-                <p className="summary-card__subtitle">{type.subtitle}</p>
-                <p className={`summary-card__preview ${status === 'idle' ? 'is-muted' : ''}`}>{preview}</p>
-                <div className="summary-card__footer">
-                  <span>{state?.updatedAt ? `更新于 ${state.updatedAt}` : '点击进入详情'}</span>
-                  <Sparkles size={14} />
-                </div>
-              </button>
-            )
-          })}
-        </div>
-      </section>
-    </div>
-  )
-}
-
-const QUALITY_SUMMARY_TYPES = [
-  {
-    id: 'overview',
-    title: '整篇总结',
-    subtitle: '快速理解论文主线、方法、实验和结论',
-    emptyHint: '生成一份结构化总览，适合第一次快速读懂全文。',
-    themeClass: 'summary-theme--overview',
-    Icon: FileText,
-  },
-  {
-    id: 'annotations',
-    title: '我的标注总结',
-    subtitle: '只归纳你高亮、下划线和重点标记过的内容',
-    emptyHint: '把你自己划过的重点整理成可复习的摘要。',
-    themeClass: 'summary-theme--annotations',
-    Icon: Highlighter,
-  },
-  {
-    id: 'review',
-    title: '文献综述卡片',
-    subtitle: '变量指标、核心发现、创新局限和引用价值',
-    emptyHint: '适合后期多篇论文横向对比和综述写作，重点沉淀可复用字段。',
-    themeClass: 'summary-theme--review',
-    Icon: Layers3,
-  },
-  {
-    id: 'reproduction',
-    title: '复现总结',
-    subtitle: '模型结构、数据集、参数、环境和公式逻辑',
-    emptyHint: '给后续实验复现和代码阅读准备工程向清单。',
-    themeClass: 'summary-theme--reproduction',
-    Icon: FlaskConical,
-  },
-  {
-    id: 'meeting',
-    title: '组会汇报稿',
-    subtitle: '按研究生组会口径生成可直接开口讲的稿子',
-    emptyHint: '整理背景、创新点、实验结果、局限和下周计划。',
-    themeClass: 'summary-theme--meeting',
-    Icon: Presentation,
-  },
-]
-
-const QUALITY_SUMMARY_STATUS_LABELS = {
-  idle: '未生成',
-  running: '生成中',
-  generated: '已生成',
-  failed: '失败',
-}
-
-QUALITY_SUMMARY_STATUS_LABELS.stale = '待更新'
-
-const QUALITY_SUMMARY_STAGE_LABELS = {
-  idle: '等待生成',
-  extracting_context: '提取全文',
-  chunking: '分块分析',
-  analyzing_structure: '分析结构',
-  generating_summary: '生成总结',
-  checking_coverage: '校验结果',
-  completed: '完成',
-  failed: '生成失败',
-}
-
-function createQualitySummaryState() {
-  return QUALITY_SUMMARY_TYPES.reduce((acc, type) => {
-    acc[type.id] = {
-      status: 'idle',
-      stage: 'idle',
-      progress: 0,
-      summary: null,
-      preview: '',
-      updatedAt: '',
-      errorMessage: '',
-      model: '',
-      isStale: false,
-      justCompleted: false,
-    }
-    return acc
-  }, {})
-}
-
-function normalizeQualitySummaryPayload(payload) {
-  return {
-    status: payload?.status || 'idle',
-    stage: payload?.stage || 'idle',
-    progress: Number(payload?.progress || 0),
-    summary: payload?.summary || null,
-    preview: payload?.summary?.preview || payload?.preview || '',
-    updatedAt: payload?.updated_at || '',
-    errorMessage: payload?.error_message || '',
-    model: payload?.model || '',
-    isStale: Boolean(payload?.is_stale),
-  }
-}
-
-function visualQualitySummaryStatus(status) {
-  return status === 'running' ? 'generating' : status
-}
-
-function getQualitySummaryDisplayStatus(state) {
-  if (state?.status === 'running') return 'running'
-  if (state?.isStale) return 'stale'
-  return state?.status || 'idle'
-}
-
-function getAnnotationSummaryTotal(summary) {
-  return (Array.isArray(summary?.annotation_groups) ? summary.annotation_groups : [])
-    .reduce((total, group) => total + Number(group?.count || 0), 0)
-}
-
-function formatQualitySummaryTime(value) {
-  if (!value) return ''
-  try {
-    return new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-  } catch {
-    return ''
-  }
-}
-
-function buildAnnotationFingerprint(annotations = []) {
-  return (annotations || [])
-    .map((item) => [
-      item.id,
-      item.type,
-      item.page_number,
-      item.start_char,
-      item.end_char,
-      item.quote_text,
-      item.color || '',
-    ].join(':'))
-    .join('|')
-}
-
-function splitSummaryBodyText(value) {
-  const text = String(value || '').trim()
-  if (!text) return []
-  const explicitBlocks = text
-    .split(/\n+/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-  if (explicitBlocks.length > 1) return explicitBlocks
-  const sentences = text
-    .split(/(?<=[。！？!?；;])\s*/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-  if (sentences.length <= 2) return [text]
-  const blocks = []
-  for (let index = 0; index < sentences.length; index += 2) {
-    blocks.push(sentences.slice(index, index + 2).join(''))
-  }
-  return blocks
-}
-
-function renderSummaryBodyText(value) {
-  const blocks = splitSummaryBodyText(value)
-  if (!blocks.length) return null
-  return (
-    <div className="summary-body">
-      {blocks.map((block, index) => {
-        const bullet = block.match(/^[-*•]\s*(.+)$/)
-        return bullet ? <p className="summary-body__bullet" key={`${block}-${index}`}>{bullet[1]}</p> : <p key={`${block}-${index}`}>{block}</p>
-      })}
-    </div>
-  )
-}
-
-function renderReviewFieldBlocks(blocks, onJumpToEvidence) {
-  if (!Array.isArray(blocks) || !blocks.length) return null
-  return (
-    <section className="summary-field-blocks" aria-label="综述核心字段">
-      {blocks.map((block, index) => (
-        <article className="summary-field-block" key={block.key || index} style={{ '--summary-section-index': index }}>
-          <div className="summary-field-block__head">
-            <span className="summary-field-block__index">{String(index + 1).padStart(2, '0')}</span>
-            <div>
-              <h4>{block.title || block.key}</h4>
-              {block.summary ? <p>{block.summary}</p> : null}
-            </div>
-          </div>
-          {Array.isArray(block.items) && block.items.length ? (
-            <ol className="summary-field-block__items">
-              {block.items.map((item, itemIndex) => (
-                <li key={item.id || `${block.key}-${itemIndex}`}>
-                  <div className="summary-field-block__item-copy">
-                    <strong>{String(itemIndex + 1).padStart(2, '0')}</strong>
-                    <span>{item.text}</span>
-                  </div>
-                  {(item.source_quote || item.source_pages?.length) ? (
-                    <button
-                      className="summary-source-link summary-source-link--inline"
-                      type="button"
-                      disabled={!item.source_pages?.length}
-                      onClick={() => onJumpToEvidence?.({
-                        page: item.source_pages?.[0],
-                        quote: item.source_quote || item.text || '',
-                        start_char: item.start_char ?? null,
-                        end_char: item.end_char ?? null,
-                        source_type: 'paper',
-                      })}
-                    >
-                      {item.source_pages?.length ? `论文｜第 ${item.source_pages[0]} 页` : '论文来源'}
-                      {item.source_quote ? `：${item.source_quote}` : ''}
-                    </button>
-                  ) : null}
-                </li>
-              ))}
-            </ol>
-          ) : null}
-        </article>
-      ))}
-    </section>
-  )
-}
-
-function EvidenceList({ evidence = [], onJumpToEvidence, summaryText = '已核验来源依据' }) {
-  const [expanded, setExpanded] = useState(false)
-  const visibleItems = expanded ? evidence : evidence.slice(0, 3)
-  const hiddenCount = Math.max(0, evidence.length - visibleItems.length)
-  if (!Array.isArray(evidence) || !evidence.length) return null
-  return (
-    <div className="summary-evidence">
-      <button
-        className="summary-evidence__summary"
-        type="button"
-        onClick={() => setExpanded((value) => !value)}
-      >
-        {summaryText} {evidence.length} 条
-      </button>
-      <ul>
-        {visibleItems.map((item, evidenceIndex) => (
-          <li key={`${item.quote}-${evidenceIndex}`}>
-            <strong>{renderEvidenceSourceLabel(item)}</strong>
-            <button
-              className="summary-source-link"
-              type="button"
-              disabled={!item.page}
-              onClick={() => onJumpToEvidence?.(item)}
-            >
-              {item.quote}
-            </button>
-          </li>
-        ))}
-      </ul>
-      {evidence.length > 3 ? (
-        <button
-          className="summary-evidence__toggle"
-          type="button"
-          onClick={() => setExpanded((value) => !value)}
-        >
-          {expanded ? '收起多余依据' : `展开剩余 ${hiddenCount} 条依据`}
-        </button>
-      ) : null}
-    </div>
-  )
-}
-
-function getAnnotationGroups(summary) {
-  return Array.isArray(summary?.annotation_groups) ? summary.annotation_groups : []
-}
-
-function getAnnotationGroupTotal(groups) {
-  return groups.reduce((total, group) => total + Number(group?.count || 0), 0)
-}
-
-function renderEvidenceSourceLabel(item) {
-  const prefix = item?.source_type === 'annotation' ? '标注' : '论文'
-  return item?.page ? `${prefix}｜第 ${item.page} 页` : prefix
-}
-
-function formatQualitySummaryMarkdown(type, summary) {
-  if (!summary) return ''
-  const lines = [`# ${summary.title || type.title}`]
-  if (summary.preview) lines.push('', `> ${summary.preview}`)
-  if (summary.highlights?.length) {
-    lines.push('', '## 关键结论')
-    summary.highlights.forEach((item) => lines.push(`- ${item}`))
-  }
-  ;(summary.sections || []).forEach((section, index) => {
-    lines.push('', `## ${String(index + 1).padStart(2, '0')} ${section.heading || '总结要点'}`)
-    if (section.keywords?.length) lines.push(`关键词：${section.keywords.join('、')}`)
-    lines.push('', section.body || '')
-    if (section.evidence?.length) {
-      lines.push('', '已核验来源依据：')
-      section.evidence.forEach((item) => {
-        lines.push(`- ${renderEvidenceSourceLabel(item)}：${item.quote || ''}`)
-      })
-    }
-  })
-  const annotationGroups = getAnnotationGroups(summary)
-  if (annotationGroups.length) {
-    lines.push('', '## 标注清单')
-    annotationGroups.forEach((group) => {
-      lines.push('', `### ${group.label || group.type}（${group.count || 0} 条）`)
-      ;(group.items || []).forEach((item, index) => {
-        lines.push(`${index + 1}. ${item.page ? `第 ${item.page} 页：` : ''}${item.quote || ''}`)
-      })
-    })
-  }
-  const assistantPanels = getQualityAssistantPanels(summary)
-  if (assistantPanels.length) {
-    lines.push('', '## 研究助手')
-    assistantPanels.forEach((panel) => {
-      lines.push('', `### ${panel.title}`)
-      panel.items.forEach((item) => lines.push(`- ${item}`))
-    })
-  }
-  if (summary.missing_items?.length) {
-    lines.push('', '## 回查清单')
-    summary.missing_items.forEach((item) => lines.push(`- ${item}`))
-  }
-  if (summary.followup_questions?.length) {
-    lines.push('', '## 可继续深挖的问题')
-    summary.followup_questions.forEach((item) => lines.push(`- ${item}`))
-  }
-  if (summary.source_note) lines.push('', `来源说明：${summary.source_note}`)
-  return lines.join('\n')
-}
-
-function getQualityAssistantPanels(summary) {
-  return (summary?.assistant_panels || [])
-    .filter((panel) => Array.isArray(panel?.items) && panel.items.length > 0)
-    .slice(0, 3)
-}
-
-function escapeSummaryHtml(value) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;')
-}
-
-function renderSummaryTextHtml(value) {
-  const text = String(value || '').trim()
-  if (!text) return ''
-  return text
-    .split(/\n+/)
-    .map((part) => `<p>${escapeSummaryHtml(part.replace(/^[-*]\s*/, ''))}</p>`)
-    .join('')
-}
-
-function sanitizeSummaryExportName(value, fallback = 'literature-summary') {
-  const cleaned = String(value || fallback)
-    .replace(/[\\/:*?"<>|]/g, '-')
-    .replace(/\s+/g, ' ')
-    .trim()
-  return (cleaned || fallback).slice(0, 80)
-}
-
-function buildSummaryExportHtml(type, summary) {
-  const assistantPanels = getQualityAssistantPanels(summary)
-  const generatedAt = new Date().toLocaleString('zh-CN')
-  const sectionHtml = (summary.sections || []).map((section, index) => {
-    const keywords = (section.keywords || [])
-      .map((keyword) => `<span>${escapeSummaryHtml(keyword)}</span>`)
-      .join('')
-    const evidence = (section.evidence || [])
-      .map((item) => `
-        <li>
-          <strong>${escapeSummaryHtml(renderEvidenceSourceLabel(item))}</strong>
-          <span>${escapeSummaryHtml(item.quote || '')}</span>
-        </li>
-      `)
-      .join('')
-    return `
-      <section class="export-section">
-        <div class="export-section-title">
-          <b>${String(index + 1).padStart(2, '0')}</b>
-          <h2>${escapeSummaryHtml(section.heading || '总结要点')}</h2>
-        </div>
-        ${keywords ? `<div class="export-keywords">${keywords}</div>` : ''}
-        <div class="export-body">${renderSummaryTextHtml(section.body)}</div>
-        ${evidence ? `<div class="export-evidence"><h3>已核验来源依据</h3><ul>${evidence}</ul></div>` : ''}
-      </section>
-    `
-  }).join('')
-  const annotationGroupsHtml = getAnnotationGroups(summary).map((group) => {
-    const items = (group.items || [])
-      .map((item, index) => `
-        <li>
-          <b>${String(index + 1).padStart(2, '0')}</b>
-          <span>${item.page ? `第 ${escapeSummaryHtml(item.page)} 页：` : ''}${escapeSummaryHtml(item.quote || '')}</span>
-        </li>
-      `)
-      .join('')
-    return `
-      <section class="export-annotation-group">
-        <h3>${escapeSummaryHtml(group.label || group.type)} <span>${escapeSummaryHtml(group.count || 0)} 条</span></h3>
-        ${items ? `<ol>${items}</ol>` : '<p>暂无。</p>'}
-      </section>
-    `
-  }).join('')
-  const highlightsHtml = (summary.highlights || [])
-    .map((item, index) => `
-      <li>
-        <b>${String(index + 1).padStart(2, '0')}</b>
-        <span>${escapeSummaryHtml(item)}</span>
-      </li>
-    `)
-    .join('')
-  const assistantHtml = assistantPanels.map((panel) => `
-    <section class="export-assistant-card">
-      <h3>${escapeSummaryHtml(panel.title)}</h3>
-      <ol>
-        ${panel.items.map((item) => `<li>${escapeSummaryHtml(item)}</li>`).join('')}
-      </ol>
-    </section>
-  `).join('')
-  const missingHtml = (summary.missing_items || []).map((item) => `<li>${escapeSummaryHtml(item)}</li>`).join('')
-  const followupHtml = (summary.followup_questions || []).map((item) => `<li>${escapeSummaryHtml(item)}</li>`).join('')
-
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <title>${escapeSummaryHtml(summary.title || type.title)}</title>
-  <style>
-    @page { size: A4; margin: 18mm 16mm; }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      color: #172033;
-      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", SimSun, sans-serif;
-      line-height: 1.65;
-      background: #ffffff;
-    }
-    .export-document { max-width: 820px; margin: 0 auto; }
-    .export-cover {
-      padding: 0 0 18px;
-      border-bottom: 3px solid #2563eb;
-      margin-bottom: 18px;
-    }
-    .export-type {
-      display: inline-block;
-      padding: 4px 10px;
-      border-radius: 999px;
-      background: #e0f2fe;
-      color: #075985;
-      font-size: 12px;
-      font-weight: 700;
-    }
-    h1 { margin: 12px 0 8px; font-size: 28px; line-height: 1.25; color: #0f172a; }
-    .export-preview { margin: 0; color: #475569; font-size: 14px; }
-    .export-meta { margin-top: 10px; color: #64748b; font-size: 11px; }
-    .export-highlights {
-      margin: 0 0 18px;
-      padding: 14px;
-      border: 1px solid #bae6fd;
-      border-radius: 14px;
-      background: #f0f9ff;
-      page-break-inside: avoid;
-    }
-    .export-highlights h2,
-    .export-annotations h2,
-    .export-assistant h2,
-    .export-tail h2 { margin: 0 0 10px; font-size: 16px; color: #0f172a; }
-    .export-highlights ol { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-    .export-highlights li { display: grid; grid-template-columns: 34px 1fr; gap: 10px; align-items: start; }
-    .export-highlights b,
-    .export-section-title b {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 30px;
-      height: 24px;
-      border-radius: 999px;
-      background: #2563eb;
-      color: #ffffff;
-      font-size: 12px;
-    }
-    .export-section {
-      margin: 0 0 16px;
-      padding-bottom: 14px;
-      border-bottom: 1px solid #e2e8f0;
-      page-break-inside: avoid;
-    }
-    .export-section-title { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; }
-    .export-section h2 { margin: 0; color: #0f172a; font-size: 18px; line-height: 1.35; }
-    .export-keywords { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
-    .export-keywords span {
-      padding: 3px 8px;
-      border-radius: 999px;
-      background: #ecfdf5;
-      color: #047857;
-      font-size: 11px;
-      font-weight: 700;
-    }
-    .export-body p { margin: 7px 0; font-size: 13.5px; }
-    .export-evidence {
-      margin-top: 10px;
-      padding: 10px;
-      border-left: 4px solid #93c5fd;
-      background: #f8fafc;
-      border-radius: 10px;
-    }
-    .export-evidence h3 { margin: 0 0 6px; font-size: 12px; color: #1d4ed8; }
-    .export-evidence ul,
-    .export-tail ul { margin: 0; padding-left: 18px; }
-    .export-evidence li,
-    .export-tail li { margin: 4px 0; font-size: 12px; color: #475569; }
-    .export-evidence strong { margin-right: 6px; color: #0f172a; }
-    .export-annotations {
-      margin: 0 0 18px;
-      padding: 14px;
-      border: 1px solid #ccfbf1;
-      border-radius: 14px;
-      background: #f0fdfa;
-      page-break-inside: avoid;
-    }
-    .export-annotation-group { margin-top: 10px; }
-    .export-annotation-group h3 { margin: 0 0 6px; font-size: 13px; color: #115e59; }
-    .export-annotation-group h3 span { color: #0f766e; font-size: 11px; }
-    .export-annotation-group ol { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
-    .export-annotation-group li { display: grid; grid-template-columns: 30px 1fr; gap: 8px; color: #475569; font-size: 12px; }
-    .export-annotation-group b {
-      display: inline-flex;
-      justify-content: center;
-      align-items: center;
-      width: 24px;
-      height: 20px;
-      border-radius: 999px;
-      background: #14b8a6;
-      color: #ffffff;
-      font-size: 10px;
-    }
-    .export-annotation-group p { margin: 0; color: #64748b; font-size: 12px; }
-    .export-assistant {
-      margin: 18px 0;
-      page-break-inside: avoid;
-    }
-    .export-assistant-grid { display: grid; gap: 10px; }
-    .export-assistant-card {
-      padding: 12px;
-      border: 1px solid #dbeafe;
-      border-radius: 12px;
-      background: #eff6ff;
-    }
-    .export-assistant-card h3 { margin: 0 0 6px; color: #1e3a8a; font-size: 14px; }
-    .export-assistant-card ol { margin: 0; padding-left: 20px; }
-    .export-assistant-card li { margin: 4px 0; font-size: 12.5px; }
-    .export-tail { display: grid; gap: 12px; margin-top: 16px; }
-    .export-tail section { padding: 12px; border-radius: 12px; background: #f8fafc; border: 1px solid #e2e8f0; }
-    .export-source { margin-top: 18px; color: #64748b; font-size: 11px; }
-    @media print {
-      body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
-      .export-section { break-inside: avoid; }
-    }
-  </style>
-</head>
-<body>
-  <main class="export-document">
-    <header class="export-cover">
-      <span class="export-type">${escapeSummaryHtml(type.title)}</span>
-      <h1>${escapeSummaryHtml(summary.title || type.title)}</h1>
-      ${summary.preview ? `<p class="export-preview">${escapeSummaryHtml(summary.preview)}</p>` : ''}
-      <div class="export-meta">导出时间：${escapeSummaryHtml(generatedAt)}</div>
-    </header>
-    ${highlightsHtml ? `<section class="export-highlights"><h2>关键结论</h2><ol>${highlightsHtml}</ol></section>` : ''}
-    ${annotationGroupsHtml ? `<section class="export-annotations"><h2>标注清单</h2>${annotationGroupsHtml}</section>` : ''}
-    ${sectionHtml}
-    ${assistantHtml ? `<section class="export-assistant"><h2>研究助手</h2><div class="export-assistant-grid">${assistantHtml}</div></section>` : ''}
-    ${missingHtml || followupHtml ? `<section class="export-tail">
-      ${missingHtml ? `<section><h2>回查清单</h2><ul>${missingHtml}</ul></section>` : ''}
-      ${followupHtml ? `<section><h2>可继续深挖的问题</h2><ul>${followupHtml}</ul></section>` : ''}
-    </section>` : ''}
-    ${summary.source_note ? `<p class="export-source">来源说明：${escapeSummaryHtml(summary.source_note)}</p>` : ''}
-  </main>
-</body>
-</html>`
-}
-
-function triggerSummaryWordExport(type, summary) {
-  const html = buildSummaryExportHtml(type, summary)
-  const blob = new Blob(['\ufeff', html], { type: 'application/msword;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `${sanitizeSummaryExportName(summary.title || type.title)}.doc`
-  link.click()
-  URL.revokeObjectURL(url)
-}
-
-function openSummaryPdfExport(type, summary) {
-  const html = buildSummaryExportHtml(type, summary)
-  const printWindow = window.open('', '_blank', 'width=980,height=720')
-  if (!printWindow) {
-    window.alert('浏览器拦截了导出窗口，请允许弹窗后再试。')
-    return
-  }
-  printWindow.document.open()
-  printWindow.document.write(html)
-  printWindow.document.close()
-  printWindow.focus()
-  window.setTimeout(() => {
-    printWindow.print()
-  }, 320)
-}
-
-function qualityDelay(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
-
-function QualityLiteratureSummaryPanel({
-  paperId,
-  annotations = [],
-  providerId,
-  onJumpToEvidence,
-  onClearAnnotations,
-  initialSummaryId = '',
-}) {
-  const pollersRef = useRef(new Map())
-  const [activeSummaryId, setActiveSummaryId] = useState('')
-  const [summaryState, setSummaryState] = useState(createQualitySummaryState)
-  const [isLoadingSummaries, setIsLoadingSummaries] = useState(false)
-  const [isGeneratingAll, setIsGeneratingAll] = useState(false)
-  const [exportMenuOpen, setExportMenuOpen] = useState(false)
-  const annotationFingerprint = useMemo(() => buildAnnotationFingerprint(annotations), [annotations])
-  const annotationFingerprintRef = useRef('')
-  const annotationFingerprintReadyRef = useRef(false)
-
-  function applySummaryStatus(typeId, payload, options = {}) {
-    const next = normalizeQualitySummaryPayload(payload)
-    setSummaryState((current) => {
-      const previous = current[typeId] || {}
-      const shouldKeepPreviousSummary = !next.summary && previous.summary && (next.status === 'running' || next.isStale)
-      return {
-        ...current,
-        [typeId]: {
-          ...previous,
-          ...next,
-          summary: shouldKeepPreviousSummary ? previous.summary : next.summary,
-          preview: shouldKeepPreviousSummary ? (previous.summary?.preview || previous.preview || next.preview) : next.preview,
-          justCompleted: options.flash || (previous.status === 'running' && next.status === 'generated'),
-        },
-      }
-    })
-    if (next.status === 'generated') {
-      window.setTimeout(() => {
-        setSummaryState((current) => ({
-          ...current,
-          [typeId]: { ...current[typeId], justCompleted: false },
-        }))
-      }, 1100)
-    }
-  }
-
-  function stopPolling(typeId) {
-    const timer = pollersRef.current.get(typeId)
-    if (timer) window.clearInterval(timer)
-    pollersRef.current.delete(typeId)
-  }
-
-  function pollSummary(typeId) {
-    if (!paperId) return
-    stopPolling(typeId)
-    const timer = window.setInterval(async () => {
-      try {
-        const payload = await fetchPaperSummaryStatus(paperId, typeId)
-        applySummaryStatus(typeId, payload)
-        if (payload.status !== 'running') stopPolling(typeId)
-      } catch (error) {
-        stopPolling(typeId)
-        setSummaryState((current) => ({
-          ...current,
-          [typeId]: {
-            ...current[typeId],
-            status: current[typeId]?.summary ? 'generated' : 'failed',
-            stage: 'failed',
-            errorMessage: error?.message || '总结状态获取失败',
-          },
-        }))
-      }
-    }, 1800)
-    pollersRef.current.set(typeId, timer)
-  }
-
-  useEffect(() => {
-    let cancelled = false
-    async function loadSummaries() {
-      if (!paperId) {
-        setSummaryState(createQualitySummaryState())
-        return
-      }
-      setIsLoadingSummaries(true)
-      try {
-        const payload = await fetchPaperSummaries(paperId)
-        if (cancelled) return
-        const next = createQualitySummaryState()
-        ;(payload?.summaries || []).forEach((item) => {
-          if (next[item.type]) next[item.type] = { ...next[item.type], ...normalizeQualitySummaryPayload(item) }
-          if (item.status === 'running') pollSummary(item.type)
-        })
-        setSummaryState(next)
-      } catch {
-        if (!cancelled) setSummaryState(createQualitySummaryState())
-      } finally {
-        if (!cancelled) setIsLoadingSummaries(false)
-      }
-    }
-    loadSummaries()
-    return () => {
-      cancelled = true
-      pollersRef.current.forEach((timer) => window.clearInterval(timer))
-      pollersRef.current.clear()
-    }
-  }, [paperId])
-
-  useEffect(() => {
-    setExportMenuOpen(false)
-  }, [activeSummaryId])
-
-  useEffect(() => {
-    if (initialSummaryId && QUALITY_SUMMARY_TYPES.some((type) => type.id === initialSummaryId)) {
-      setActiveSummaryId(initialSummaryId)
-    }
-  }, [initialSummaryId, paperId])
-
-  useEffect(() => {
-    annotationFingerprintRef.current = ''
-    annotationFingerprintReadyRef.current = false
-  }, [paperId])
-
-  const logicalAnnotationTotal = useMemo(() => countLogicalAnnotations(annotations), [annotations])
-  const liveAnnotationGroups = useMemo(
-    () => buildAnnotationSummaryGroupsFromAnnotations(annotations),
-    [annotations],
-  )
-
-  useEffect(() => {
-    if (!paperId) return
-    if (!annotationFingerprintReadyRef.current) {
-      annotationFingerprintReadyRef.current = true
-      annotationFingerprintRef.current = annotationFingerprint
-      return
-    }
-    if (annotationFingerprintRef.current === annotationFingerprint) return
-    annotationFingerprintRef.current = annotationFingerprint
-    setSummaryState((current) => {
-      const previous = current.annotations
-      if (!previous?.summary || previous.status === 'running') return current
-      const previousTotal = getAnnotationSummaryTotal(previous.summary)
-      const currentTotal = logicalAnnotationTotal
-      if (previousTotal === 0 && currentTotal === 0) return current
-      return {
-        ...current,
-        annotations: {
-          ...previous,
-          status: 'idle',
-          stage: 'idle',
-          progress: 0,
-          preview: previous.summary?.preview || previous.preview,
-          errorMessage: '',
-          isStale: true,
-          justCompleted: false,
-        },
-      }
-    })
-  }, [annotationFingerprint, logicalAnnotationTotal, paperId])
-
-  const activeType = QUALITY_SUMMARY_TYPES.find((type) => type.id === activeSummaryId)
-  const activeSummary = activeType ? summaryState[activeType.id] : null
-  const generatedCount = QUALITY_SUMMARY_TYPES.filter((type) => summaryState[type.id]?.status === 'generated').length
-  const generatingCount = QUALITY_SUMMARY_TYPES.filter((type) => summaryState[type.id]?.status === 'running').length
-
-  async function beginGenerate(typeId, options = {}) {
-    if (!paperId || summaryState[typeId]?.status === 'running') return null
-    if (options.open) setActiveSummaryId(typeId)
-    setSummaryState((current) => ({
-      ...current,
-      [typeId]: { ...current[typeId], status: 'running', stage: 'extracting_context', progress: 3, errorMessage: '', isStale: false, justCompleted: false },
-    }))
-    try {
-      const payload = await generatePaperSummary(paperId, typeId, {
-        provider_id: providerId || null,
-        force: Boolean(options.force),
-      })
-      applySummaryStatus(typeId, payload)
-      if (payload.status === 'running') pollSummary(typeId)
-      return payload
-    } catch (error) {
-      setSummaryState((current) => ({
-        ...current,
-        [typeId]: {
-          ...current[typeId],
-          status: current[typeId]?.summary ? 'generated' : 'failed',
-          stage: 'failed',
-          progress: current[typeId]?.progress || 0,
-          errorMessage: error?.message || '总结生成失败',
-        },
-      }))
-      return null
-    }
-  }
-
-  async function beginGenerateAndWait(typeId, options = {}) {
-    const first = await beginGenerate(typeId, options)
-    if (!first || first.status !== 'running') return first
-    for (let attempt = 0; attempt < 120; attempt += 1) {
-      await qualityDelay(2000)
-      const payload = await fetchPaperSummaryStatus(paperId, typeId)
-      applySummaryStatus(typeId, payload)
-      if (payload.status !== 'running') return payload
-    }
-    return null
-  }
-
-  function handleCardClick(type) {
-    setActiveSummaryId(type.id)
-  }
-
-  function handleRegenerate(typeId) {
-    const current = summaryState[typeId]
-    if (current?.status === 'generated' || current?.isStale) {
-      const confirmText = current?.isStale
-        ? '更新生成会消耗一次 AI 调用，并覆盖当前旧版本。确定继续吗？'
-        : '重新生成会消耗一次 AI 调用，并覆盖当前版本。确定继续吗？'
-      if (!window.confirm(confirmText)) return
-    }
-    beginGenerate(typeId, { open: true, force: true })
-  }
-
-  async function handleGenerateAll() {
-    if (isGeneratingAll || !paperId) return
-    setIsGeneratingAll(true)
-    try {
-      for (const type of QUALITY_SUMMARY_TYPES) {
-        const current = summaryState[type.id]
-        if (current?.status === 'running') continue
-        if (current?.status === 'generated' && !current?.isStale) continue
-        await beginGenerateAndWait(type.id, { force: Boolean(current?.isStale) })
-      }
-    } finally {
-      setIsGeneratingAll(false)
-    }
-  }
-
-  function handleExport(type, summary, format) {
-    if (!summary) return
-    setExportMenuOpen(false)
-    if (format === 'pdf') {
-      openSummaryPdfExport(type, summary)
-      return
-    }
-    triggerSummaryWordExport(type, summary)
-  }
-
-  if (activeType) {
-    const isRunning = activeSummary?.status === 'running'
-    const rawSummary = activeSummary?.summary
-    const rawAnnotationGroups = getAnnotationGroups(rawSummary)
-    const rawAnnotationTotal = getAnnotationGroupTotal(rawAnnotationGroups)
-    const liveAnnotationTotal = logicalAnnotationTotal
-    const annotationCountMismatch = activeType.id === 'annotations' && rawSummary && rawAnnotationTotal !== liveAnnotationTotal
-    const needsManualRefresh = Boolean(activeSummary?.isStale || annotationCountMismatch)
-    const summary = rawSummary
-    const sections = summary?.sections || []
-    const assistantPanels = getQualityAssistantPanels(summary)
-    const annotationGroups = activeType.id === 'annotations' ? liveAnnotationGroups : getAnnotationGroups(summary)
-    const reviewFieldBlocks = Array.isArray(summary?.review_field_blocks) ? summary.review_field_blocks : []
-    const annotationTotal = getAnnotationGroupTotal(annotationGroups)
-    const annotationTotalLabel = '当前有效标注'
-    const hideFallbackSections = activeType.id === 'annotations' && summary && annotationTotal === 0 && !sections.length
-    const displaySections = sections.length
-      ? sections
-      : hideFallbackSections
-        ? []
-        : [{ heading: activeType.title, body: isRunning ? '正在分析论文结构和证据来源。' : activeType.emptyHint, keywords: [], evidence: [] }]
-    const resolvedDisplaySections = displaySections
-    const Icon = activeType.Icon
-    return (
-      <div className={`workspace-panel__content summary-panel ${activeType.themeClass}`}>
-        <section className="summary-detail">
-          <div className="summary-detail__hero">
-            <button className="summary-back-btn" type="button" onClick={() => setActiveSummaryId('')}>
-              <ArrowLeft size={16} />
-              <span>返回总结列表</span>
-            </button>
-            <div className="summary-detail__title-row">
-              <div className="summary-detail__icon">
-                <Icon size={22} />
-              </div>
-              <div>
-                <h3>{activeType.title}</h3>
-                <p>{activeType.subtitle}</p>
-              </div>
-            </div>
-            <div className="summary-progress-card">
-              <div>
-                <strong>{QUALITY_SUMMARY_STAGE_LABELS[activeSummary?.stage] || QUALITY_SUMMARY_STAGE_LABELS.idle}</strong>
-              </div>
-              <div className="summary-progress-track">
-                <span style={{ width: `${Math.max(0, Math.min(100, activeSummary?.progress || 0))}%` }} />
-              </div>
-            </div>
-          </div>
-          <div className="summary-detail__actions">
-            <button className="summary-primary-action" type="button" disabled={isRunning || !paperId} onClick={() => handleRegenerate(activeType.id)}>
-              {isRunning ? <Loader2 size={15} className="summary-spin" /> : <RefreshCw size={15} />}
-              {isRunning ? '生成中...' : needsManualRefresh ? '更新生成' : summary ? '重新生成' : '生成'}
-            </button>
-            <div className="summary-export-wrap">
-              <button
-                className="summary-secondary-action"
-                type="button"
-                disabled={!summary || isRunning}
-                aria-expanded={exportMenuOpen}
-                onClick={() => setExportMenuOpen((open) => !open)}
-              >
-                <Download size={15} />
-                导出
-              </button>
-              {exportMenuOpen && summary && !isRunning ? (
-                <div className="summary-export-popover">
-                  <button type="button" onClick={() => handleExport(activeType, summary, 'pdf')}>PDF</button>
-                  <button type="button" onClick={() => handleExport(activeType, summary, 'word')}>Word</button>
-                </div>
-              ) : null}
-            </div>
-          </div>
-          {isRunning ? (
-            <div className="summary-detail__loading">
-              <Sparkles size={18} />
-              <strong>正在做质量优先总结</strong>
-              <p>先提取全文和证据，再生成对应板块内容。复现和组会稿会更慢一些。</p>
-            </div>
-          ) : null}
-          {needsManualRefresh ? <div className="summary-stale-note">标注已变化，正在显示上一次生成的标注总结。点击“更新生成”后才会读取当前仍存在的高亮和划线。</div> : null}
-          {!activeSummary?.isStale && !annotationCountMismatch && activeSummary?.errorMessage ? <div className="summary-error-note">{activeSummary.errorMessage}</div> : null}
-          {summary?.highlights?.length ? (
-            <section className="summary-highlight-block" aria-label="关键结论">
-              <div className="summary-highlight-heading">
-                <span>关键结论</span>
-              </div>
-              <div className="summary-highlight-grid">
-                {summary.highlights.map((item, index) => (
-                  <div className="summary-highlight" key={`${item}-${index}`}>
-                    <span>{String(index + 1).padStart(2, '0')}</span>
-                    <p>{item}</p>
-                  </div>
-                ))}
-              </div>
-            </section>
-          ) : null}
-          {activeType.id === 'review' && reviewFieldBlocks.length ? renderReviewFieldBlocks(reviewFieldBlocks, onJumpToEvidence) : null}
-          {activeType.id === 'annotations' && summary ? (
-            <section className="summary-annotation-block" aria-label="标注清单">
-              <div className="summary-annotation-block__head">
-                <div>
-                  <strong>标注清单</strong>
-                  <span>{annotationTotal} 条{annotationTotalLabel}</span>
-                </div>
-                {liveAnnotationTotal ? (
-                  <button className="summary-clear-annotations" type="button" onClick={onClearAnnotations}>
-                    <Trash2 size={12} />
-                    清空
-                  </button>
-                ) : null}
-              </div>
-              {annotationTotal ? (
-                <div className="summary-annotation-groups">
-                  {annotationGroups.map((group) => (
-                    <details className="summary-annotation-group" key={group.type}>
-                      <summary>
-                        <span>{group.label || group.type}</span>
-                        <b>{group.count || 0} 条</b>
-                      </summary>
-                      {(group.items || []).length ? (
-                        <ol>
-                          {group.items.map((item, itemIndex) => (
-                            <li key={`${group.type}-${item.id || itemIndex}`}>
-                              <strong>{String(itemIndex + 1).padStart(2, '0')}</strong>
-                              <button
-                                className="summary-source-link"
-                                type="button"
-                                disabled={!item.page}
-                                onClick={() => onJumpToEvidence?.({ ...item, source_type: 'annotation' })}
-                              >
-                                {item.page ? `第 ${item.page} 页：` : ''}{item.quote}
-                              </button>
-                            </li>
-                          ))}
-                        </ol>
-                      ) : (
-                        <p>暂无。</p>
-                      )}
-                    </details>
-                  ))}
-                </div>
-              ) : (
-                <p className="summary-annotation-empty">当前没有高亮、下划线或波浪线标注。先在论文里留下阅读痕迹，再生成标注总结会更有价值。</p>
-              )}
-            </section>
-          ) : null}
-          {resolvedDisplaySections.length ? (
-            <div className="summary-section-list">
-              {resolvedDisplaySections.map((section, index) => (
-                <article className={`summary-section ${!sections.length ? 'is-preview' : ''}`} key={`${section.heading}-${index}`} style={{ '--summary-section-index': index }}>
-                  <span className="summary-section__index">{String(index + 1).padStart(2, '0')}</span>
-                  <div>
-                    <h4>{section.heading}</h4>
-                    {section.keywords?.length ? (
-                      <div className="summary-keyword-row">
-                        {section.keywords.map((keyword) => <span key={keyword}>{keyword}</span>)}
-                      </div>
-                    ) : null}
-                    {renderSummaryBodyText(section.body)}
-                    {section.evidence?.length ? (
-                      <EvidenceList evidence={section.evidence} onJumpToEvidence={onJumpToEvidence} />
-                    ) : null}
-                  </div>
-                </article>
-              ))}
-            </div>
-          ) : null}
-          {assistantPanels.length ? (
-            <section className="summary-assistant-block" aria-label="研究助手">
-              <h4>研究助手</h4>
-              <div className="summary-assistant-grid">
-                {assistantPanels.map((panel) => (
-                  <article className="summary-assistant-card" key={panel.title}>
-                    <strong>{panel.title}</strong>
-                    <ol>
-                      {panel.items.map((item, index) => <li key={`${panel.title}-${index}`}>{item}</li>)}
-                    </ol>
-                  </article>
-                ))}
-              </div>
-            </section>
-          ) : null}
-          {summary?.missing_items?.length || summary?.followup_questions?.length ? (
-            <div className="summary-tail-grid">
-              {summary?.missing_items?.length ? (
-                <section>
-                  <h4>回查清单</h4>
-                  {summary.missing_items.map((item) => <p key={item}>{item}</p>)}
-                </section>
-              ) : null}
-              {summary?.followup_questions?.length ? (
-                <section>
-                  <h4>可继续深挖的问题</h4>
-                  {summary.followup_questions.map((item) => <p key={item}>{item}</p>)}
-                </section>
-              ) : null}
-            </div>
-          ) : null}
-        </section>
-      </div>
-    )
-  }
-
-  return (
-    <div className="workspace-panel__content summary-panel">
-      <section className="summary-home">
-        <div className="summary-home__hero">
-          <h3>文献总结</h3>
-          <p>按研究生深读场景生成五类结构化卡片，结果会保存，详情页可导出为 PDF 或 Word。</p>
-          <div className="summary-home__meta">
-            <strong>{generatedCount}/5 已生成</strong>
-            <span>
-              {isLoadingSummaries
-                ? '正在读取缓存'
-                : generatingCount
-                  ? `${generatingCount} 个正在生成`
-                  : `当前 ${logicalAnnotationTotal} 条标注`}
-            </span>
-          </div>
-          <button className="summary-generate-all" type="button" disabled={generatingCount > 0 || isGeneratingAll || !paperId} onClick={handleGenerateAll}>
-            {isGeneratingAll ? <Loader2 size={15} className="summary-spin" /> : <Sparkles size={15} />}
-            全部生成
-          </button>
-        </div>
-        <div className="summary-card-grid">
-          {QUALITY_SUMMARY_TYPES.map((type) => {
-            const state = summaryState[type.id]
-            const status = getQualitySummaryDisplayStatus(state)
-            const visualStatus = visualQualitySummaryStatus(status)
-            const preview = state?.isStale
-              ? (state?.summary?.preview || state?.preview || type.emptyHint)
-              : (state?.preview || state?.summary?.preview || type.emptyHint)
-            const Icon = type.Icon
-            return (
-              <button
-                className={`summary-card ${type.themeClass} is-${visualStatus} ${state?.justCompleted ? 'is-complete-flash' : ''}`}
-                type="button"
-                key={type.id}
-                onClick={() => handleCardClick(type)}
-              >
-                <div className="summary-card__top">
-                  <span className="summary-card__icon">
-                    <Icon size={19} />
-                  </span>
-                  <span className={`summary-status summary-status--${visualStatus}`}>
-                    {state?.status === 'running' ? <Loader2 size={12} className="summary-spin" /> : null}
-                    {QUALITY_SUMMARY_STATUS_LABELS[status] || QUALITY_SUMMARY_STATUS_LABELS.idle}
-                  </span>
-                </div>
-                <h4>{type.title}</h4>
-                <p className="summary-card__subtitle">{type.subtitle}</p>
-                <p className={`summary-card__preview ${status === 'idle' ? 'is-muted' : ''}`}>{preview}</p>
-                {state?.status === 'running' ? (
-                  <div className="summary-card__progress">
-                    <span style={{ width: `${Math.max(0, Math.min(100, state?.progress || 0))}%` }} />
-                  </div>
-                ) : null}
-                <div className="summary-card__footer">
-                  <span>{state?.updatedAt ? `更新于 ${formatQualitySummaryTime(state.updatedAt)}` : '点击进入详情'}</span>
-                  <Sparkles size={14} />
-                </div>
-              </button>
-            )
-          })}
-        </div>
-      </section>
-    </div>
-  )
-}
-
-function SummaryPanel() {
-  return (
-    <div className="workspace-panel__content summary-panel">
-      <div className="workspace-title-card summary-panel__hero">
-        <h3>文献总结</h3>
-        <p>后续这里会生成研究背景、核心方法、实验结论、创新点和局限性。</p>
-      </div>
-      <div className="workspace-list-card summary-panel__placeholder">
-        <h3>总结入口已就绪</h3>
-        <p>本版先展示工作区，下一步可以接入流式总结、保存到阅读笔记和生成脑图。</p>
-      </div>
-    </div>
-  )
-}
-
 export function SideWorkspacePanel({
   activePanel,
   paperId,
   fileName,
   metadata,
-  annotations,
-  providerId,
   currentUser,
   width,
   notebooks,
@@ -3832,12 +2524,11 @@ export function SideWorkspacePanel({
   onChatInputChange,
   onChatSubmit,
   onRefreshInitialSuggestions,
-  onInsertSummaryNote,
-  onJumpToEvidence,
-  onClearAnnotations,
   onRefreshMetadata,
   onSaveMetadata,
-  initialSummaryId = '',
+  paperReadingBrief,
+  onRetryPaperReadingBrief,
+  onRefreshPaperReadingBrief,
 }) {
   if (!activePanel) return null
 
@@ -3888,20 +2579,14 @@ export function SideWorkspacePanel({
           onRefreshInitialSuggestions={onRefreshInitialSuggestions}
         />
       ) : null}
-      {activePanel === 'words' ? <FullTranslatePanel /> : null}
       {activePanel === 'summary' ? (
-        <QualityLiteratureSummaryPanel
-          paperId={paperId}
-          fileName={fileName}
-          metadata={metadata}
-          annotations={annotations || []}
-          providerId={providerId}
-          onJumpToEvidence={onJumpToEvidence}
-          onClearAnnotations={onClearAnnotations}
-          onInsertSummaryNote={onInsertSummaryNote}
-          initialSummaryId={initialSummaryId}
+        <PaperReadingBriefPanel
+          brief={paperReadingBrief}
+          onRetry={onRetryPaperReadingBrief}
+          onRefresh={onRefreshPaperReadingBrief}
         />
       ) : null}
+      {activePanel === 'words' ? <FullTranslatePanel /> : null}
     </aside>
   )
 }

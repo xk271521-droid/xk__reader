@@ -1,0 +1,225 @@
+/* Narrow reader side panel: keep provider, follow mode, and collapse together. */
+.app-shell:not(.app-shell--auth) .insight-panel {
+  min-width: 220px;
+  padding: 0;
+  background: #ffffff;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid #e8edf3;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__heading {
+  min-width: 0;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__heading .panel-label {
+  margin: 0 0 3px;
+  color: #98a2b3;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__header h2 {
+  margin: 0;
+  color: #111827;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__actions,
+.app-shell:not(.app-shell--auth) .insight-panel__follow-row {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__actions {
+  gap: 8px;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__follow-row {
+  gap: 6px;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__provider-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 112px;
+}
+
+.app-shell:not(.app-shell--auth) .insight-translation-provider {
+  width: 100%;
+  height: 28px;
+  padding: 0 25px 0 8px;
+  border: 1px solid #d0d5dd;
+  border-radius: 4px;
+  appearance: none;
+  background: #ffffff;
+  color: #344054;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.app-shell:not(.app-shell--auth) .insight-translation-provider:hover,
+.app-shell:not(.app-shell--auth) .insight-translation-provider:focus {
+  border-color: #98a2b3;
+  outline: none;
+}
+
+.app-shell:not(.app-shell--auth) .insight-translation-provider:focus-visible {
+  box-shadow: 0 0 0 2px rgba(20, 77, 95, 0.14);
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__provider-chevron {
+  position: absolute;
+  right: 7px;
+  width: 14px;
+  height: 14px;
+  color: #667085;
+  pointer-events: none;
+}
+
+.app-shell:not(.app-shell--auth) .insight-follow-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  color: #667085;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.app-shell:not(.app-shell--auth) .insight-follow-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.app-shell:not(.app-shell--auth) .insight-follow-toggle i {
+  position: relative;
+  display: inline-block;
+  width: 25px;
+  height: 15px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  transition: background 160ms ease;
+}
+
+.app-shell:not(.app-shell--auth) .insight-follow-toggle i::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.18);
+  content: '';
+  transition: transform 160ms ease;
+}
+
+.app-shell:not(.app-shell--auth) .insight-follow-toggle input:checked + i {
+  background: #144d5f;
+}
+
+.app-shell:not(.app-shell--auth) .insight-follow-toggle input:checked + i::after {
+  transform: translateX(10px);
+}
+
+.app-shell:not(.app-shell--auth) .insight-follow-toggle input:focus-visible + i {
+  box-shadow: 0 0 0 2px rgba(20, 77, 95, 0.2);
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__collapse-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #667085;
+  cursor: pointer;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__collapse-button:hover {
+  border-color: #d0d5dd;
+  background: #f7f8fa;
+  color: #111827;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__collapse-button:focus-visible {
+  outline: 2px solid rgba(20, 77, 95, 0.24);
+  outline-offset: 1px;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel__collapse-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel .insight-placeholder,
+.app-shell:not(.app-shell--auth) .insight-panel .insight-content {
+  margin: 0 18px;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel .insight-placeholder {
+  margin-top: 16px;
+}
+
+.app-shell:not(.app-shell--auth) .insight-panel .insight-content {
+  padding-top: 12px;
+}
+
+.app-shell:not(.app-shell--auth) .insight-config-link-btn {
+  margin-top: 8px;
+  padding: 5px 9px;
+  border: 1px solid #fda29b;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #b42318;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.app-shell:not(.app-shell--auth) .insight-config-link-btn:hover {
+  background: #fff5f4;
+}
+
+@container (max-width: 340px) {
+  .app-shell:not(.app-shell--auth) .insight-panel__header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .app-shell:not(.app-shell--auth) .insight-panel__actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell:not(.app-shell--auth) .insight-follow-toggle i,
+  .app-shell:not(.app-shell--auth) .insight-follow-toggle i::after {
+    transition: none;
+  }
+}

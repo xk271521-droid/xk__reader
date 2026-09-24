@@ -1,17 +1,56 @@
 import { useEffect, useRef, useState } from 'react'
-import { getStoredAuthToken } from '../services/authApi'
-import { fetchAiProviders, fetchSelectionInsight, fetchSelectionInsightExplain } from '../services/paperReaderApi'
+import { fetchSelectionInsight } from '../services/paperReaderApi'
+import {
+  buildSelectionRequestKey,
+  normalizeTranslationProvider,
+  TRANSLATION_PROVIDERS,
+} from './selectionInsightModel'
+
+const TRANSLATION_PROVIDER_STORAGE_KEY = 'xk-reader.selection-translation-provider'
+const FOLLOW_TRANSLATION_STORAGE_KEY = 'xk-reader.selection-follow-translation.v1'
+
+function getStoredTranslationProvider() {
+  if (typeof window === 'undefined') return TRANSLATION_PROVIDERS.BAIDU
+  try {
+    return normalizeTranslationProvider(window.localStorage.getItem(TRANSLATION_PROVIDER_STORAGE_KEY))
+  } catch {
+    return TRANSLATION_PROVIDERS.BAIDU
+  }
+}
+
+function storeTranslationProvider(provider) {
+  try {
+    window.localStorage.setItem(TRANSLATION_PROVIDER_STORAGE_KEY, provider)
+  } catch {
+    // Private browsing can deny storage; keep the selected value for this session.
+  }
+}
+
+function getStoredFollowTranslationEnabled() {
+  if (typeof window === 'undefined') return false
+  try {
+    return window.localStorage.getItem(FOLLOW_TRANSLATION_STORAGE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function storeFollowTranslationEnabled(enabled) {
+  try {
+    window.localStorage.setItem(FOLLOW_TRANSLATION_STORAGE_KEY, enabled ? '1' : '0')
+  } catch {
+    // Private browsing can deny storage; retain the choice for the current session.
+  }
+}
 
 function createInitialSelectionState() {
   return {
     text: '',
     translation: '',
-    explanation: '',
     keywords: [],
     glossary: [],
     focusPoints: [],
     loading: false,
-    explaining: false,
     error: '',
     visible: false,
     source: '',
@@ -25,6 +64,8 @@ function createInitialSelectionState() {
     endChar: 0,
     rects: [],
     anchorRect: null,
+    anchorElement: null,
+    anchorClientRect: null,
     contextBefore: '',
     contextAfter: '',
   }
@@ -48,60 +89,45 @@ function inferTextKind(text) {
   return 'sentence'
 }
 
-const NL = String.fromCharCode(10)
-
-export function useSelectionInsight({ paperTitle, paperSummary }) {
+export function useSelectionInsight({ paperTitle }) {
   const activeRequestRef = useRef(0)
   const selectionTimerRef = useRef(null)
+  const lastSelectionKeyRef = useRef('')
+  const latestSelectionRef = useRef(null)
   const [selectionCard, setSelectionCard] = useState(createInitialSelectionState)
-  const [aiEnabled, setAiEnabled] = useState(true)
-  const aiEnabledRef = useRef(true)
-  const summaryRef = useRef(paperSummary)
-  const providerRef = useRef(null)
-  const explRef = useRef('')
-
-  useEffect(() => {
-    summaryRef.current = paperSummary
-  }, [paperSummary])
-
-  useEffect(() => {
-    aiEnabledRef.current = aiEnabled
-  }, [aiEnabled])
-
-  useEffect(() => {
-    let cancelled = false
-    fetchAiProviders()
-      .then((data) => {
-        if (cancelled) return
-        const activeProvider = (data?.providers || []).find((provider) => provider.is_active)
-        if (activeProvider) {
-          providerRef.current = activeProvider.id
-        }
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
+  const [translationProvider, setTranslationProvider] = useState(getStoredTranslationProvider)
+  const [followTranslationEnabled, setFollowTranslationEnabled] = useState(getStoredFollowTranslationEnabled)
+  const [followPanelDismissed, setFollowPanelDismissed] = useState(false)
   useEffect(() => () => {
     clearTimeout(selectionTimerRef.current)
   }, [])
 
   function dismissSelectionCard() {
     activeRequestRef.current += 1
+    lastSelectionKeyRef.current = ''
+    latestSelectionRef.current = null
+    setFollowPanelDismissed(false)
     clearTimeout(selectionTimerRef.current)
     setSelectionCard(createInitialSelectionState())
   }
 
   function handleSelection(selectionPayload) {
+    const selectionKey = buildSelectionRequestKey(selectionPayload)
+    if (!selectionKey) return
+    if (selectionKey === lastSelectionKeyRef.current) {
+      setFollowPanelDismissed(false)
+      return
+    }
+    lastSelectionKeyRef.current = selectionKey
+    latestSelectionRef.current = selectionPayload
+    setFollowPanelDismissed(false)
     clearTimeout(selectionTimerRef.current)
     selectionTimerRef.current = setTimeout(() => {
       loadSelectionInsight(selectionPayload)
     }, 60)
   }
 
-  async function loadSelectionInsight(explicitSelection) {
+  async function loadSelectionInsight(explicitSelection, selectedProvider = translationProvider) {
     let selectedText = ''
     let domain = selectionCard.domain
     let context = ''
@@ -141,20 +167,19 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
       endChar: selectionMeta.endChar || 0,
       rects: selectionMeta.rects || [],
       anchorRect: selectionMeta.anchorRect || null,
+      anchorElement: selectionMeta.anchorElement || null,
+      anchorClientRect: selectionMeta.anchorClientRect || null,
       contextBefore: selectionMeta.contextBefore || '',
       contextAfter: selectionMeta.contextAfter || '',
     })
 
     try {
-      const summary = summaryRef.current || undefined
-      const providerId = providerRef.current || undefined
       const data = await fetchSelectionInsight({
         text: selectedText,
         paper_title: paperTitle,
         domain,
-        summary,
+        translation_provider: selectedProvider,
         context: context || undefined,
-        provider_id: providerId || undefined,
       })
 
       if (activeRequestRef.current !== requestId) {
@@ -171,107 +196,57 @@ export function useSelectionInsight({ paperTitle, paperSummary }) {
         source: data.source || '',
         textKind: data.text_kind || current.textKind,
       }))
-
-      if (aiEnabledRef.current && providerId && wordCount >= 5) {
-        setSelectionCard((current) => ({ ...current, explaining: true, explanation: '' }))
-        explRef.current = ''
-        try {
-          const token = getStoredAuthToken()
-          const response = await fetch('/api/selection-insight/explain-stream', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            body: JSON.stringify({
-              text: selectedText,
-              paper_title: paperTitle,
-              summary,
-              context: context || undefined,
-              provider_id: providerId,
-            }),
-          })
-
-          if (response.ok) {
-            const reader = response.body.getReader()
-            const decoder = new TextDecoder()
-            let buffer = ''
-            while (true) {
-              const chunk = await reader.read()
-              if (chunk.done) break
-              buffer += decoder.decode(chunk.value, { stream: true })
-              const parts = buffer.split(NL)
-              buffer = parts.pop()
-              for (const line of parts) {
-                if (!line.startsWith('data: ')) continue
-                const token = line.slice(6)
-                if (activeRequestRef.current !== requestId) return
-                explRef.current += token
-                setSelectionCard((current) => ({ ...current, explanation: explRef.current }))
-                await new Promise((resolve) => setTimeout(resolve, 0))
-              }
-            }
-          }
-        } catch {
-          void 0
-        }
-
-        if (activeRequestRef.current !== requestId) {
-          return
-        }
-
-        if (!explRef.current) {
-          try {
-            const fallback = await fetchSelectionInsightExplain({
-              text: selectedText,
-              paper_title: paperTitle,
-              summary,
-              context: context || undefined,
-              provider_id: providerId,
-            })
-            if (activeRequestRef.current === requestId && fallback?.explanation) {
-              setSelectionCard((current) => ({ ...current, explanation: fallback.explanation }))
-            }
-          } catch {
-            void 0
-          }
-        }
-
-        if (activeRequestRef.current === requestId) {
-          setSelectionCard((current) => ({ ...current, explaining: false }))
-        }
-      }
-    } catch {
+    } catch (error) {
       if (activeRequestRef.current !== requestId) {
+        return
+      }
+      if (error?.message) {
+        setSelectionCard((current) => ({ ...current, loading: false, error: error.message }))
         return
       }
       setSelectionCard((current) => ({
         ...current,
         loading: false,
-        explaining: false,
         error: '网络好像开小差了，刷新后再试一次。',
       }))
     }
   }
 
-  function toggleAI() {
-    setAiEnabled((previous) => {
-      if (previous) {
-        aiEnabledRef.current = false
-        activeRequestRef.current += 1
-        setSelectionCard((current) => ({ ...current, explaining: false, explanation: '' }))
-      } else {
-        aiEnabledRef.current = true
-      }
-      return !previous
-    })
+  function changeTranslationProvider(nextProvider) {
+    const normalizedProvider = normalizeTranslationProvider(nextProvider)
+    if (normalizedProvider === translationProvider) return
+
+    setTranslationProvider(normalizedProvider)
+    storeTranslationProvider(normalizedProvider)
+
+    if (latestSelectionRef.current?.text) {
+      clearTimeout(selectionTimerRef.current)
+      loadSelectionInsight(latestSelectionRef.current, normalizedProvider)
+    }
+  }
+
+  function changeFollowTranslationEnabled(nextEnabled) {
+    const enabled = Boolean(nextEnabled)
+    setFollowTranslationEnabled(enabled)
+    storeFollowTranslationEnabled(enabled)
+    if (enabled && latestSelectionRef.current?.text) {
+      setFollowPanelDismissed(false)
+    }
+  }
+
+  function dismissFollowPanel() {
+    setFollowPanelDismissed(true)
   }
 
   return {
     selectionCard,
+    translationProvider,
+    changeTranslationProvider,
+    followTranslationEnabled,
+    changeFollowTranslationEnabled,
+    followPanelVisible: followTranslationEnabled && selectionCard.visible && !followPanelDismissed,
+    dismissFollowPanel,
     handleSelection,
     dismissSelectionCard,
-    aiEnabled,
-    toggleAI,
   }
 }

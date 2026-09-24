@@ -8,29 +8,32 @@ from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import OperationalError
 
 from app.api.router import api_router
-from app.api.routes.research_matrix import resume_stale_matrix_runs
 from app.core.config import settings
 from app.db.session import Base, SessionLocal, engine
-from app.models import AiProvider, Annotation, FeedbackTicket, Folder, InkAnnotation, MembershipRedeemCode, Notification, Paper, PaperFullTranslation, PaperLiteratureCache, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperResourceLayout, PaperSummary, ReadingRecord, ResearchMatrixRun, ResearchMatrixRunPaper, TaskCenterArchive, UsageCounter, User, UserAgreement, UserMembership, UserProfile, VerificationCode  # noqa: F401
+from app.models import AiProvider, Annotation, FeedbackTicket, Folder, InkAnnotation, MembershipRedeemCode, Notification, Paper, PaperFullTranslation, PaperLiteratureCache, PaperNotebook, PaperNoteBlock, PaperNoteNode, PaperReadingBrief, PaperResourceLayout, ReadingRecord, TaskCenterArchive, UsageCounter, User, UserAgreement, UserMembership, UserProfile, VerificationCode  # noqa: F401
+from app.models import PaperAiOutline  # noqa: F401
 
 
 def _ensure_system_providers() -> None:
     """启动时创建/更新系统默认 AI 厂商"""
+    from app.services.ai_provider_manager import find_builtin_provider_for_blueprint
     from app.services.crypto import encrypt_api_key
 
     db = SessionLocal()
     try:
+        existing_system_providers = db.scalars(
+            select(AiProvider).where(AiProvider.user_id.is_(None))
+        ).all()
         for idx, sp in enumerate(settings.system_providers):
-            existing = db.scalar(
-                select(AiProvider).where(
-                    AiProvider.user_id.is_(None),
-                    AiProvider.base_url == sp["base_url"],
-                    AiProvider.model == sp["model"],
-                )
+            existing = find_builtin_provider_for_blueprint(
+                existing_system_providers,
+                sp,
             )
             if existing:
                 existing.encrypted_api_key = encrypt_api_key(sp["api_key"])
                 existing.label = sp["label"]
+                existing.base_url = sp["base_url"]
+                existing.model = sp["model"]
                 existing.sort_order = sp.get("sort_order", idx)
                 # 已有厂商：不改启用状态，避免覆盖用户的开关选择
             else:
@@ -43,6 +46,24 @@ def _ensure_system_providers() -> None:
                     sort_order=sp.get("sort_order", idx),
                     is_active=(idx == 0),  # 只有第一个默认启用
                 )
+                db.add(provider)
+                existing_system_providers.append(provider)
+
+        # Upgrade per-user copies of built-in cards in place. The matching helper
+        # only accepts known official labels for legacy models, so custom providers
+        # on a shared API endpoint keep their model, key, and activation state.
+        user_providers = db.scalars(
+            select(AiProvider).where(AiProvider.user_id.is_not(None))
+        ).all()
+        for blueprint in settings.system_providers:
+            for provider in user_providers:
+                if not find_builtin_provider_for_blueprint([provider], blueprint):
+                    continue
+                provider.label = blueprint["label"]
+                provider.base_url = blueprint["base_url"]
+                provider.model = blueprint["model"]
+                provider.encrypted_api_key = encrypt_api_key(blueprint["api_key"])
+                provider.sort_order = blueprint.get("sort_order", 0)
                 db.add(provider)
 
         # 迁移修复：如果有多个系统厂商同时启用，只保留第一个
@@ -94,6 +115,10 @@ def _ensure_full_translation_parse_columns() -> None:
         ("parse_summary", "JSON" if engine.dialect.name != "sqlite" else "TEXT", None),
         ("translation_engine", "VARCHAR(32)", "'ai'"),
         ("termbase_version", "VARCHAR(64)", "''"),
+        ("artifact_path", "VARCHAR(500)", None),
+        ("artifact_sha256", "VARCHAR(64)", None),
+        ("artifact_size", "BIGINT", "0"),
+        ("generation_version", "INTEGER", "0"),
     ]
     with engine.begin() as connection:
         for name, column_type, default in additions:
@@ -198,81 +223,10 @@ def _create_index_if_missing(table_name: str, index_name: str, create_sql: str) 
 
 def _ensure_task_center_indexes() -> None:
     _create_index_if_missing(
-        "paper_summaries",
-        "ix_paper_summaries_user_status_updated",
-        "CREATE INDEX ix_paper_summaries_user_status_updated ON paper_summaries (user_id, status, updated_at)",
-    )
-    _create_index_if_missing(
-        "research_matrix_runs",
-        "ix_research_matrix_runs_user_status_updated",
-        "CREATE INDEX ix_research_matrix_runs_user_status_updated ON research_matrix_runs (user_id, status, updated_at)",
-    )
-    _create_index_if_missing(
         "paper_full_translations",
         "ix_paper_full_translations_status_updated",
         "CREATE INDEX ix_paper_full_translations_status_updated ON paper_full_translations (status, updated_at)",
     )
-
-
-def _ensure_research_matrix_columns() -> None:
-    inspector = inspect(engine)
-    try:
-        run_columns = {column["name"] for column in inspector.get_columns("research_matrix_runs")}
-        run_paper_columns = {column["name"] for column in inspector.get_columns("research_matrix_run_papers")}
-    except Exception:
-        return
-
-    run_additions = [
-        ("stage", "VARCHAR(48)", "'idle'"),
-        ("total_count", "INTEGER", "0"),
-        ("ready_count", "INTEGER", "0"),
-        ("failed_count", "INTEGER", "0"),
-        ("progress_percent", "INTEGER", "0"),
-        ("worker_status", "VARCHAR(24)", "'idle'"),
-        ("worker_started_at", "DATETIME", None),
-        ("worker_heartbeat_at", "DATETIME", None),
-        ("worker_pid", "INTEGER", None),
-        ("worker_retry_count", "INTEGER", "0"),
-        ("last_worker_error", "TEXT", None),
-    ]
-    run_paper_additions = [
-        ("review_role", "VARCHAR(120)", "''"),
-        ("batch_note", "TEXT", None),
-    ]
-    with engine.begin() as connection:
-        for name, column_type, default in run_additions:
-            if name in run_columns:
-                continue
-            if default is None:
-                connection.execute(
-                    text(
-                        f"ALTER TABLE research_matrix_runs ADD COLUMN {name} {column_type} NULL"
-                    )
-                )
-            else:
-                connection.execute(
-                    text(
-                        f"ALTER TABLE research_matrix_runs ADD COLUMN {name} {column_type} "
-                        f"NOT NULL DEFAULT {default}"
-                    )
-                )
-        for name, column_type, default in run_paper_additions:
-            if name in run_paper_columns:
-                continue
-            if default is None:
-                connection.execute(
-                    text(
-                        f"ALTER TABLE research_matrix_run_papers ADD COLUMN {name} {column_type} NULL"
-                    )
-                )
-            else:
-                connection.execute(
-                    text(
-                        f"ALTER TABLE research_matrix_run_papers ADD COLUMN {name} {column_type} "
-                        f"NOT NULL DEFAULT {default}"
-                    )
-                )
-
 
 def _ensure_reading_record_duration_column() -> None:
     inspector = inspect(engine)
@@ -403,7 +357,6 @@ def _run_startup_schema_sync() -> None:
             _ensure_literature_cache_table()
             _ensure_notification_indexes()
             _ensure_task_center_indexes()
-            _ensure_research_matrix_columns()
             _ensure_reading_record_duration_column()
             _ensure_user_email_nullable()
             _ensure_user_admin_column()
@@ -445,7 +398,7 @@ def create_app() -> FastAPI:
         _validate_runtime_configuration()
         if settings.startup_schema_sync_enabled:
             _run_startup_schema_sync()
-        resume_stale_matrix_runs()
+        _ensure_system_providers()
         from app.services.task_monitor import normalize_stale_tasks
 
         db = SessionLocal()

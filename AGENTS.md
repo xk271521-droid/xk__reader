@@ -8,6 +8,7 @@
 - 桌面端 Electron 壳仓库：`C:\Users\xk\Desktop\codexwork\paper-reader-desktop`
 - 当前桌面快捷方式：`C:\Users\xk\Desktop\XK 阅读.lnk`
 - 当前桌面程序：`C:\Users\xk\Desktop\codexwork\paper-reader-desktop\release\XK 阅读\XK 阅读.exe`
+- 本地开发一键启动：桌面快捷方式 `C:\Users\xk\Desktop\XK 阅读启动.lnk`，实际脚本为 `C:\Users\xk\Desktop\codexwork\start-xk-reader-local.ps1`；固定启动前端 `5173` 和后端 `8000`。
 
 ## 核心原则
 

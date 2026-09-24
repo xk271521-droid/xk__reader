@@ -1,0 +1,8 @@
+# Dedicated runtime for full-PDF translation; do not install into the API virtualenv.
+# The newer Tencent TMT SDK removed symbols that pdf2zh 1.9.11 imports, so keep it pinned.
+pdf2zh==1.9.11
+tencentcloud-sdk-python-tmt==3.1.121
+# BabelDOC 0.2.33 still calls numpy.fromstring on raw image buffers. The
+# dedicated entry point carries a narrow compatibility shim; keep NumPy on the
+# supported 2.x line for BabelDOC/OpenCV.
+numpy==2.3.5

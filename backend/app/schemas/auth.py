@@ -86,6 +86,7 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     captcha_id: str = Field(min_length=8, max_length=255)
     captcha_code: str = Field(min_length=4, max_length=16)
+    remember_me: bool = False
 
     @field_validator("account", "captcha_id", "captcha_code")
     @classmethod

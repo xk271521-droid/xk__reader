@@ -29,6 +29,10 @@ def clean_metadata_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def has_chinese_text(value: Any) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff]", str(value or "")))
+
+
 def is_missing_metadata_value(value: Any) -> bool:
     text = clean_metadata_text(value)
     return not text or text.lower() in MISSING_METADATA_VALUES
@@ -72,6 +76,14 @@ def is_weak_metadata_title(title: Any, file_name: str | None = "") -> bool:
         return True
     if re.match(r"^pii\s*:", cleaned, flags=re.IGNORECASE):
         return True
+    if len(cleaned) > 180:
+        return True
+    if len(cleaned) > 80 and re.search(
+        r"(摘要|关键词|关键字|Abstract\b|Keywords?\b|大学|学院|研究中心|中国[；;])",
+        cleaned,
+        flags=re.IGNORECASE,
+    ):
+        return True
     return False
 
 
@@ -97,6 +109,8 @@ def is_front_matter_noise(line: str) -> bool:
         return True
     if re.match(r"^(submitted|published|preprint|copyright|received|revised|accepted|correspondence|academic editor)\b", value, flags=re.IGNORECASE):
         return True
+    if re.match(r"^(收稿日期|基金项目|作者简介|通讯作者|责任编辑|中图分类号|文献标识码|文章编号)", value):
+        return True
     if re.match(r"^(volume|vol\.?)\s+\d+", value, flags=re.IGNORECASE):
         return True
     if re.search(r"\b(article id|pages?|issn|isbn)\b", value, flags=re.IGNORECASE):
@@ -105,15 +119,37 @@ def is_front_matter_noise(line: str) -> bool:
         return True
     if re.fullmatch(r"(hindawi|springer|elsevier|ieee|acm|mdpi|nature|frontiers|plos|wiley|sage)", value, flags=re.IGNORECASE):
         return True
+    if re.search(r"[（(]\s*中英文\s*[）)]", value, flags=re.IGNORECASE):
+        return True
+    if re.search(r"\b(ISSN|CN\s*\d)\b", value, flags=re.IGNORECASE) and len(value) < 120:
+        return True
     return False
+
+
+def is_abstract_start(line: str) -> bool:
+    return bool(re.match(r"^(abstract\b|摘要|摘\s*要)(?:[\s.：:\-\u2013\u2014]|$)", line, flags=re.IGNORECASE))
+
+
+def is_keyword_start(line: str) -> bool:
+    return bool(
+        re.match(
+            r"^(keywords?|key words|index terms|ccs concepts|关键词|关键字)(?:[\s.：:\-\u2013\u2014]|$)",
+            line,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def is_section_start(line: str) -> bool:
     return bool(
         re.match(
-            r"^(\d+\.?\s*)?(abstract|keywords|key words|index terms|introduction|1\s+introduction|references)\b",
+            r"^(\d+\.?\s*)?(abstract|keywords?|key words|index terms|ccs concepts|introduction|1\s+introduction|references)\b",
             line,
             flags=re.IGNORECASE,
+        )
+        or re.match(
+            r"^(\d+[.、]?\s*)?(摘要|摘\s*要|关键词|关键字|引言|绪论|前言|参考文献|中图分类号|文献标识码|文章编号)(?:[\s：:]|$)",
+            line,
         )
     )
 
@@ -125,6 +161,10 @@ def is_likely_affiliation_line(line: str) -> bool:
             line,
             flags=re.IGNORECASE,
         )
+        or re.search(
+            r"(大学|学院|研究院|研究所|实验室|重点实验室|工程中心|研究中心|技术中心|科学院|农业科学院|教育部|信息学院|工程学院|系|省|市|中国|邮编|基金项目|通讯作者)",
+            line,
+        )
     )
 
 
@@ -132,6 +172,14 @@ def is_likely_author_line(line: str) -> bool:
     value = clean_metadata_text(line)
     if not value or is_likely_affiliation_line(value) or is_section_start(value):
         return False
+    if has_chinese_text(value):
+        without_markers = re.sub(r"[0-9*†‡§,，;；()（）\[\]\s.\-]+", " ", value).strip()
+        chinese_names = [
+            part
+            for part in re.split(r"[、，,;；\s]+", without_markers)
+            if re.fullmatch(r"[\u3400-\u9fff]{2,4}", part)
+        ]
+        return len(value) <= 140 and len(chinese_names) >= 2
     capitalized_words = re.findall(r"\b[A-Z][A-Za-z.'-]{1,}\b", value)
     name_like_words = re.findall(r"\b[A-Z][a-z][A-Za-z.'-]*\b", value)
     if len(capitalized_words) < 2 or len(name_like_words) < 2 or len(value) > 180:
@@ -162,7 +210,8 @@ def is_title_candidate(line: str) -> bool:
     if len(value) < 8 or len(value) > 220:
         return False
     word_count = len(re.findall(r"[A-Za-z0-9][A-Za-z0-9+-]*", value))
-    if word_count < 2:
+    chinese_count = len(re.findall(r"[\u3400-\u9fff]", value))
+    if word_count < 2 and chinese_count < 6:
         return False
     return True
 
@@ -179,13 +228,13 @@ def extract_abstract_from_lines(lines: list[str], abstract_index: int) -> str:
     if abstract_index < 0:
         return ""
     chunks: list[str] = []
-    first = re.sub(r"^abstract[\s.:-]*", "", lines[abstract_index], flags=re.IGNORECASE).strip()
+    first = re.sub(r"^(abstract\b|摘要|摘\s*要)[\s.：:\-\u2013\u2014]*", "", lines[abstract_index], flags=re.IGNORECASE).strip()
     if first:
         chunks.append(first)
     for line in lines[abstract_index + 1:]:
-        if re.match(r"^(keywords|key words|index terms|ccs concepts)\b", line, flags=re.IGNORECASE):
+        if is_keyword_start(line):
             break
-        if re.match(r"^(\d+\.?\s*)?(introduction|1\s+introduction)\b", line, flags=re.IGNORECASE):
+        if is_section_start(line) and not is_abstract_start(line):
             break
         chunks.append(line)
         if len(" ".join(chunks)) > 1200:
@@ -195,10 +244,10 @@ def extract_abstract_from_lines(lines: list[str], abstract_index: int) -> str:
 
 def extract_keywords_from_lines(lines: list[str]) -> str:
     for index, line in enumerate(lines):
-        if not re.match(r"^(keywords|key words|index terms)\b", line, flags=re.IGNORECASE):
+        if not is_keyword_start(line):
             continue
         first = re.sub(
-            r"^(keywords|key words|index terms)[\s.:\-\u2013\u2014]*",
+            r"^(keywords?|key words|index terms|ccs concepts|关键词|关键字)[\s.：:\-\u2013\u2014]*",
             "",
             line,
             flags=re.IGNORECASE,
@@ -209,6 +258,29 @@ def extract_keywords_from_lines(lines: list[str]) -> str:
             chunks.append(next_line)
         return clean_metadata_text(" ".join(chunks))[:400]
     return ""
+
+
+def sanitize_extracted_title(title: Any, file_name: str | None = "") -> str:
+    value = clean_metadata_text(title)
+    if not value:
+        return ""
+    value = re.sub(
+        r"^[\u3400-\u9fff]{2,14}\s*[（(]\s*中英文\s*[）)]\s+[A-Za-z][A-Za-z\s-]{4,48}\s+",
+        "",
+        value,
+    )
+    value = re.split(r"\s+(?:摘要|摘\s*要|关键词|关键字|Abstract\b|Keywords?\b)", value, maxsplit=1, flags=re.IGNORECASE)[0]
+    value = re.sub(r"\s*[（(]\s*\d+\s*[.．、].*$", "", value)
+    value = re.sub(r"\s+\d+(?:\s*[，,]\s*\d+)+\s*\*?.*$", "", value)
+    value = re.sub(r"\s+[\u3400-\u9fff]{2,4}(?:[，、,]\s*[\u3400-\u9fff]{2,4}){1,}.*$", "", value)
+    value = clean_metadata_text(value)
+    file_title = clean_metadata_text(re.sub(r"\.pdf$", "", str(file_name or ""), flags=re.IGNORECASE))
+    if not value or (file_title and value.lower() == file_title.lower()):
+        return value
+    if len(value) > 160:
+        value = clean_metadata_text(value[:160])
+        value = re.sub(r"[，,;；:.：、\s]+$", "", value)
+    return value
 
 
 def _metadata_value(info: dict[str, Any], *keys: str) -> str:
@@ -226,7 +298,7 @@ def extract_front_matter_hints(text: Any, info: dict[str, Any] | None = None, fi
     info_text = "\n".join(clean_metadata_text(value) for value in info.values() if value)
     raw_text = "\n".join(part for part in (str(text or ""), info_text, str(file_name or "")) if part)
     lines = split_clean_lines(text)
-    abstract_index = next((index for index, line in enumerate(lines) if re.match(r"^abstract\b", line, flags=re.IGNORECASE)), -1)
+    abstract_index = next((index for index, line in enumerate(lines) if is_abstract_start(line)), -1)
     scan_limit = abstract_index if abstract_index >= 0 else min(len(lines), 36)
     marker_indexes = [index for index in range(scan_limit) if is_article_marker(lines[index])]
     start_index = marker_indexes[-1] + 1 if marker_indexes else 0
@@ -272,7 +344,7 @@ def extract_front_matter_hints(text: Any, info: dict[str, Any] | None = None, fi
 
     arxiv_category_match = re.search(r"\[([a-z-]+\.[A-Z]{2}(?:\.[A-Z]{2})?)\]", raw_text)
     return {
-        "title": clean_metadata_text(" ".join(title_parts))[:300],
+        "title": sanitize_extracted_title(" ".join(title_parts), file_name)[:300],
         "author": clean_metadata_text("; ".join(author_lines))[:200],
         "subject": extract_abstract_from_lines(lines, abstract_index),
         "keywords": extract_keywords_from_lines(lines) or (arxiv_category_match.group(1) if arxiv_category_match else ""),

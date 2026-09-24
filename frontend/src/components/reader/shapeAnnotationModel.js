@@ -1,4 +1,4 @@
-export const SHAPE_TOOL_IDS = ['text', 'arrow', 'rect', 'circle', 'pin']
+export const SHAPE_TOOL_IDS = ['text', 'line', 'arrow', 'rect', 'circle', 'pin']
 export const SHAPE_COLOR_PALETTE = ['#2563EB', '#DC2626', '#F59E0B', '#15803D', '#7C3AED', '#DB2777', '#0F766E', '#111827']
 export const DEFAULT_SHAPE_OPTIONS = { color: '#2563EB', strokeWidth: 2, fontSize: 16 }
 const COLLAPSED_TEXT_MAX_CHARS = 14

@@ -1,3 +1,4 @@
+from app.api.routes.translation_config import router as translation_config_router
 from fastapi import APIRouter
 from app.api.routes.admin import router as admin_router
 from app.api.routes.annotation import router as annotation_router
@@ -13,10 +14,11 @@ from app.api.routes.membership import router as membership_router
 from app.api.routes.note import router as note_router
 from app.api.routes.notification import router as notification_router
 from app.api.routes.paper import router as paper_router
+from app.api.routes.paper_reading_brief import router as paper_reading_brief_router
+from app.api.routes.paper_ai_outline import router as paper_ai_outline_router
 from app.api.routes.paper_format import router as paper_format_router
-from app.api.routes.paper_summary import router as paper_summary_router
+from app.api.routes.pdf_annotation import router as pdf_annotation_router
 from app.api.routes.reading_record import router as reading_record_router
-from app.api.routes.research_matrix import router as research_matrix_router
 from app.api.routes.resource import router as resource_router
 from app.api.routes.selection import router as selection_router
 from app.api.routes.shape_annotation import router as shape_annotation_router
@@ -33,10 +35,11 @@ api_router.include_router(health_router, tags=["health"])
 api_router.include_router(membership_router, tags=["membership"])
 api_router.include_router(notification_router, tags=["notifications"])
 api_router.include_router(paper_router, tags=["papers"])
+api_router.include_router(paper_reading_brief_router)
+api_router.include_router(paper_ai_outline_router)
 api_router.include_router(paper_format_router, tags=["paper-format"])
-api_router.include_router(paper_summary_router, tags=["paper-summaries"])
+api_router.include_router(pdf_annotation_router, tags=["pdf-annotations"])
 api_router.include_router(reading_record_router, tags=["reading-records"])
-api_router.include_router(research_matrix_router, tags=["research-matrix"])
 api_router.include_router(resource_router, tags=["resources"])
 api_router.include_router(annotation_router, tags=["annotations"])
 api_router.include_router(ink_annotation_router, tags=["ink-annotations"])
@@ -45,3 +48,4 @@ api_router.include_router(shape_annotation_router, tags=["shape-annotations"])
 api_router.include_router(note_router, tags=["notes"])
 api_router.include_router(selection_router, tags=["selection"])
 api_router.include_router(task_router, tags=["tasks"])
+api_router.include_router(translation_config_router, tags=["translation-config"])

@@ -70,3 +70,11 @@ export async function archiveCompletedTaskCenterItems() {
   })
   return parseJsonResponse(response)
 }
+
+export async function archiveFinishedTaskCenterItems() {
+  const response = await fetch('/api/tasks/archive-finished', {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  return parseJsonResponse(response)
+}

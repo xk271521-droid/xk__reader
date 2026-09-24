@@ -1,5 +1,16 @@
-import { useMemo, useState } from 'react'
-import { BookOpenText, Compass, Database, Globe, Search, Sparkles } from 'lucide-react'
+import { useMemo, useRef, useState } from 'react'
+import {
+  ArrowLeft,
+  ArrowRight,
+  BookOpenText,
+  Compass,
+  Database,
+  Globe,
+  Plus,
+  RefreshCw,
+  Search,
+  Sparkles,
+} from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -16,7 +27,9 @@ import {
   getLiteratureEngineById,
   literatureSearchEngines,
 } from '@/data/literatureSearchEngines'
+import { isDesktopShell } from '../../utils/desktopShell'
 import { LiteratureEngineSidebar } from './LiteratureEngineSidebar'
+import '../../styles/literature-desktop.css'
 
 function getAccessLabel(accessType) {
   if (accessType === 'free') return '开放获取'
@@ -62,7 +75,142 @@ function PreviewCard({ engine }) {
   )
 }
 
-export function LiteratureSearchPage() {
+function DesktopLiteratureBrowser() {
+  const defaultEngine = literatureSearchEngines.find((engine) => engine.id === 'cnki') || literatureSearchEngines[0]
+  const [activeEngineId, setActiveEngineId] = useState(defaultEngine?.id || '')
+  const [query, setQuery] = useState('')
+  const [currentUrl, setCurrentUrl] = useState(defaultEngine?.homepageUrl || 'about:blank')
+  const [isLoading, setIsLoading] = useState(false)
+  const [canGoBack, setCanGoBack] = useState(false)
+  const [canGoForward, setCanGoForward] = useState(false)
+  const webviewRef = useRef(null)
+
+  const activeEngine = getLiteratureEngineById(activeEngineId)
+
+  function updateNavigationState(webview = webviewRef.current) {
+    setCanGoBack(Boolean(webview?.canGoBack?.()))
+    setCanGoForward(Boolean(webview?.canGoForward?.()))
+  }
+
+  function loadUrl(url) {
+    if (!url) return
+    setCurrentUrl(url)
+    if (webviewRef.current?.loadURL) {
+      webviewRef.current.loadURL(url)
+    }
+  }
+
+  function handleEngineSelect(engine) {
+    setActiveEngineId(engine.id)
+    setQuery('')
+    loadUrl(engine.homepageUrl)
+  }
+
+  function handleSearch(event) {
+    event.preventDefault()
+    loadUrl(buildLiteratureSearchUrl(activeEngine, query))
+  }
+
+  function handleGoBack() {
+    if (webviewRef.current?.canGoBack?.()) {
+      webviewRef.current.goBack()
+    }
+  }
+
+  function handleGoForward() {
+    if (webviewRef.current?.canGoForward?.()) {
+      webviewRef.current.goForward()
+    }
+  }
+
+  function handleReload() {
+    webviewRef.current?.reload?.()
+  }
+
+  function handleWebviewRef(node) {
+    if (!node || webviewRef.current === node) return
+    webviewRef.current = node
+
+    node.addEventListener('did-start-loading', () => setIsLoading(true))
+    node.addEventListener('did-stop-loading', () => {
+      setIsLoading(false)
+      updateNavigationState(node)
+    })
+    node.addEventListener('did-navigate', (event) => {
+      setCurrentUrl(event.url || node.getURL?.() || currentUrl)
+      updateNavigationState(node)
+    })
+    node.addEventListener('did-navigate-in-page', (event) => {
+      setCurrentUrl(event.url || node.getURL?.() || currentUrl)
+      updateNavigationState(node)
+    })
+  }
+
+  return (
+    <section className="literature-shell literature-shell--desktop-browser">
+      <aside className="literature-desktop-sidebar">
+        <button type="button" className="literature-desktop-add-engine">
+          <Plus />
+          <span>添加搜索引擎</span>
+        </button>
+
+        <div className="literature-desktop-engine-list">
+          {literatureSearchEngines.map((engine) => (
+            <button
+              key={engine.id}
+              type="button"
+              className={engine.id === activeEngineId ? 'is-active' : ''}
+              onClick={() => handleEngineSelect(engine)}
+            >
+              <span>{engine.name}</span>
+            </button>
+          ))}
+        </div>
+      </aside>
+
+      <main className="literature-browser-main">
+        <div className="literature-browser-toolbar">
+          <div className="literature-browser-nav">
+            <button type="button" disabled={!canGoBack} onClick={handleGoBack} aria-label="后退">
+              <ArrowLeft />
+            </button>
+            <button type="button" disabled={!canGoForward} onClick={handleGoForward} aria-label="前进">
+              <ArrowRight />
+            </button>
+            <button type="button" onClick={handleReload} aria-label="刷新">
+              <RefreshCw className={isLoading ? 'is-loading' : ''} />
+            </button>
+          </div>
+
+          <form className="literature-browser-search" onSubmit={handleSearch}>
+            <strong>{activeEngine.name}</strong>
+            <label>
+              <Search />
+              <input
+                type="search"
+                value={query}
+                placeholder="输入主题、作者、关键词"
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </label>
+            <button type="submit">检索</button>
+          </form>
+        </div>
+
+        <div className="literature-browser-frame">
+          <webview
+            ref={handleWebviewRef}
+            className="literature-browser-webview"
+            src={currentUrl}
+            partition="persist:xk-literature-browser"
+          />
+        </div>
+      </main>
+    </section>
+  )
+}
+
+function WebLiteratureSearchPage() {
   const [query, setQuery] = useState('')
   const [activeEngineId, setActiveEngineId] = useState(literatureSearchEngines[0]?.id || '')
 
@@ -245,4 +393,8 @@ export function LiteratureSearchPage() {
       </div>
     </section>
   )
+}
+
+export function LiteratureSearchPage() {
+  return isDesktopShell() ? <DesktopLiteratureBrowser /> : <WebLiteratureSearchPage />
 }

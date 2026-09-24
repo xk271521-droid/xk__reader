@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models import Annotation, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperNoteBlock, PaperNoteNode, PaperNotebook, PaperSummary, ReadingRecord, ShapeAnnotation, User
+from app.models import Annotation, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperNoteBlock, PaperNoteNode, PaperNotebook, ReadingRecord, ShapeAnnotation, User
 from app.schemas.reading_record import (
     ReadingDashboardResponse,
     ReadingRecordCreate,
@@ -542,14 +542,6 @@ def get_reading_dashboard(
         note_blocks_total += display_count
         note_block_count_by_paper[int(paper_id)] = display_count
 
-    summary_query = select(func.count(PaperSummary.id)).where(
-        PaperSummary.user_id == current_user.id,
-        PaperSummary.status == "generated",
-    )
-    if timeframe_start_utc is not None:
-        summary_query = summary_query.where(PaperSummary.updated_at >= timeframe_start_utc)
-    summary_count = db.scalar(summary_query) or 0
-
     translation_query = select(func.count(PaperFullTranslation.id))
     translation_query = translation_query.join(Paper, Paper.id == PaperFullTranslation.paper_id).where(
         Paper.user_id == current_user.id,
@@ -563,7 +555,6 @@ def get_reading_dashboard(
     ) or 0
 
     resource_distribution = [
-        {"name": "摘要", "value": int(summary_count or 0)},
         {"name": "笔记", "value": int(note_blocks_total or 0)},
         {"name": "标注", "value": int(annotation_count or 0)},
         {"name": "翻译", "value": int(translation_count or 0)},

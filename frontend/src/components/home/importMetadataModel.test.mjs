@@ -12,6 +12,13 @@ test('detects weak imported titles from file names and placeholders', () => {
   assert.equal(isWeakImportedTitle('cnn-paper', 'cnn-paper.pdf'), true)
   assert.equal(isWeakImportedTitle('Untitled', 'paper.pdf'), true)
   assert.equal(isWeakImportedTitle('A Multichannel 2D Convolutional Neural Network Model', 'cnn.pdf'), false)
+  assert.equal(
+    isWeakImportedTitle(
+      '智慧农业（中英文） Smart Agriculture 基于机器学习融合电化学指纹的传感器校准方法 1， 2 杨皓宇，李爱学，赵春江 （1.上海海洋大学 信息学院，中国） 摘要：电化学传感器受限于环境干扰',
+      'smart-agriculture.pdf',
+    ),
+    true,
+  )
 })
 
 test('asks for refresh when imported metadata misses core fields', () => {

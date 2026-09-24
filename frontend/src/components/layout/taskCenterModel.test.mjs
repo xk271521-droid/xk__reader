@@ -3,8 +3,10 @@ import test from 'node:test'
 
 import {
   buildTaskFailureCopyText,
+  canClearFinishedTasks,
   filterTaskItems,
   getTaskFilterCounts,
+  isTaskArchivable,
   normalizeTaskSummary,
 } from './taskCenterModel.js'
 
@@ -41,4 +43,12 @@ test('builds detailed failure copy text', () => {
   })
   assert.match(text, /Matrix/)
   assert.match(text, /provider timeout/)
+})
+
+test('treats failed and completed task records as clearable history', () => {
+  assert.equal(isTaskArchivable({ status_group: 'failed' }), true)
+  assert.equal(isTaskArchivable({ status_group: 'completed' }), true)
+  assert.equal(isTaskArchivable({ status_group: 'active' }), false)
+  assert.equal(canClearFinishedTasks({ failed_count: 1, completed_count: 0 }), true)
+  assert.equal(canClearFinishedTasks({ failed_count: 0, completed_count: 0 }), false)
 })

@@ -2,7 +2,9 @@ import 'pdfjs-dist/web/pdf_viewer.css'
 import './pdfjsNativeSelection.css'
 import { createPdfLoadingTask, loadPdfJs } from '../services/pdfjsClient'
 
-const DEFAULT_PDF_URL = '/uploads/papers/1191730030_1779276092013.pdf'
+const query = new URLSearchParams(window.location.search)
+const DEFAULT_PDF_URL = query.get('pdf') || '/poc/sthelar-selection-test.pdf'
+const IS_EMBEDDED = query.get('embedded') === '1'
 const SCALE_PRESETS = [
   { label: '90%', value: 0.9 },
   { label: '110%', value: 1.1 },
@@ -13,7 +15,8 @@ const SCALE_PRESETS = [
 
 const root = document.getElementById('selection-poc-root')
 
-let activeDocument = null
+if (IS_EMBEDDED) document.body.classList.add('poc-embedded')
+
 let activeLoadToken = 0
 let activeSource = { kind: 'url', value: DEFAULT_PDF_URL }
 let activeScale = 1.3
@@ -85,6 +88,13 @@ const pageCountEl = root.querySelector('[data-page-count]')
 
 function setStatus(message) {
   statusEl.textContent = message
+  if (IS_EMBEDDED && window.parent !== window) {
+    window.parent.postMessage({
+      type: 'pdf-selection-poc:status',
+      message,
+      ready: message.startsWith('Ready:'),
+    }, window.location.origin)
+  }
 }
 
 function clearSelectionReadout() {
@@ -251,7 +261,6 @@ async function loadPdf(source) {
     const pdfDocument = await loadingTask.promise
     if (token !== activeLoadToken) return
 
-    activeDocument = pdfDocument
     setStatus(`Rendering ${pdfDocument.numPages} pages...`)
 
     for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
@@ -262,7 +271,6 @@ async function loadPdf(source) {
 
     setStatus(`Ready: ${pdfDocument.numPages} pages`)
   } catch (error) {
-    activeDocument = null
     pagesEl.innerHTML = `<div class="poc-empty">${error?.message || 'Failed to load PDF.'}</div>`
     setStatus('Load failed')
   }
@@ -319,5 +327,20 @@ document.addEventListener('selectionchange', () => {
 window.addEventListener('resize', () => {
   window.requestAnimationFrame(updateSelectionReadout)
 })
+
+window.addEventListener('message', (event) => {
+  if (!IS_EMBEDDED || event.origin !== window.location.origin) return
+  if (event.data?.type !== 'pdf-selection-poc:load' || typeof event.data.url !== 'string') return
+
+  // This bridge exists only for the isolated comparison page. It lets the parent
+  // feed the same HTTP or blob URL to both engines without touching production code.
+  activeSource = { kind: 'url', value: event.data.url }
+  urlInput.value = event.data.url
+  void loadPdf(event.data.url)
+})
+
+if (IS_EMBEDDED && window.parent !== window) {
+  window.parent.postMessage({ type: 'pdf-selection-poc:ready' }, window.location.origin)
+}
 
 void loadPdf(DEFAULT_PDF_URL)

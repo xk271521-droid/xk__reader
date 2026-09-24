@@ -13,7 +13,7 @@ from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from sqlalchemy import delete as sql_delete, select, update as sql_update
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm import Session
@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import AiProvider, Annotation, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperLiteratureCache, PaperSummary, User
+from app.models import AiProvider, Annotation, Folder, InkAnnotation, Paper, PaperFullTranslation, PaperLiteratureCache, PdfAnnotation, User
 from app.schemas.paper import (
     FolderCreate,
     FullTranslationResponse,
@@ -36,8 +36,12 @@ from app.schemas.paper import (
     compact_paper_text,
 )
 from app.services.crypto import decrypt_api_key
-from app.services.ai_provider_manager import resolve_user_provider
+from app.services.ai_provider_manager import (
+    resolve_siliconflow_provider,
+    resolve_user_provider,
+)
 from app.services.background_task_runner import spawn_full_translation_worker_process
+from app.services.full_pdf_translation import delete_full_translation_artifact
 from app.services.notification import compact_notification_text, create_notification
 from app.services.membership import ensure_notes_export_allowed
 from app.services.paper_metadata import (
@@ -45,6 +49,7 @@ from app.services.paper_metadata import (
     is_missing_metadata_value,
     is_weak_metadata_title,
 )
+from app.services.pdf_annotation_sync import parse_annotation_payload
 from app.services.pdf_layout import extract_pdf_page_layout
 from app.services.oss_storage import (
     delete_object as delete_oss_object,
@@ -58,12 +63,23 @@ from app.services.oss_storage import (
     upload_bytes as upload_oss_bytes,
     upload_file as upload_oss_file,
 )
+from app.services.pdfmathtranslate import resolve_paper_source, translation_artifact_file
 from app.services.translate import translate_title
 from app.services.upload_mirror import mirror_upload_file, remove_mirrored_upload
+from app.services.translation_models import candidate_models_for_provider
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
-ALLOWED_PDF_TYPES = {"application/pdf"}
+ALLOWED_PDF_TYPES = {
+    "application/pdf",
+    "application/x-pdf",
+    "application/acrobat",
+    "applications/pdf",
+    "text/pdf",
+    "text/x-pdf",
+}
+PDF_UPLOAD_FALLBACK_TYPES = {"", "application/octet-stream", "binary/octet-stream"}
+PDF_HEADER_SCAN_BYTES = 1024
 TRASH_RETENTION = timedelta(days=7)
 UPLOAD_READ_CHUNK_SIZE = 1024 * 1024
 FULL_TRANSLATION_DISABLED_MESSAGE = "全文翻译功能已暂停。"
@@ -72,6 +88,26 @@ FULL_TRANSLATION_DISABLED_MESSAGE = "全文翻译功能已暂停。"
 def ensure_full_translation_enabled() -> None:
     if not settings.full_translation_enabled:
         raise HTTPException(status_code=404, detail=FULL_TRANSLATION_DISABLED_MESSAGE)
+
+
+def _normalized_upload_content_type(content_type: str | None) -> str:
+    return (content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _is_likely_pdf_upload(upload: UploadFile) -> bool:
+    content_type = _normalized_upload_content_type(upload.content_type)
+    if content_type in ALLOWED_PDF_TYPES:
+        return True
+    filename = (upload.filename or "").strip().lower()
+    return content_type in PDF_UPLOAD_FALLBACK_TYPES and filename.endswith(".pdf")
+
+
+def _stored_file_has_pdf_header(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            return b"%PDF-" in handle.read(PDF_HEADER_SCAN_BYTES)
+    except OSError:
+        return False
 
 
 def build_folder_response(folder: Folder) -> FolderResponse:
@@ -154,7 +190,7 @@ async def _persist_uploaded_pdf(upload: UploadFile, destination: Path, *, max_si
                 if written > max_size_bytes:
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"PDF file exceeds the {max_size_bytes // (1024 * 1024)} MB upload limit.",
+                        detail=f"PDF 文件超过 {max_size_bytes // (1024 * 1024)} MB 上传上限。",
                     )
                 handle.write(chunk)
     except Exception:
@@ -178,16 +214,21 @@ def _append_translation_debug_log(message: str) -> None:
 
 
 def _clear_generated_content(db: Session, paper_id: int, user_id: int) -> None:
+    translations = db.scalars(
+        select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id)
+    ).all()
+    for item in translations:
+        delete_full_translation_artifact(item.artifact_path)
     db.execute(sql_delete(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
-    db.execute(
-        sql_delete(PaperSummary).where(
-            PaperSummary.paper_id == paper_id,
-            PaperSummary.user_id == user_id,
-        )
-    )
 
 
 def _permanently_delete_paper(db: Session, paper: Paper) -> None:
+    # Paper deletion cascades the database row, not the external PDF artifact.
+    # Remove the latter explicitly so a trashed paper cannot leave an orphan.
+    for item in db.scalars(
+        select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper.id)
+    ).all():
+        delete_full_translation_artifact(item.artifact_path)
     actual_file = _resolve_paper_file(paper.file_path)
     if actual_file and actual_file.exists():
         try:
@@ -243,6 +284,11 @@ def build_full_translation_response(item: PaperFullTranslation | None) -> FullTr
         termbase_version=getattr(item, "termbase_version", "") or "",
         failed_blocks_count=failed_blocks_count + pending_blocks_count,
         pending_blocks_count=pending_blocks_count,
+        artifact_ready=bool(getattr(item, "artifact_path", None)),
+        artifact_url=(f"/api/papers/{item.paper_id}/full-translation/file" if getattr(item, "artifact_path", None) else None),
+        artifact_size=int(getattr(item, "artifact_size", 0) or 0),
+        artifact_sha256=getattr(item, "artifact_sha256", None),
+        generation_version=int(getattr(item, "generation_version", 0) or 0),
     )
 
 
@@ -469,6 +515,43 @@ def load_active_provider(db: Session, user_id: int, provider_id: int | None = No
     )
 
 
+def load_full_translation_provider(db: Session, user_id: int) -> AiProvider:
+    """Freeze the dedicated translation credential when a PDF job begins.
+
+    In standalone mode every user owns the API credentials. Reuse the active
+    user provider for full translation so DeepSeek, GLM and other
+    OpenAI-compatible providers work without a shared server key.
+    """
+    provider = load_active_provider(db, user_id)
+    if not provider:
+        raise HTTPException(
+            status_code=409,
+            detail="全文翻译需要先在模型与翻译配置中启用一个 AI 厂商。",
+        )
+    try:
+        api_key = decrypt_api_key(provider.encrypted_api_key).strip()
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail="全文翻译 AI 密钥无法读取，请重新保存配置。") from exc
+    if not api_key or not provider.base_url.strip() or not provider.model.strip():
+        raise HTTPException(status_code=409, detail="全文翻译 AI 厂商配置不完整。")
+    return provider
+
+
+def build_full_translation_provider_snapshot(provider: AiProvider) -> dict[str, object]:
+    """Persist reproducibility metadata only; the API key never enters task data."""
+    models = candidate_models_for_provider(
+        base_url=provider.base_url,
+        configured_model=provider.model,
+    )
+    return {
+        "provider_id": provider.id,
+        "provider_label": provider.label,
+        "provider_base_url": provider.base_url,
+        "provider_model": provider.model,
+        "translation_models": [model.model_id for model in models],
+    }
+
+
 def contains_cjk_text(text: str) -> bool:
     return any("\u3400" <= char <= "\u9fff" for char in text or "")
 
@@ -668,6 +751,7 @@ def _build_annotated_docx(
     file_path: Path,
     annotations: list[Annotation],
     ink_annotations: list[InkAnnotation],
+    pdf_annotations: list[PdfAnnotation] | None = None,
 ) -> bytes:
     from docx import Document
     from docx.enum.text import WD_COLOR_INDEX
@@ -707,7 +791,8 @@ def _build_annotated_docx(
 
     document.add_page_break()
     document.add_heading("Annotations", level=1)
-    if not annotations and not ink_annotations:
+    canonical_annotations = pdf_annotations or []
+    if not annotations and not ink_annotations and not canonical_annotations:
         document.add_paragraph("No annotations.")
     type_labels = {
         "highlight": "Highlight",
@@ -730,6 +815,32 @@ def _build_annotated_docx(
         paragraph = document.add_paragraph()
         paragraph.add_run(f"Page {ink.page_number} - Ink annotation: ").bold = True
         paragraph.add_run(f"{len(_json_list(ink.points_json))} points, color {ink.color or '#15803D'}")
+
+    canonical_type_labels = {
+        "highlight": "Highlight",
+        "underline": "Underline",
+        "squiggly": "Wavy underline",
+        "strikeout": "Strikeout",
+        "ink": "Ink annotation",
+        "lineArrow": "Arrow",
+        "square": "Rectangle",
+        "circle": "Circle",
+        "freeText": "Free text",
+        "textComment": "Text comment",
+    }
+    for annotation in canonical_annotations:
+        payload = parse_annotation_payload(annotation.payload_json)
+        custom = payload.get("custom") if isinstance(payload.get("custom"), dict) else {}
+        text_content = str(
+            custom.get("text")
+            or payload.get("contents")
+            or payload.get("content")
+            or ""
+        ).strip()
+        paragraph = document.add_paragraph()
+        label = canonical_type_labels.get(annotation.annotation_type, annotation.annotation_type)
+        paragraph.add_run(f"Page {annotation.page_index + 1} - {label}: ").bold = True
+        paragraph.add_run(text_content or "[Visual annotation]")
 
     buffer = BytesIO()
     document.save(buffer)
@@ -1921,7 +2032,7 @@ async def upload_paper(
     metadata_json: str = Form(""),
     folder_id: int | None = Form(None),
 ):
-    if file.content_type not in ALLOWED_PDF_TYPES:
+    if not _is_likely_pdf_upload(file):
         raise HTTPException(status_code=400, detail="仅支持 PDF 格式。")
 
     content_length = request.headers.get("content-length", "").strip()
@@ -1930,7 +2041,7 @@ async def upload_paper(
         if int(content_length) > max_request_bytes:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"PDF file exceeds the {settings.papers_max_size_bytes // (1024 * 1024)} MB upload limit.",
+                detail=f"PDF 文件超过 {settings.papers_max_size_bytes // (1024 * 1024)} MB 上传上限。",
             )
 
     # 解析 metadata（前端传的 JSON 字符串）
@@ -1965,7 +2076,11 @@ async def upload_paper(
         max_size_bytes=settings.papers_max_size_bytes,
     )
     if file_size_bytes <= 0:
+        file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="上传文件为空。")
+    if not _stored_file_has_pdf_header(file_path):
+        file_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="仅支持 PDF 格式。")
     mirror_upload_file(file_path, f"papers/{file_name_on_disk}")
     upload_oss_file(
         file_path,
@@ -2063,114 +2178,104 @@ def start_full_translation(
     paper = db.scalar(active_paper_query(paper_id, current_user.id))
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
-
-    from app.services.machine_translation import get_translation_engine
-    from app.services.termbase import load_termbase
-
-    translation_engine = get_translation_engine()
-    _terms, termbase_version = load_termbase()
     item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
-    local_pages = normalize_translation_pages([page.model_dump() for page in payload.pages])
-    local_hash = payload.source_hash or get_translation_source_hash(local_pages)
-    if is_completed_translation_cache_hit(
-        item,
-        parse_mode=payload.parse_mode,
-        local_hash=local_hash,
-        translation_engine=translation_engine,
-        termbase_version=termbase_version,
-    ):
+    # A saved artifact always wins.  Changing a provider or termbase never
+    # triggers a paid retranslation; the user must explicitly request it.
+    if item and item.artifact_path:
         return build_full_translation_response(item)
-    if item and item.status == "running" and item.source_hash.endswith(local_hash):
+    if item and item.status == "running":
         return build_full_translation_response(item)
-
-    pages, parse_engine, parse_summary = maybe_enhance_pages_with_aliyun(paper, local_pages, payload.parse_mode)
-    parsed_hash = get_translation_source_hash(pages)
-    source_hash = build_translation_cache_key(
-        payload.parse_mode,
-        parse_engine,
-        local_hash if parse_engine == "local" else parsed_hash,
-        translation_engine,
-        termbase_version,
-    )
-    total_units = count_translatable_units(pages)
-    if total_units <= 0:
-        raise HTTPException(status_code=400, detail="没有可翻译的正文内容。")
-
+    if not settings.pdfmathtranslate_available:
+        raise HTTPException(status_code=503, detail="PDFMathTranslate 运行环境尚未配置。")
+    if not resolve_paper_source(paper.file_path):
+        raise HTTPException(status_code=404, detail="原始 PDF 文件已丢失，无法开始全文翻译。")
+    provider = load_full_translation_provider(db, current_user.id)
     if not item:
         item = PaperFullTranslation(paper_id=paper_id)
-
-    item.provider_id = payload.provider_id
-    item.source_hash = source_hash
-    item.parse_mode = payload.parse_mode
-    item.parse_engine = parse_engine
-    item.parse_summary = parse_summary
-    item.translation_engine = translation_engine
-    item.termbase_version = termbase_version
+    item.generation_version = max(1, int(item.generation_version or 0))
+    item.provider_id = provider.id
+    item.parse_mode = "server"
+    item.parse_engine = "babeldoc"
+    item.parse_summary = {
+        "engine": "pdfmathtranslate",
+        "renderer": "babeldoc",
+        **build_full_translation_provider_snapshot(provider),
+    }
+    item.translation_engine = "pdfmathtranslate"
+    item.termbase_version = ""
     item.status = "running"
-    item.pages_json = pages
+    item.pages_json = []
     item.completed_units = 0
-    item.total_units = total_units
+    item.total_units = 1
     item.error_message = None
-    set_full_translation_diagnostics(item, pages)
     db.add(item)
     db.commit()
     db.refresh(item)
 
     try:
-        spawn_full_translation_worker_process(item.id, payload.provider_id)
+        spawn_full_translation_worker_process(item.id)
     except Exception as exc:
         item.status = "error"
-        item.error_message = f"启动全文翻译 worker 失败：{exc}"
+        item.error_message = f"启动全文翻译任务失败：{exc}"
         db.add(item)
         db.commit()
         db.refresh(item)
     return build_full_translation_response(item)
 
 
-@router.post("/{paper_id}/full-translation/retry", response_model=FullTranslationResponse)
-def retry_full_translation(
+@router.post("/{paper_id}/full-translation/retranslate", response_model=FullTranslationResponse)
+@router.post("/{paper_id}/full-translation/retry", response_model=FullTranslationResponse, deprecated=True)
+def retranslate_full_translation(
     paper_id: int,
     payload: FullTranslationStartRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FullTranslationResponse:
     ensure_full_translation_enabled()
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="论文不存在。")
     item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
-    if item and item.status == "partial_failed" and item.pages_json:
-        total_units = reset_translation_pages_for_retry(item.pages_json, failed_only=True)
-        if total_units <= 0:
-            item.status = "completed"
-            item.completed_units = item.total_units
-            item.error_message = None
-            set_full_translation_diagnostics(item, item.pages_json or [])
-            flag_modified(item, "pages_json")
-            db.add(item)
-            db.commit()
-            db.refresh(item)
-            return build_full_translation_response(item)
-        item.provider_id = payload.provider_id
-        item.completed_units = 0
-        item.total_units = total_units
-        item.status = "running"
-        item.error_message = None
-        set_full_translation_diagnostics(item, item.pages_json or [])
-        flag_modified(item, "pages_json")
+    if not item or not item.artifact_path:
+        return start_full_translation(paper_id, payload, current_user, db)
+    if item.status == "running":
+        return build_full_translation_response(item)
+    if not settings.pdfmathtranslate_available:
+        raise HTTPException(status_code=503, detail="PDFMathTranslate 运行环境尚未配置。")
+    if not resolve_paper_source(paper.file_path):
+        raise HTTPException(status_code=404, detail="原始 PDF 文件已丢失，无法重新翻译。")
+    provider = load_full_translation_provider(db, current_user.id)
+
+    # Do not erase `artifact_path`: the reader can continue opening the old
+    # result until the explicitly requested replacement has fully succeeded.
+    item.generation_version = max(1, int(item.generation_version or 0)) + 1
+    item.provider_id = provider.id
+    item.parse_mode = "server"
+    item.parse_engine = "babeldoc"
+    item.parse_summary = {
+        "engine": "pdfmathtranslate",
+        "renderer": "babeldoc",
+        "retranslate": True,
+        **build_full_translation_provider_snapshot(provider),
+    }
+    item.translation_engine = "pdfmathtranslate"
+    item.termbase_version = ""
+    item.status = "running"
+    item.completed_units = 0
+    item.total_units = 1
+    item.error_message = None
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    try:
+        spawn_full_translation_worker_process(item.id)
+    except Exception as exc:
+        item.status = "completed" if item.artifact_path else "error"
+        item.error_message = f"启动重新翻译任务失败：{exc}"
         db.add(item)
         db.commit()
         db.refresh(item)
-        try:
-            spawn_full_translation_worker_process(item.id, payload.provider_id)
-        except Exception as exc:
-            item.status = "error"
-            item.error_message = f"启动全文翻译 worker 失败：{exc}"
-            db.add(item)
-            db.commit()
-            db.refresh(item)
-        return build_full_translation_response(item)
-    if item:
-        db.delete(item)
-        db.commit()
-    return start_full_translation(paper_id, payload, current_user, db)
+    return build_full_translation_response(item)
 
 
 @router.post("/{paper_id}/full-translation/cancel", response_model=FullTranslationResponse)
@@ -2210,6 +2315,36 @@ def stream_full_translation(
     return build_full_translation_response(item)
 
 
+def _get_translation_artifact_or_404(item: PaperFullTranslation | None) -> Path:
+    artifact = translation_artifact_file(item.artifact_path if item else None)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="全文译文 PDF 尚未生成或已丢失。")
+    return artifact
+
+
+@router.get("/{paper_id}/full-translation/file")
+def get_full_translation_file(
+    paper_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Authenticated PDF endpoint used by the right-hand PDFium reader."""
+    ensure_full_translation_enabled()
+    paper = db.scalar(active_paper_query(paper_id, current_user.id))
+    if not paper:
+        raise HTTPException(status_code=404, detail="论文不存在。")
+    item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
+    artifact = _get_translation_artifact_or_404(item)
+    return FileResponse(
+        path=str(artifact),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(_download_base_name(paper))}-zh.pdf",
+            "Cache-Control": "private, max-age=300",
+        },
+    )
+
+
 @router.get("/{paper_id}/full-translation/download")
 def download_full_translation(
     paper_id: int,
@@ -2221,20 +2356,14 @@ def download_full_translation(
     if not paper:
         raise HTTPException(status_code=404, detail="论文不存在。")
     item = db.scalar(select(PaperFullTranslation).where(PaperFullTranslation.paper_id == paper_id))
-    if not item or item.status not in {"completed", "partial_failed"}:
-        raise HTTPException(status_code=404, detail="全文翻译尚未完成。")
-
-    chunks: list[str] = []
-    for page in item.pages_json or []:
-        chunks.append(f"\n\n# 第 {page.get('page_number')} 页\n")
-        for block in page.get("blocks") or []:
-            text = get_download_translation_text(block)
-            if text:
-                chunks.append(text)
-    content = "\n\n".join(chunks).strip()
-    filename = (paper.title or paper.file_name or "translation").replace("/", " ").replace("\\", " ").strip()
-    headers = {"Content-Disposition": f'attachment; filename="{filename[:80]}-translation.md"'}
-    return PlainTextResponse(content, media_type="text/markdown; charset=utf-8", headers=headers)
+    artifact = _get_translation_artifact_or_404(item)
+    filename = f"{_download_base_name(paper)}-zh.pdf"
+    return FileResponse(
+        path=str(artifact),
+        filename=filename,
+        media_type="application/pdf",
+        headers=_attachment_headers(filename),
+    )
 
 
 @router.get("/{paper_id}/layout/{page_number}")
@@ -2388,7 +2517,6 @@ def download_paper_pdf(
         .where(InkAnnotation.paper_id == paper_id, InkAnnotation.user_id == current_user.id)
         .order_by(InkAnnotation.page_number, InkAnnotation.id)
     ).all()
-
     if not annotations and not ink_annotations:
         from fastapi.responses import FileResponse
 
@@ -2437,11 +2565,26 @@ def download_paper_word(
         .where(InkAnnotation.paper_id == paper_id, InkAnnotation.user_id == current_user.id)
         .order_by(InkAnnotation.page_number, InkAnnotation.id)
     ).all()
+    pdf_annotations = db.scalars(
+        select(PdfAnnotation)
+        .where(
+            PdfAnnotation.paper_id == paper_id,
+            PdfAnnotation.user_id == current_user.id,
+            PdfAnnotation.deleted_at.is_(None),
+        )
+        .order_by(PdfAnnotation.page_index, PdfAnnotation.id)
+    ).all()
 
     ensure_notes_export_allowed(db, current_user.id)
 
     try:
-        content = _build_annotated_docx(paper, actual_file, annotations, ink_annotations)
+        content = _build_annotated_docx(
+            paper,
+            actual_file,
+            annotations,
+            ink_annotations,
+            pdf_annotations,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to export Word document: {exc}") from exc
 

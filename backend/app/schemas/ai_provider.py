@@ -18,6 +18,20 @@ class AiProviderUpdate(BaseModel):
     is_active: bool | None = None
 
 
+class AiProviderTestRequest(BaseModel):
+    """Connection test input. Values are transient and never persisted here."""
+
+    provider_id: int | None = Field(default=None, ge=1)
+    base_url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+    model: str | None = Field(default=None, max_length=100)
+
+
+class AiProviderTestResponse(BaseModel):
+    success: bool
+    message: str
+
+
 class AiProviderResponse(BaseModel):
     id: int
     label: str
@@ -31,12 +45,3 @@ class AiProviderResponse(BaseModel):
 
 class AiProviderListResponse(BaseModel):
     providers: list[AiProviderResponse]
-
-
-class SummarizeRequest(BaseModel):
-    text: str = Field(min_length=100, max_length=50000)
-    provider_id: int = Field(ge=1)
-
-
-class SummarizeResponse(BaseModel):
-    summary: str

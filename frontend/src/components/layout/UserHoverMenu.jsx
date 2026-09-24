@@ -19,23 +19,14 @@ const STATUS_LABELS = {
 const PLAN_LIMIT_FALLBACKS = {
   free: {
     selection_explain_daily: 100,
-    selection_context_daily: 50,
-    summary_card_monthly: 25,
-    matrix_run_monthly: 3,
   },
   vip_monthly: {
     selection_explain_daily: 300,
-    selection_context_daily: 100,
-    summary_card_monthly: 100,
-    matrix_run_monthly: 10,
   },
 }
 
 const QUOTA_LABELS = {
   selection_explain_daily: '划词解释',
-  selection_context_daily: '上下文理解',
-  summary_card_monthly: '卡片总结',
-  matrix_run_monthly: '文献矩阵',
 }
 
 function getPlanLimit(membershipPlans, planCode, quotaKey) {
@@ -136,18 +127,9 @@ export function UserHoverMenu({
   const unreadCount = Number(notificationSummary?.unread_count || 0)
   const planCode = currentUser?.membership?.plan_code || 'free'
   const explainQuota = currentUser?.usage?.selection_explain_daily
-  const contextQuota = currentUser?.usage?.selection_context_daily
-  const summaryQuota = currentUser?.usage?.summary_card_monthly
-  const matrixQuota = currentUser?.usage?.matrix_run_monthly
   const explainLimit = getPlanLimit(membershipPlans, planCode, 'selection_explain_daily')
-  const contextLimit = getPlanLimit(membershipPlans, planCode, 'selection_context_daily')
-  const summaryLimit = getPlanLimit(membershipPlans, planCode, 'summary_card_monthly')
-  const matrixLimit = getPlanLimit(membershipPlans, planCode, 'matrix_run_monthly')
   const quotaCards = [
     ['selection_explain_daily', explainQuota, explainLimit],
-    ['selection_context_daily', contextQuota, contextLimit],
-    ['summary_card_monthly', summaryQuota, summaryLimit],
-    ['matrix_run_monthly', matrixQuota, matrixLimit],
   ].map(([key, item, limit]) => {
     const quota = normalizeQuota(item, limit)
     return {

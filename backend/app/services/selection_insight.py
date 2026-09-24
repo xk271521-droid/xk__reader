@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import List
-
-from app.models import AiProvider
+from typing import List, Literal
 
 from app.schemas.selection import (
     SelectionGlossaryItem,
@@ -12,6 +10,11 @@ from app.schemas.selection import (
 from app.services.machine_translation import translate_with_tencent_mt
 from app.services.termbase import load_termbase
 from app.services.translate import translate_text
+from app.services.llm import translate_text_with_openai
+from app.services.translation_models import (
+    FULL_TRANSLATION_MODEL_BY_KEY,
+    is_siliconflow_endpoint,
+)
 
 STOPWORDS = {
     "about", "after", "among", "and", "approach", "based", "between",
@@ -19,6 +22,19 @@ STOPWORDS = {
     "performance", "results", "study", "that", "their", "these",
     "this", "using", "with",
 }
+
+TranslationProvider = Literal[
+    "baidu",
+    "tencent",
+    "siliconflow_glm4",
+    "siliconflow_qwen3",
+    "siliconflow_glmz1",
+    "siliconflow_hunyuan",
+]
+
+
+class TranslationProviderUnavailable(RuntimeError):
+    """Raised when the explicitly selected translation provider cannot respond."""
 
 TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9\-]{1,}\b")
 ENDING_PUNCTUATION_RE = re.compile(r"[.!?;:]\s*$")
@@ -129,11 +145,47 @@ def build_local_translation(text: str, text_kind: str) -> str:
     return f"暂未拿到实时译文，先保留当前原文重点：{preview}"
 
 
-def build_translation_result(text: str, text_kind: str, domain: str = "") -> tuple[str, str]:
-    translated_text = translate_text(text, domain=domain)
-    if translated_text and translated_text != text:
-        source = "百度领域翻译 + AI 阅读助手" if domain else "百度通用翻译 + AI 阅读助手"
-        return translated_text, source
+def build_translation_result(
+    text: str,
+    text_kind: str,
+    domain: str = "",
+    translation_provider: TranslationProvider = "baidu",
+    provider_base_url: str = "",
+    provider_api_key: str = "",
+    context: str = "",
+    baidu_appid: str = "",
+    baidu_secret: str = "",
+) -> tuple[str, str]:
+    if translation_provider == "baidu":
+        if not baidu_appid or not baidu_secret:
+            raise TranslationProviderUnavailable("尚未配置百度翻译，请前往【账户中心 - AI 厂商与翻译配置】填写自己的百度翻译 APP ID 和密钥。")
+        translated_text = translate_text(text, domain=domain, appid=baidu_appid, secret=baidu_secret)
+        if translated_text:
+            source = "百度领域翻译" if domain else "百度通用翻译"
+            return translated_text, source
+        raise TranslationProviderUnavailable("百度翻译调用失败，请检查密钥是否正确或额度是否充足。")
+
+    if translation_provider in FULL_TRANSLATION_MODEL_BY_KEY:
+        model = FULL_TRANSLATION_MODEL_BY_KEY[translation_provider]
+        if not provider_api_key or not is_siliconflow_endpoint(provider_base_url):
+            raise TranslationProviderUnavailable(
+                "请先在 AI 厂商配置中添加 SiliconFlow 翻译厂商，再使用该备用模型。"
+            )
+        try:
+            translated_text = translate_text_with_openai(
+                base_url=provider_base_url,
+                api_key=provider_api_key,
+                model=model.model_id,
+                text=text,
+                context=context,
+            )
+        except Exception as exc:
+            raise TranslationProviderUnavailable(
+                f"{model.label} 暂时不可用：{exc}"
+            ) from exc
+        if translated_text:
+            return translated_text, f"SiliconFlow · {model.label}"
+        raise TranslationProviderUnavailable(f"{model.label} 未返回有效译文，请稍后重试。")
 
     try:
         terms, _ = load_termbase()
@@ -142,12 +194,13 @@ def build_translation_result(text: str, text_kind: str, domain: str = "") -> tup
             terms=terms,
         )
         tencent_text = str(translated_items.get("selection") or "").strip()
-        if tencent_text and tencent_text != text:
-            return tencent_text, "腾讯机器翻译 + AI 阅读助手"
-    except Exception:
-        pass
+        if tencent_text:
+            return tencent_text, "腾讯机器翻译"
+    except Exception as exc:
+        # The caller selected Tencent, so do not silently replace it with Baidu.
+        raise TranslationProviderUnavailable(f"腾讯机器翻译暂时不可用：{exc}") from exc
 
-    return build_local_translation(text, text_kind), "AI 阅读助手"
+    raise TranslationProviderUnavailable("腾讯机器翻译未返回有效译文，请稍后重试。")
 
 
 def build_selection_insight(
@@ -155,9 +208,14 @@ def build_selection_insight(
     text: str,
     paper_title: str | None,
     domain: str = "",
+    translation_provider: TranslationProvider = "baidu",
     summary: str | None = None,
     context: str = "",
     provider_id: int | None = None,
+    provider_base_url: str = "",
+    provider_api_key: str = "",
+    baidu_appid: str = "",
+    baidu_secret: str = "",
 ) -> SelectionInsightResponse:
     normalized_text = normalize_text(text)
     text_kind = detect_text_kind(normalized_text)
@@ -168,72 +226,19 @@ def build_selection_insight(
         normalized_text,
         text_kind,
         domain=domain,
+        translation_provider=translation_provider,
+        provider_base_url=provider_base_url,
+        provider_api_key=provider_api_key,
+        context=context,
+        baidu_appid=baidu_appid,
+        baidu_secret=baidu_secret,
     )
 
-    # 解释由前端单独调 explain 端点获取，主接口不做 AI 调用
     return SelectionInsightResponse(
         translation=translation,
-        explanation="",
         keywords=keywords,
         source=source,
         text_kind=text_kind,
         focus_points=build_focus_points(text_kind, keywords),
         glossary=glossary,
     )
-
-
-AI_OOPS = [
-    "🤖 哎呀，AI 小助手刚走神了，没来得及分析这段——先看看下面的提示凑合用？",
-    "😅 本想让 AI 帮你拆解的，结果它溜号了。先看看人类的提示吧！",
-    "🙈 AI 说它还没学会读这一段……不过别担心，下面的阅读提示也能帮到你。",
-    "🤔 AI 挠了挠头表示没看懂，但下面的小贴士应该能搭把手。",
-    "😴 AI 可能睡着了（毕竟它不用喝咖啡），先看阅读提示顶着！",
-    "🫠 AI 表示这段超出它的理解范围了——不过别急，试试看下面的阅读建议。",
-]
-
-
-def _ai_oops() -> str:
-    import random
-    return random.choice(AI_OOPS)
-
-
-FRIENDLY_HINT = (
-    "\n\n💡 **小提示**：在右上角头像 → AI 配置 里添加并启用一个厂商（比如 DeepSeek），"
-    "下次划词就能享受 AI 加持啦～"
-)
-
-
-def _ai_explanation_or_fallback(
-    *,
-    text: str,
-    text_kind: str,
-    paper_title: str | None,
-    glossary: List[SelectionGlossaryItem],
-    summary: str | None,
-    context: str,
-    provider: AiProvider | None,
-    api_key: str = "",
-) -> str:
-    if not provider or not api_key:
-        return _ai_oops() + FRIENDLY_HINT
-
-    if not summary or not summary.strip():
-        return _ai_oops() + "\n\n> 还没生成论文摘要，AI 暂时没有上下文可以参考。先读完或者生成摘要再试～"
-
-    try:
-        from app.services.llm import explain_selection
-
-        result = explain_selection(
-            base_url=provider.base_url,
-            api_key=api_key,
-            model=provider.model,
-            selected_text=text,
-            summary=summary,
-            context=context,
-        )
-        if result:
-            return result
-    except Exception:
-        pass
-
-    return _ai_oops()

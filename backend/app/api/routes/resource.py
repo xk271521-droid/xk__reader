@@ -18,13 +18,11 @@ from app.models import (
     PaperNoteBlock,
     PaperNoteNode,
     PaperResourceLayout,
-    PaperSummary,
     ShapeAnnotation,
     User,
 )
 from app.schemas.resource import ResourceLayoutPayload, ResourceLayoutResponse
 from app.services.annotation_metrics import count_effective_annotations
-from app.services.paper_summary import is_summary_stale
 
 router = APIRouter(prefix="/resources", tags=["resources"])
 
@@ -40,44 +38,11 @@ RESOURCE_META: dict[str, dict[str, str]] = {
         "color": "#EF4444",
         "preview": "包含当前保留的高亮、下划线或波浪线标注。",
     },
-    "summary_overview": {
-        "label": "整篇总结",
-        "color": "#0891B2",
-        "preview": "论文主线、方法、实验、结论和局限。",
-    },
-    "summary_annotations": {
-        "label": "标注总结",
-        "color": "#16A34A",
-        "preview": "围绕当前标注形成的主题复盘。",
-    },
-    "summary_review": {
-        "label": "综述卡片",
-        "color": "#7C3AED",
-        "preview": "变量指标、核心发现、创新局限和引用价值。",
-    },
-    "summary_reproduction": {
-        "label": "复现总结",
-        "color": "#F59E0B",
-        "preview": "数据集、参数、公式、指标、环境和缺失项。",
-    },
-    "summary_meeting": {
-        "label": "组会稿",
-        "color": "#DB2777",
-        "preview": "适合组会讲述的结构化汇报材料。",
-    },
     "notes": {
         "label": "笔记",
         "color": "#CA8A04",
         "preview": "阅读过程中沉淀的摘录、截图和文字笔记。",
     },
-}
-
-SUMMARY_RESOURCE_TYPES = {
-    "overview": "summary_overview",
-    "annotations": "summary_annotations",
-    "review": "summary_review",
-    "reproduction": "summary_reproduction",
-    "meeting": "summary_meeting",
 }
 
 RESOURCE_ORDER = list(RESOURCE_META)
@@ -138,7 +103,6 @@ def get_resource_overview(
                 "translation_count": 0,
                 "annotation_count": 0,
                 "note_count": 0,
-                "summary_count": 0,
             },
             "papers": [],
         }
@@ -285,30 +249,6 @@ def get_resource_overview(
             _resource("notes", count=display_count, updated_at=updated_at, preview=preview)
         )
 
-    summary_count = 0
-    summaries = db.scalars(
-        select(PaperSummary)
-        .where(
-            PaperSummary.user_id == current_user.id,
-            PaperSummary.paper_id.in_(paper_ids),
-            PaperSummary.status == "generated",
-        )
-    ).all()
-    for item in summaries:
-        resource_type = SUMMARY_RESOURCE_TYPES.get(item.summary_type)
-        paper = paper_by_id.get(item.paper_id)
-        if not resource_type or not paper:
-            continue
-        content = item.content_json if isinstance(item.content_json, dict) else {}
-        preview = str(content.get("preview") or RESOURCE_META[resource_type]["preview"])
-        status = "stale" if is_summary_stale(db, paper, item) else "ready"
-        if status == "stale":
-            preview = f"内容可能需更新：{preview}"
-        summary_count += 1
-        resources_by_paper[item.paper_id].append(
-            _resource(resource_type, updated_at=item.updated_at, preview=preview[:120], status=status)
-        )
-
     items: list[dict[str, Any]] = []
     resource_count = 0
     translation_count = len(translation_rows)
@@ -351,7 +291,6 @@ def get_resource_overview(
             "translation_count": translation_count,
             "annotation_count": total_annotations,
             "note_count": total_notes,
-            "summary_count": summary_count,
         },
         "papers": items,
     }

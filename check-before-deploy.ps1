@@ -32,10 +32,32 @@ function Test-PowerShellSyntax {
 
 function Get-DeployScanFiles {
   $allowedExtensions = @('.ps1', '.py', '.js', '.jsx', '.ts', '.tsx', '.json', '.example')
-  Get-ChildItem -LiteralPath $root -Recurse -File |
+  # Use Git's tracked/untracked source view instead of recursively walking
+  # dependency and generated directories. This keeps the secret scan bounded
+  # even when local WASM/vendor assets or isolated Python environments exist.
+  $git = Get-Command git -ErrorAction SilentlyContinue
+  if ($git) {
+    Push-Location $root
+    try {
+      $scanFiles = @(
+        git ls-files --cached --others --exclude-standard |
+        ForEach-Object {
+          $path = Join-Path $root $_
+          if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Get-Item -LiteralPath $path
+          }
+        }
+      )
+    } finally {
+      Pop-Location
+    }
+  } else {
+    $scanFiles = @(Get-ChildItem -LiteralPath $root -Recurse -File)
+  }
+  $scanFiles |
     Where-Object {
-      $_.FullName -notmatch '\\(\.git|node_modules|dist|build|uploads|logs|__pycache__|\.pytest_cache)\\' -and
-      $_.FullName -notmatch '\\(\.claude|\.codex)\\' -and
+      $_.FullName -notmatch '\\(\.git|node_modules|dist|build|uploads|logs|__pycache__|\.pytest_cache|\.venvs|output|tmp|server-backups|tests)\\' -and
+      $_.FullName -notmatch '\\(\.claude|\.codex|frontend[\\/]public[\\/]vendor|frontend[\\/]\.tmp)\\' -and
       ($_.Name -eq '.env.example' -or $_.Name -notmatch '^\.env(\.|$)') -and
       $allowedExtensions -contains $_.Extension
     }

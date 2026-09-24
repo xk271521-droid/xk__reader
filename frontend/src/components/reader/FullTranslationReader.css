@@ -1,0 +1,67 @@
+/*
+ * The PDFium reader uses height: 100% internally. Keep this dedicated split
+ * pane in the flex chain; without min-height: 0 and a flexible child, the
+ * engine mounts successfully but its viewport collapses to zero height.
+ */
+.full-translation-view--pdf .full-translation-pdf-split {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  overflow: hidden;
+  background: #eef2f6;
+}
+
+.full-translation-view--pdf .full-translation-pdf-split.is-translation-only {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.full-translation-view--pdf .full-translation-pdf-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #eef2f6;
+}
+
+.full-translation-view--pdf .full-translation-pdf-pane + .full-translation-pdf-pane {
+  border-left: 1px solid #dbe3ed;
+}
+
+.full-translation-view--pdf .full-translation-pdf-split.is-translation-only .full-translation-pdf-pane {
+  border-left: 0;
+}
+
+.full-translation-view--pdf .full-translation-pdf-pane__label {
+  flex: 0 0 34px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  border-bottom: 1px solid #dbe3ed;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.full-translation-view--pdf .full-translation-pdf-pane > .embedpdf-reader-shell,
+.full-translation-view--pdf .full-translation-pdf-pane > .embedpdf-state {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+@media (max-width: 780px) {
+  .full-translation-view--pdf .full-translation-pdf-split {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(260px, 1fr) minmax(260px, 1fr);
+    overflow: auto;
+  }
+
+  .full-translation-view--pdf .full-translation-pdf-pane + .full-translation-pdf-pane {
+    border-top: 1px solid #dbe3ed;
+    border-left: 0;
+  }
+}

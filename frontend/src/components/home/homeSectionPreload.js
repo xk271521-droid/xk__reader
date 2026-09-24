@@ -6,7 +6,6 @@ export const HOME_SECTION_COMPONENT_LOADERS = {
   'paper-format': () => import('./PaperFormatPage').then((module) => module.PaperFormatPage),
   insights: () =>
     import('./ReadingInsightSection').then((module) => module.ReadingInsightSection),
-  matrix: () => import('./ResearchMatrixPage').then((module) => module.ResearchMatrixPage),
 }
 
 export function loadHomeSectionComponent(sectionId, loaders = HOME_SECTION_COMPONENT_LOADERS) {

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import time_ns
 from typing import Annotated
@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import AiProvider, FeedbackTicket, Folder, Notification, ResearchMatrixRun, User, UserAgreement, UserProfile, VerificationCode
+from app.models import AiProvider, FeedbackTicket, Folder, Notification, User, UserAgreement, UserProfile, VerificationCode
 from app.schemas.auth import (
     AuthResponse,
     CaptchaChallengeResponse,
@@ -454,8 +454,17 @@ def login(
     db.refresh(locked_user, attribute_names=["profile"])
 
     auth_guard.record_success("login", account_keys=[normalized_account])
+    token_lifetime = timedelta(
+        minutes=settings.access_token_remember_minutes
+        if payload.remember_me
+        else settings.access_token_expire_minutes
+    )
     return AuthResponse(
-        access_token=create_access_token(locked_user.uid, locked_user.token_version),
+        access_token=create_access_token(
+            locked_user.uid,
+            locked_user.token_version,
+            expires_delta=token_lifetime,
+        ),
         user=build_user_response(db, locked_user),
     )
 
@@ -572,7 +581,6 @@ def delete_me(
 
     db.execute(delete(Notification).where(Notification.user_id == current_user.id))
     db.execute(delete(AiProvider).where(AiProvider.user_id == current_user.id))
-    db.execute(delete(ResearchMatrixRun).where(ResearchMatrixRun.user_id == current_user.id))
     if targets:
         db.execute(delete(VerificationCode).where(VerificationCode.target.in_(targets)))
 

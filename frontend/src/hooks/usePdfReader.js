@@ -23,8 +23,6 @@ import {
   emptyTrash as apiEmptyTrash,
   fetchFolders,
   fetchPapers,
-  fetchAiProviders,
-  fetchPaperSummary,
   fetchReadingStats,
   fetchTrashPapers,
   getPaperFileUrl,
@@ -89,6 +87,10 @@ function cleanMetadataText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim()
 }
 
+function hasChineseText(value) {
+  return /[\u3400-\u9fff]/.test(String(value || ''))
+}
+
 function findDoi(text) {
   return (text.match(/\b10\.\d{4,9}\/[-._;()/:A-Z0-9]+/i)?.[0] ?? '').replace(/[),.;]+$/, '')
 }
@@ -106,6 +108,33 @@ function isWeakMetadataTitle(title, fileName = '') {
   if (cleanedFile && cleanedTitle.toLowerCase() === cleanedFile.toLowerCase()) return true
   if (/^\d{4}\.\d{4,5}(v\d+)?$/i.test(cleanedTitle)) return true
   if (/^arxiv[:\s-]*\d{4}\.\d{4,5}(v\d+)?$/i.test(cleanedTitle)) return true
+  if (cleanedTitle.length > 180) return true
+  if (cleanedTitle.length > 80 && /(摘要|关键词|关键字|Abstract\b|Keywords?\b|大学|学院|研究中心|中国[；;])/i.test(cleanedTitle)) {
+    return true
+  }
+  return false
+}
+
+function isAbstractStart(line) {
+  return /^(abstract\b|摘要|摘\s*要)(?:[\s.：:\-–—]|$)/i.test(line)
+}
+
+function isKeywordStart(line) {
+  return /^(keywords?|key words|index terms|ccs concepts|关键词|关键字)(?:[\s.：:\-–—]|$)/i.test(line)
+}
+
+function isSectionStart(line) {
+  return (
+    /^(\d+\.?\s*)?(abstract|keywords?|key words|index terms|ccs concepts|introduction|1\s+introduction|references)\b/i.test(line)
+    || /^(\d+[.、]?\s*)?(摘要|摘\s*要|关键词|关键字|引言|绪论|前言|参考文献|中图分类号|文献标识码|文章编号)(?:[\s：:]|$)/.test(line)
+  )
+}
+
+function isLikelyJournalHeading(line) {
+  const value = cleanMetadataText(line)
+  if (!value) return false
+  if (/[（(]\s*中英文\s*[）)]/i.test(value)) return true
+  if (/\b(ISSN|CN\s*\d|DOI)\b/i.test(value) && value.length < 120) return true
   return false
 }
 
@@ -119,16 +148,30 @@ function isFrontMatterNoise(line) {
     || /^published\b/i.test(line)
     || /^preprint\b/i.test(line)
     || /^copyright\b/i.test(line)
+    || /^(收稿日期|基金项目|作者简介|通讯作者|责任编辑|中图分类号|文献标识码|文章编号)/.test(line)
+    || isLikelyJournalHeading(line)
     || /^\d+$/.test(line)
   )
 }
 
 function isLikelyAffiliationLine(line) {
-  return /\b(university|institute|department|school|college|laboratory|lab|academy|google|microsoft|facebook|meta|openai|research|@)\b/i.test(line)
+  return (
+    /\b(university|institute|department|school|college|laboratory|lab|academy|google|microsoft|facebook|meta|openai|research|faculty|centre|center|@)\b/i.test(line)
+    || /(大学|学院|研究院|研究所|实验室|重点实验室|工程中心|研究中心|技术中心|科学院|农业科学院|教育部|信息学院|工程学院|系|省|市|中国|邮编|基金项目|通讯作者)/.test(line)
+  )
 }
 
 function isLikelyAuthorLine(line) {
-  if (!line || isLikelyAffiliationLine(line)) return false
+  if (!line || isLikelyAffiliationLine(line) || isSectionStart(line)) return false
+  if (hasChineseText(line)) {
+    const withoutMarkers = line
+      .replace(/[0-9*†‡§,，;；()（）\[\]\s.-]+/g, ' ')
+      .trim()
+    const chineseNames = withoutMarkers
+      .split(/[、，,;；\s]+/)
+      .filter((part) => /^[\u3400-\u9fff]{2,4}$/.test(part))
+    return line.length <= 140 && chineseNames.length >= 2
+  }
   const separators = (line.match(/[,;]/g) || []).length
   const hasAnd = /\band\b/i.test(line)
   const capitalizedWords = line.match(/\b[A-Z][A-Za-z.'-]{1,}\b/g) || []
@@ -141,12 +184,14 @@ function isLikelyAuthorLine(line) {
 function extractAbstractFromLines(lines, abstractIndex) {
   if (abstractIndex < 0) return ''
   const chunks = []
-  const first = lines[abstractIndex].replace(/^abstract[\s.:-]*/i, '').trim()
+  const first = lines[abstractIndex]
+    .replace(/^(abstract\b|摘要|摘\s*要)[\s.：:\-–—]*/i, '')
+    .trim()
   if (first) chunks.push(first)
   for (let index = abstractIndex + 1; index < lines.length; index += 1) {
     const line = lines[index]
-    if (/^(keywords|index terms|ccs concepts)\b/i.test(line)) break
-    if (/^(\d+\.?\s*)?(introduction|1\s+introduction)\b/i.test(line)) break
+    if (isKeywordStart(line)) break
+    if (isSectionStart(line) && !isAbstractStart(line)) break
     chunks.push(line)
     if (chunks.join(' ').length > 1200) break
   }
@@ -154,13 +199,32 @@ function extractAbstractFromLines(lines, abstractIndex) {
 }
 
 function extractKeywordsFromLines(lines) {
-  const index = lines.findIndex((line) => /^(keywords|index terms)\b/i.test(line))
+  const index = lines.findIndex((line) => isKeywordStart(line))
   if (index < 0) return ''
-  const first = lines[index].replace(/^(keywords|index terms)[\s.:-]*/i, '').trim()
-  const next = lines[index + 1] && !/^(abstract|introduction)\b/i.test(lines[index + 1])
+  const first = lines[index]
+    .replace(/^(keywords?|key words|index terms|ccs concepts|关键词|关键字)[\s.：:\-–—]*/i, '')
+    .trim()
+  const next = lines[index + 1] && !isSectionStart(lines[index + 1])
     ? lines[index + 1]
     : ''
   return cleanMetadataText([first, next].filter(Boolean).join(' ')).slice(0, 400)
+}
+
+function sanitizeExtractedTitle(title, fileName = '') {
+  let value = cleanMetadataText(title)
+  if (!value) return ''
+  value = value.replace(/^[\u3400-\u9fff]{2,14}\s*[（(]\s*中英文\s*[）)]\s+[A-Za-z][A-Za-z\s-]{4,48}\s+/, '')
+  value = value.split(/\s+(?:摘要|摘\s*要|关键词|关键字|Abstract\b|Keywords?\b)/i)[0]
+  value = value.replace(/\s*[（(]\s*\d+\s*[.．、].*$/, '')
+  value = value.replace(/\s+\d+(?:\s*[，,]\s*\d+)+\s*\*?.*$/, '')
+  value = value.replace(/\s+[\u3400-\u9fff]{2,4}(?:[，、,]\s*[\u3400-\u9fff]{2,4}){1,}.*$/, '')
+  value = cleanMetadataText(value)
+  const fileTitle = cleanMetadataText(fileName).replace(/\.pdf$/i, '')
+  if (!value || (fileTitle && value.toLowerCase() === fileTitle.toLowerCase())) return value
+  if (value.length > 160) {
+    value = cleanMetadataText(value.slice(0, 160)).replace(/[，,;；:.：、\s]+$/, '')
+  }
+  return value
 }
 
 function extractFrontMatterHints(firstPagesText, info, file) {
@@ -169,7 +233,7 @@ function extractFrontMatterHints(firstPagesText, info, file) {
     .split(/\n+/)
     .map(cleanMetadataText)
     .filter(Boolean)
-  const abstractIndex = lines.findIndex((line) => /^abstract\b/i.test(line))
+  const abstractIndex = lines.findIndex((line) => isAbstractStart(line))
   const arxivId = findArxivId(rawText)
   const arxivCategory = rawText.match(/\[([a-z-]+\.[A-Z]{2}(?:\.[A-Z]{2})?)\]/)?.[1] || ''
   const frontMatter = lines
@@ -180,8 +244,10 @@ function extractFrontMatterHints(firstPagesText, info, file) {
   let titleEndIndex = -1
   for (let index = 0; index < frontMatter.length; index += 1) {
     const line = frontMatter[index]
+    if (isSectionStart(line)) break
     if (title && isLikelyAuthorLine(line)) break
     if (title && isLikelyAffiliationLine(line)) break
+    if (!title && (isLikelyAuthorLine(line) || isLikelyAffiliationLine(line))) continue
     title = [title, line].filter(Boolean).join(' ')
     titleEndIndex = index
     if (title.length > 24 && /[.!?]$/.test(line)) break
@@ -201,7 +267,7 @@ function extractFrontMatterHints(firstPagesText, info, file) {
   }
 
   return {
-    title: cleanMetadataText(title).slice(0, 300),
+    title: sanitizeExtractedTitle(title, file.name).slice(0, 300),
     author: cleanMetadataText(authorLines.join('; ')).slice(0, 500),
     subject: extractAbstractFromLines(lines, abstractIndex),
     keywords: extractKeywordsFromLines(lines) || arxivCategory,
@@ -426,26 +492,6 @@ async function extractFirstPagesText(documentProxy, maxPages = 5) {
   return chunks.join('\n')
 }
 
-async function extractFullText(documentProxy, maxPages = 80, maxChars = 50000) {
-  const pageCount = Math.min(documentProxy.numPages, maxPages)
-  const chunks = []
-  let totalChars = 0
-  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
-    const page = await documentProxy.getPage(pageNumber)
-    const textContent = await page.getTextContent()
-    const text = textContent.items.map((item) => item.str || '').join(' ')
-    const cleanText = text.trim()
-    if (cleanText) {
-      chunks.push(`[第 ${pageNumber} 页]\n${cleanText}`)
-      totalChars += text.length
-      if (totalChars >= maxChars) {
-        break
-      }
-    }
-  }
-  return chunks.join('\n')
-}
-
 async function extractPaperMetadata(documentProxy, file) {
   const metadataResult = await documentProxy.getMetadata().catch(() => null)
   const info = metadataResult?.info ?? {}
@@ -511,18 +557,16 @@ function getErrorMessage(error) {
   return '未知错误'
 }
 
-export function usePdfReader({ currentUser } = {}) {
+export function usePdfReader({ currentUser, loadPdfDocument = true } = {}) {
   const fileInputRef = useRef(null)
   const importFolderIdRef = useRef('')
   const shouldActivateImportedPaperRef = useRef(true)
   const paperResourcesRef = useRef(new Map())
-  const summaryMapRef = useRef(new Map())
-  const summaryIdleHandlesRef = useRef(new Map())
-  const fullTextMapRef = useRef(new Map())
   const uncategorizedFolderIdRef = useRef('')
   const lastSyncUserRef = useRef(null)
   const readingSessionsRef = useRef(new Map())
   const openTabIdsRef = useRef([])
+  const closedPaperIdsRef = useRef(new Set())
   const [activeView, setActiveView] = useState('home')
   const [papers, setPapers] = useState([])
   const [folders, setFolders] = useState([])
@@ -533,8 +577,6 @@ export function usePdfReader({ currentUser } = {}) {
   const [importConflict, setImportConflict] = useState(null)
   const [readingStats, setReadingStats] = useState(null)
   const [readingDurationVersion, setReadingDurationVersion] = useState(0)
-  const [paperSummaries, setPaperSummaries] = useState({})
-  const [paperFullTexts, setPaperFullTexts] = useState({})
 
   function setOpenTabIds(nextOpenTabIds) {
     const nextIds = typeof nextOpenTabIds === 'function'
@@ -556,14 +598,6 @@ export function usePdfReader({ currentUser } = {}) {
         destroyPaperResources(resource)
       })
       paperResourcesRef.current.clear()
-      summaryIdleHandlesRef.current.forEach((handle) => {
-        if (handle.type === 'idle') {
-          window.cancelIdleCallback?.(handle.id)
-        } else {
-          window.clearTimeout(handle.id)
-        }
-      })
-      summaryIdleHandlesRef.current.clear()
     },
     [],
   )
@@ -603,10 +637,6 @@ export function usePdfReader({ currentUser } = {}) {
       setFolders(userFolders)
       setPapers(localPapers)
       setTrashPapers(serverTrash.map(normalizeTrashPaper))
-      summaryMapRef.current.clear()
-      fullTextMapRef.current.clear()
-      setPaperSummaries({})
-      setPaperFullTexts({})
       // Close tabs that came from previous session
       setOpenTabIds([])
       setActiveView('home')
@@ -695,10 +725,6 @@ export function usePdfReader({ currentUser } = {}) {
         setOpenTabIds([])
         setActiveView('home')
         setUncategorizedFolderId('')
-        summaryMapRef.current.clear()
-        fullTextMapRef.current.clear()
-        setPaperSummaries({})
-        setPaperFullTexts({})
         uncategorizedFolderIdRef.current = ''
         paperResourcesRef.current.forEach((resource) => {
           destroyPaperResources(resource)
@@ -780,58 +806,47 @@ export function usePdfReader({ currentUser } = {}) {
     saveReadingSessionSnapshot(String(paperId), patch)
   }
 
-  function setPaperSummary(paperId, summary) {
-    summaryMapRef.current.set(paperId, summary)
-    setPaperSummaries((current) => (
-      current[paperId] === summary
-        ? current
-        : {
-            ...current,
-            [paperId]: summary,
-          }
-    ))
-  }
+  const syncPdfiumReaderState = useCallback((paperId, viewerState = {}) => {
+    const normalizedPaperId = String(paperId || '')
+    if (!normalizedPaperId) return
+    // PDFium may emit a final page-one layout event while its document is
+    // unmounting. Closing a tab must retain the last confirmed session, not
+    // overwrite it with that teardown placeholder.
+    if (closedPaperIdsRef.current.has(normalizedPaperId)) return
 
-  function setPaperFullText(paperId, fullText) {
-    fullTextMapRef.current.set(paperId, fullText)
-    setPaperFullTexts((current) => (
-      current[paperId] === fullText
-        ? current
-        : {
-            ...current,
-            [paperId]: fullText,
-          }
-    ))
-  }
+    // PDFium owns scrolling and zooming. Mirror its confirmed state into the
+    // per-paper session so closing a tab cannot fall back to page one.
+    const requestedPage = Math.max(1, Math.round(Number(viewerState.pageNumber) || 1))
+    const requestedScale = clampScale(Number(viewerState.scale) || DEFAULT_SCALE)
+    const requestedTotalPages = Math.max(0, Math.round(Number(viewerState.totalPages) || 0))
 
-  function clearPaperDerivedContent(paperId) {
-    clearScheduledSummarization(paperId)
-    summaryMapRef.current.delete(paperId)
-    fullTextMapRef.current.delete(paperId)
-    setPaperSummaries((current) => {
-      if (!(paperId in current)) return current
-      const next = { ...current }
-      delete next[paperId]
-      return next
+    persistReadingSessionView(normalizedPaperId, {
+      pageNumber: requestedPage,
+      scale: requestedScale,
+      totalPages: requestedTotalPages,
     })
-    setPaperFullTexts((current) => {
-      if (!(paperId in current)) return current
-      const next = { ...current }
-      delete next[paperId]
-      return next
-    })
-  }
 
-  function clearScheduledSummarization(paperId) {
-    const handle = summaryIdleHandlesRef.current.get(paperId)
-    if (!handle) return
-    summaryIdleHandlesRef.current.delete(paperId)
-    if (handle.type === 'idle') {
-      window.cancelIdleCallback?.(handle.id)
-    } else {
-      window.clearTimeout(handle.id)
-    }
-  }
+    setPapers((currentPapers) =>
+      currentPapers.map((paper) => {
+        if (paper.id !== normalizedPaperId) return paper
+        const pageLimit = requestedTotalPages || paper.totalPages || requestedPage
+        const pageNumber = Math.min(requestedPage, Math.max(1, pageLimit))
+        if (
+          paper.pageNumber === pageNumber
+          && paper.scale === requestedScale
+          && (!requestedTotalPages || paper.totalPages === requestedTotalPages)
+        ) {
+          return paper
+        }
+        return {
+          ...paper,
+          pageNumber,
+          scale: requestedScale,
+          ...(requestedTotalPages ? { totalPages: requestedTotalPages } : {}),
+        }
+      }),
+    )
+  }, [])
 
   function flushReadingDuration(paperId, options = {}) {
     const { finalize = true } = options
@@ -922,33 +937,6 @@ export function usePdfReader({ currentUser } = {}) {
       paperResourcesRef.current.delete(oldId)
       paperResourcesRef.current.set(newId, resource)
     }
-    const summaryHandle = summaryIdleHandlesRef.current.get(oldId)
-    if (summaryHandle) {
-      summaryIdleHandlesRef.current.delete(oldId)
-      summaryIdleHandlesRef.current.set(newId, summaryHandle)
-    }
-    if (summaryMapRef.current.has(oldId)) {
-      const summary = summaryMapRef.current.get(oldId) ?? ''
-      summaryMapRef.current.delete(oldId)
-      setPaperSummaries((current) => {
-        if (!(oldId in current)) return current
-        const next = { ...current }
-        delete next[oldId]
-        return next
-      })
-      setPaperSummary(newId, summary)
-    }
-    if (fullTextMapRef.current.has(oldId)) {
-      const fullText = fullTextMapRef.current.get(oldId) ?? ''
-      fullTextMapRef.current.delete(oldId)
-      setPaperFullTexts((current) => {
-        if (!(oldId in current)) return current
-        const next = { ...current }
-        delete next[oldId]
-        return next
-      })
-      setPaperFullText(newId, fullText)
-    }
   }
 
   async function refreshTrashPapers() {
@@ -968,6 +956,7 @@ export function usePdfReader({ currentUser } = {}) {
   function activatePaper(paperId) {
     const paper = paperMap.get(paperId)
     if (!paper) return
+    closedPaperIdsRef.current.delete(String(paperId))
     if (activeView !== 'home' && activeView !== paperId) {
       pauseReadingSession(activeView)
     }
@@ -1019,8 +1008,10 @@ export function usePdfReader({ currentUser } = {}) {
 
     resumeReadingSession(paperId)
 
-    // Lazy-load PDF from server if not yet loaded
-    if (!paper.pdfDocument && !paper.isLoading && paper._serverFileUrl) {
+    // The PDFium reader fetches and parses the document through its own local
+    // engine. Starting PDF.js here as well would double memory use and can make
+    // text selection responsiveness fluctuate, so preview mode explicitly skips it.
+    if (loadPdfDocument && !paper.pdfDocument && !paper.isLoading && paper._serverFileUrl) {
       const resource = paperResourcesRef.current.get(paperId)
       if (resource?.loadingTask) return // already loading
 
@@ -1028,43 +1019,6 @@ export function usePdfReader({ currentUser } = {}) {
     }
   }
 
-
-  async function triggerSummarization(paperId, documentProxy) {
-    if (summaryMapRef.current.has(paperId)) return
-    try {
-      const fullText = await extractFullText(documentProxy)
-      if (!fullText || fullText.length < 100) return
-      setPaperFullText(paperId, fullText)
-      const truncated = fullText.slice(0, 40000)
-      const { providers } = await fetchAiProviders()
-      const provider = providers?.find(p => p.is_active)
-      if (!provider) return
-      const data = await fetchPaperSummary(truncated, provider.id)
-      if (data?.summary) {
-        setPaperSummary(paperId, data.summary)
-      }
-    } catch { /* silent */ }
-  }
-
-  function scheduleSummarization(paperId, documentProxy) {
-    if (!documentProxy || summaryMapRef.current.has(paperId) || summaryIdleHandlesRef.current.has(paperId)) {
-      return
-    }
-
-    const run = () => {
-      summaryIdleHandlesRef.current.delete(paperId)
-      triggerSummarization(paperId, documentProxy)
-    }
-
-    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
-      const id = window.requestIdleCallback(run, { timeout: 4000 })
-      summaryIdleHandlesRef.current.set(paperId, { type: 'idle', id })
-      return
-    }
-
-    const id = window.setTimeout(run, 1200)
-    summaryIdleHandlesRef.current.set(paperId, { type: 'timeout', id })
-  }
 
   function buildPaperMetadataUpdate(metadata, options = {}) {
     const includeEmpty = Boolean(options.includeEmpty)
@@ -1240,7 +1194,6 @@ export function usePdfReader({ currentUser } = {}) {
         apiUpdatePaper(serverPaperId, updatePayload).catch(() => {})
       }
 
-      scheduleSummarization(paperId, documentProxy)
     } catch (error) {
       console.error('Failed to load server PDF', { paperId, url, error })
       updatePaper(paperId, () => ({
@@ -1304,8 +1257,8 @@ export function usePdfReader({ currentUser } = {}) {
   }
 
   function closePaper(paperId) {
+    closedPaperIdsRef.current.add(String(paperId))
     flushReadingDuration(paperId, { finalize: true })
-    clearPaperDerivedContent(paperId)
     setOpenTabIds((currentIds) => {
       const closingIndex = currentIds.indexOf(paperId)
       const nextIds = currentIds.filter((id) => id !== paperId)
@@ -1328,8 +1281,8 @@ export function usePdfReader({ currentUser } = {}) {
   }
 
   function deletePaper(paperId) {
+    closedPaperIdsRef.current.add(String(paperId))
     flushReadingDuration(paperId, { finalize: true })
-    clearPaperDerivedContent(paperId)
     removeReadingSessionSnapshot(String(paperId))
     const paper = paperMap.get(paperId)
     if (paper) {
@@ -1418,6 +1371,7 @@ export function usePdfReader({ currentUser } = {}) {
   async function permanentlyDeletePaper(paperId) {
     if (!getStoredAuthToken()) return { ok: false, message: '请先登录' }
     try {
+      closedPaperIdsRef.current.add(String(paperId))
       await apiPermanentlyDeletePaper(Number(paperId))
       removeReadingSessionSnapshot(String(paperId))
       setTrashPapers((current) => current.filter((paper) => paper.id !== String(paperId)))
@@ -1599,6 +1553,24 @@ export function usePdfReader({ currentUser } = {}) {
     setPapers((currentPapers) => currentPapers.filter((paper) => paper.id !== paperId))
   }
 
+  function handleImportUploadFailure({
+    file,
+    targetFolderId,
+    shouldActivate,
+    paperId,
+    uploadError,
+  }) {
+    const failureConflict = createImportFailureConflict({
+      file,
+      targetFolderId,
+      shouldActivate,
+      failedPaperId: paperId,
+      error: uploadError,
+    })
+    discardImportDraft(paperId)
+    setImportConflict(failureConflict)
+  }
+
   function retryImportConflict() {
     if (importConflict?.conflictType !== 'failed_import' || !importConflict.file) {
       return
@@ -1721,11 +1693,15 @@ export function usePdfReader({ currentUser } = {}) {
       }))
 
       persistPaperToServer(paperId, file, targetFolderId, metadata)
-        .then(({ paperId: persistedPaperId }) => {
-          scheduleSummarization(persistedPaperId, documentProxy)
-        })
-        .catch(() => {
-          scheduleSummarization(paperId, documentProxy)
+        .catch((uploadError) => {
+          console.error('Failed to upload PDF after local parse', uploadError)
+          handleImportUploadFailure({
+            file,
+            targetFolderId,
+            shouldActivate,
+            paperId,
+            uploadError,
+          })
         })
     } catch (loadError) {
       console.error('Failed to load PDF', loadError)
@@ -1749,18 +1725,13 @@ export function usePdfReader({ currentUser } = {}) {
         console.error('Failed to upload PDF after local parse error', uploadError)
         finalImportError = uploadError
       }
-      const failureConflict = createImportFailureConflict({
+      handleImportUploadFailure({
         file,
         targetFolderId,
         shouldActivate,
-        failedPaperId: paperId,
-        error: finalImportError,
+        paperId,
+        uploadError: finalImportError,
       })
-      updatePaper(paperId, () => ({
-        isLoading: false,
-        error: failureConflict.message,
-      }))
-      setImportConflict(failureConflict)
     }
   }
 
@@ -1845,18 +1816,54 @@ export function usePdfReader({ currentUser } = {}) {
       return
     }
 
-    persistReadingSessionView(activePaper.id, {
+    syncPdfiumReaderState(activePaper.id, {
       pageNumber,
       scale: activePaper.scale,
       totalPages: activePaper.totalPages,
     })
-    updatePaper(activePaper.id, (paper) => {
-      if (paper.pageNumber === pageNumber) {
-        return {}
-      }
+  }
 
-      return { pageNumber }
-    })
+  function getPaperReaderState(paperId) {
+    const paper = paperMap.get(String(paperId || ''))
+    if (!paper) {
+      return {
+        error: '',
+        fileName: '',
+        fitToWidth,
+        isLoading: false,
+        metadata: EMPTY_METADATA,
+        pageMetrics: [],
+        pageNumber: 1,
+        pageNumbers: [],
+        pdfDocument: null,
+        scale: DEFAULT_SCALE,
+        setCurrentPage: () => {},
+        totalPages: 0,
+        zoomIn: () => {},
+        zoomOut: () => {},
+      }
+    }
+
+    return {
+      error: paper.error,
+      fileName: paper.fileName,
+      fitToWidth,
+      isLoading: paper.isLoading,
+      metadata: paper.metadata,
+      pageMetrics: paper.pageMetrics,
+      pageNumber: paper.pageNumber,
+      pageNumbers: Array.from({ length: paper.totalPages || 0 }, (_, index) => index + 1),
+      pdfDocument: paper.pdfDocument,
+      scale: paper.scale,
+      setCurrentPage: (pageNumber) => syncPdfiumReaderState(paper.id, {
+        pageNumber,
+        scale: paper.scale,
+        totalPages: paper.totalPages,
+      }),
+      totalPages: paper.totalPages,
+      zoomIn,
+      zoomOut,
+    }
   }
 
   return {
@@ -1873,6 +1880,7 @@ export function usePdfReader({ currentUser } = {}) {
     fileName: activePaper?.fileName ?? '',
     fitToWidth,
     folders,
+    getPaperReaderState,
     goHome,
     handleFileChange,
     importConflict,
@@ -1886,8 +1894,6 @@ export function usePdfReader({ currentUser } = {}) {
     pageNumber: activePaper?.pageNumber ?? 1,
     pageNumbers,
     pdfDocument: activePaper?.pdfDocument ?? null,
-    activePaperSummary: activePaper ? paperSummaries[activePaper.id] ?? '' : '',
-    activePaperFullText: activePaper ? paperFullTexts[activePaper.id] ?? '' : '',
     recentPapers,
     readingStats,
     recentReadings,
@@ -1901,6 +1907,7 @@ export function usePdfReader({ currentUser } = {}) {
     scale: activePaper?.scale ?? DEFAULT_SCALE,
     savePaperMetadata,
     setCurrentPage,
+    syncPdfiumReaderState,
     switchToPaper: activatePaper,
     permanentlyDeletePaper,
     totalPages: activePaper?.totalPages ?? 0,

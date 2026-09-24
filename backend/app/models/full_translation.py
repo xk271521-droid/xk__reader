@@ -27,6 +27,12 @@ class PaperFullTranslation(Base):
     parse_summary: Mapped[dict] = mapped_column(JSON, default=dict)
     translation_engine: Mapped[str] = mapped_column(String(32), default="ai")
     termbase_version: Mapped[str] = mapped_column(String(64), default="")
+    # The translated PDF is the product record. `pages_json` remains only for
+    # backwards compatibility with the retired browser block-translation beta.
+    artifact_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    artifact_size: Mapped[int] = mapped_column(BigInteger, default=0)
+    generation_version: Mapped[int] = mapped_column(Integer, default=0)
     pages_json: Mapped[list] = mapped_column(JSON, default=list)
     completed_units: Mapped[int] = mapped_column(Integer, default=0)
     total_units: Mapped[int] = mapped_column(Integer, default=0)

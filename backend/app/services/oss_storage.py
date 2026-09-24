@@ -45,6 +45,14 @@ def page_image_prefix(file_url: str) -> str | None:
     return build_object_key(f"{page_prefix}/{file_stem}/")
 
 
+def full_translation_object_key(artifact_path: str | None) -> str | None:
+    """Return the private object key for a persisted translated PDF."""
+    clean_path = str(artifact_path or "").replace("\\", "/").strip("/")
+    if not clean_path or ".." in PurePosixPath(clean_path).parts:
+        return None
+    return build_object_key(f"full-translations/{clean_path}")
+
+
 def _bucket():
     import oss2
 

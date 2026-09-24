@@ -176,10 +176,15 @@ class FullTranslationPage(BaseModel):
 
 
 class FullTranslationStartRequest(BaseModel):
-    source_hash: str = Field(min_length=8, max_length=64)
-    pages: list[FullTranslationPage] = Field(default_factory=list, min_length=1)
-    provider_id: int | None = Field(default=None, ge=1)
-    parse_mode: Literal["auto", "local", "aliyun"] = "auto"
+    """Start a server-side PDF translation job.
+
+    The old beta accepted browser-extracted pages here.  It produced unstable
+    text blocks and made a completed translation impossible to reuse.  Keeping
+    this empty request model lets older clients call the endpoint harmlessly,
+    while the server now reads and fingerprints the original PDF itself.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
 
 class FullTranslationResponse(BaseModel):
@@ -197,3 +202,8 @@ class FullTranslationResponse(BaseModel):
     termbase_version: str = ""
     failed_blocks_count: int = 0
     pending_blocks_count: int = 0
+    artifact_ready: bool = False
+    artifact_url: str | None = None
+    artifact_size: int = 0
+    artifact_sha256: str | None = None
+    generation_version: int = 0

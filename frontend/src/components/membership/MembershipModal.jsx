@@ -10,26 +10,17 @@ const TAB_ITEMS = [
 
 const QUOTA_LABELS = {
   selection_explain_daily: '划词解释',
-  selection_context_daily: '上下文理解',
-  summary_card_monthly: '卡片总结',
-  matrix_run_monthly: '文献矩阵批次',
 }
 
 const VIP_FALLBACK_LIMITS = {
   selection_explain_daily: 300,
-  selection_context_daily: 100,
-  summary_card_monthly: 100,
-  matrix_run_monthly: 10,
 }
 
 const FREE_COMPARE_ROWS = [
   { label: '划词解释', free: '每天 100 次', vip: '每天 300 次' },
-  { label: '上下文理解', free: '每天 50 次', vip: '每天 100 次' },
-  { label: '卡片总结', free: '每月 25 次', vip: '每月 100 次' },
-  { label: '文献矩阵', free: '每月 3 次', vip: '每月 10 次' },
   { label: '笔记/标注导出', free: '不可用', vip: 'Word、PDF、Markdown 可用' },
   { label: '笔记模板', free: '默认 5 个模板', vip: '全部系统模板' },
-  { label: '任务处理', free: '普通队列', vip: '总结与矩阵优先处理' },
+  { label: '任务处理', free: '普通队列', vip: '全文翻译优先处理' },
 ]
 
 const REDEEM_STEPS = [
@@ -41,7 +32,6 @@ const REDEEM_STEPS = [
 const VIP_PRIVILEGES = [
   {
     title: '更高阅读额度',
-    description: '划词解释、上下文理解、卡片总结、文献矩阵都有更高次数，适合连续读论文。',
     Icon: Gauge,
   },
   {
@@ -56,7 +46,6 @@ const VIP_PRIVILEGES = [
   },
   {
     title: '任务优先处理',
-    description: '卡片总结和文献矩阵进入 VIP 优先队列，高峰期更不容易排队。',
     Icon: Rocket,
   },
 ]
@@ -197,7 +186,7 @@ export function MembershipModal({
               <span>{isVip ? '已开通 VIP' : '未开通会员'}</span>
             </div>
             <h2>VIP 解锁导出、模板、更高额度和优先队列</h2>
-            <p>免费版可继续阅读、标注和使用基础额度；VIP 主要面向高频读论文、需要整理笔记和批量总结的用户。</p>
+            <p>免费版可继续阅读、标注和使用基础额度；VIP 主要面向高频读论文、需要整理笔记和导出的用户。</p>
           </div>
           <div className="membership-modal__hero-mark" aria-hidden="true">
             <Check size={64} strokeWidth={1.5} />
@@ -228,9 +217,6 @@ export function MembershipModal({
                 '笔记/标注导出：Word、PDF、Markdown',
                 '全部系统笔记模板',
                 '每天 300 次划词解释',
-                '每天 100 次上下文理解',
-                '每月 100 次卡片总结',
-                '每月 10 次文献矩阵批次',
               ].map((item) => (
                 <BenefitRow key={item} text={item} />
               ))}
@@ -251,7 +237,7 @@ export function MembershipModal({
                   <span className="membership-plan-focus__tag">主推</span>
                   <div className="membership-plan-focus__title">
                     <strong>VIP 月卡</strong>
-                    <span>适合高频阅读、论文总结、笔记整理和汇报导出</span>
+                    <span>适合高频阅读、笔记整理和汇报导出</span>
                   </div>
                   <div className="membership-plan-focus__price">
                     <small>¥</small>
@@ -260,12 +246,11 @@ export function MembershipModal({
                   </div>
                   <div className="membership-plan-focus__desc">
                     <span>{`${vipQuotaItems[0].period} ${vipQuotaItems[0].limit} 次${vipQuotaItems[0].label} / ${vipQuotaItems[1].period} ${vipQuotaItems[1].limit} 次${vipQuotaItems[1].label}`}</span>
-                    <span>{`${vipQuotaItems[2].period} ${vipQuotaItems[2].limit} 次${vipQuotaItems[2].label} / ${vipQuotaItems[3].period} ${vipQuotaItems[3].limit} 次${vipQuotaItems[3].label}`}</span>
                   </div>
                 </div>
 
                 <div className="membership-main__tips">
-                  <span>免费版保留基础阅读、标注、默认模板和基础额度；VIP 解锁导出、全部模板、更高额度与任务优先处理。</span>
+                    <span>免费版保留基础阅读、标注、默认模板和基础额度；VIP 解锁导出、全部模板、更高额度与全文翻译优先处理。</span>
                 </div>
 
                 <div className="membership-privilege-grid">

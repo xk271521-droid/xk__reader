@@ -1,0 +1,345 @@
+.embedpdf-reader-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #eef2f6;
+}
+
+.embedpdf-viewport {
+  width: 100%;
+  height: 100%;
+  background: #eef2f6;
+}
+
+.embedpdf-document-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.embedpdf-capture-marquee {
+  z-index: 40;
+  border-radius: 2px;
+}
+
+.embedpdf-page {
+  position: relative;
+  background: #fff;
+  box-shadow: 0 1px 5px rgb(15 23 42 / 12%);
+  /* PDFium performs glyph hit-testing itself. Browser DOM selection must stay
+     disabled here, otherwise double-clicking page whitespace selects the
+     rendered image/div and the global yellow ::selection paints a huge box. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.embedpdf-page::selection,
+.embedpdf-page *::selection {
+  background: transparent;
+}
+
+.embedpdf-page input,
+.embedpdf-page textarea,
+.embedpdf-page [contenteditable='true'] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.embedpdf-capture-selection {
+  position: absolute;
+  z-index: 55;
+  box-sizing: border-box;
+  border: 2px solid #2b83c6;
+  background: rgb(43 131 198 / 5%);
+  box-shadow: 0 0 0 99999px rgb(15 23 42 / 8%);
+  pointer-events: none;
+}
+
+.embedpdf-capture-selection__handle {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #2b83c6;
+  box-shadow: 0 1px 4px rgb(15 23 42 / 24%);
+}
+
+.embedpdf-capture-selection__handle.is-nw { top: -6px; left: -6px; }
+.embedpdf-capture-selection__handle.is-ne { top: -6px; right: -6px; }
+.embedpdf-capture-selection__handle.is-se { right: -6px; bottom: -6px; }
+.embedpdf-capture-selection__handle.is-sw { bottom: -6px; left: -6px; }
+
+.embedpdf-state {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+  place-items: center;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.embedpdf-state.is-error {
+  color: #b91c1c;
+}
+
+.embedpdf-sync-state {
+  position: absolute;
+  z-index: 30;
+  top: 10px;
+  right: 14px;
+  padding: 5px 9px;
+  border: 1px solid #dbe4ee;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 92%);
+  color: #64748b;
+  box-shadow: 0 2px 8px rgb(15 23 42 / 8%);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.embedpdf-sync-state.is-error,
+.embedpdf-sync-state.is-conflict {
+  color: #b91c1c;
+}
+
+.embedpdf-sync-state.is-offline {
+  color: #a16207;
+}
+
+.embedpdf-selection-menu,
+.embedpdf-annotation-menu {
+  position: absolute;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid #dce3ec;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 8px 22px rgb(15 23 42 / 18%);
+  color: #334155;
+  cursor: default;
+}
+
+.embedpdf-annotation-menu.is-comment {
+  align-items: flex-start;
+  width: 270px;
+  padding: 8px;
+}
+
+.embedpdf-annotation-menu,
+.embedpdf-annotation-menu * {
+  pointer-events: auto;
+}
+
+.embedpdf-comment-editor {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.embedpdf-comment-editor label {
+  color: #344054;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.embedpdf-comment-editor textarea {
+  width: 100%;
+  min-height: 68px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 7px 8px;
+  border: 1px solid #cfd7e3;
+  border-radius: 5px;
+  outline: none;
+  background: #fff;
+  color: #101828;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.embedpdf-comment-editor textarea:focus {
+  border-color: #5b7085;
+  box-shadow: 0 0 0 2px rgb(20 77 95 / 12%);
+}
+
+.embedpdf-comment-editor__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.embedpdf-comment-editor__actions span {
+  color: #667085;
+  font-size: 10px;
+}
+
+.embedpdf-comment-editor__actions .embedpdf-comment-editor__save {
+  width: auto;
+  height: 27px;
+  padding: 0 10px;
+  border-radius: 4px;
+  background: #144d5f;
+  color: #fff;
+  font-size: 12px;
+}
+
+.embedpdf-comment-editor__actions .embedpdf-comment-editor__save:hover {
+  background: #0f3f50;
+}
+
+.embedpdf-selection-menu button,
+.embedpdf-annotation-menu button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  place-items: center;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.embedpdf-selection-menu button:hover,
+.embedpdf-annotation-menu button:hover {
+  background: #f1f5f9;
+}
+
+.embedpdf-selection-menu svg,
+.embedpdf-annotation-menu svg {
+  width: 17px;
+  height: 17px;
+}
+
+.embedpdf-selection-menu__colors {
+  display: flex;
+  gap: 5px;
+  padding-right: 5px;
+  border-right: 1px solid #e2e8f0;
+}
+
+.embedpdf-selection-menu__colors button {
+  width: 23px;
+  height: 23px;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  background: var(--selection-color);
+  box-shadow: 0 0 0 1px #cbd5e1;
+}
+
+.embedpdf-selection-menu__colors button.is-active {
+  box-shadow: 0 0 0 2px #0f172a;
+}
+
+.embedpdf-safe-selection-rect {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  background: rgb(37 99 235 / 34%);
+  mix-blend-mode: multiply;
+}
+
+.embedpdf-thumbnail-panel {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+}
+
+.embedpdf-thumbnail-panel__scroll {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  scrollbar-gutter: stable;
+}
+
+.embedpdf-thumbnail-panel__item {
+  position: absolute;
+  left: 0;
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.embedpdf-thumbnail-panel__item:hover,
+.embedpdf-thumbnail-panel__item.is-active {
+  background: rgb(59 130 246 / 10%);
+}
+
+.embedpdf-thumbnail-panel__image {
+  display: block;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(18 30 46 / 10%);
+  line-height: 0;
+}
+
+.embedpdf-thumbnail-panel__item.is-active .embedpdf-thumbnail-panel__image {
+  box-shadow: 0 0 0 2px #3b82f6, 0 2px 8px rgb(100 140 108 / 20%);
+}
+
+.embedpdf-thumbnail-panel__label {
+  color: #8c9ba5;
+  font-size: 0.7rem;
+  user-select: none;
+}
+
+.embedpdf-thumbnail-panel__item.is-active .embedpdf-thumbnail-panel__label {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+/* Stable local harness for visual and interaction regression checks. */
+.embedpdf-poc-shell {
+  display: grid;
+  width: 100vw;
+  height: 100vh;
+  grid-template-rows: 48px minmax(0, 1fr);
+  margin: 0;
+  overflow: hidden;
+  background: #eef2f6;
+}
+
+.embedpdf-poc-shell > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  border-bottom: 1px solid #dbe4ee;
+  background: #fff;
+  color: #334155;
+  font: 14px/1.4 system-ui, sans-serif;
+}
+
+.embedpdf-poc-shell > section {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: 168px minmax(0, 1fr);
+}
+
+.embedpdf-poc-viewer {
+  min-width: 0;
+  min-height: 0;
+}

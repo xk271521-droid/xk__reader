@@ -58,6 +58,24 @@ class PaperMetadataExtractionTest(unittest.TestCase):
         self.assertNotIn(",1", hints["author"])
         self.assertEqual(hints["doi"], "10.1155/2019/5065214")
 
+    def test_extracts_chinese_title_without_authors_affiliations_or_abstract(self):
+        text = """
+        智慧农业（中英文） Smart Agriculture
+        基于机器学习融合电化学指纹的传感器校准方法
+        1， 2 2 1， 2 * 杨皓宇， 李爱学， 赵春江
+        （1.上海海洋大学 信息学院， 上海 201306， 中国； 2.北京市农林科学院智能装备技术研究中心， 北京100097， 中国）
+        摘要：电化学传感器受限于基底电极的品控波动、修饰过程误差及环境干扰等因素。
+        关键词：智慧农业；传感器校准；机器学习
+        """
+
+        hints = extract_front_matter_hints(text, {}, "smart-agriculture.pdf")
+
+        self.assertEqual(hints["title"], "基于机器学习融合电化学指纹的传感器校准方法")
+        self.assertIn("电化学传感器", hints["subject"])
+        self.assertIn("智慧农业", hints["keywords"])
+        self.assertNotIn("上海海洋大学", hints["title"])
+        self.assertNotIn("摘要", hints["title"])
+
     def test_identifier_cleanup(self):
         self.assertEqual(
             find_doi("Available at https://doi.org/10.48550/arXiv.1703.06870."),

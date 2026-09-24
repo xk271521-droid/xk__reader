@@ -1770,8 +1770,6 @@ export function AdminPage({ currentUser, onBack, initialSection = 'overview' }) 
     const features = healthReport?.features || {}
     const databaseStatus = healthReport?.database || 'unknown'
     const statusRows = [
-      ['paper_summaries', '摘要任务', tasks.paper_summaries || {}],
-      ['research_matrix_runs', '文献矩阵', tasks.research_matrix_runs || {}],
       ['full_translations', '全文翻译', tasks.full_translations || {}],
     ]
     const featureRows = [
@@ -1838,7 +1836,6 @@ export function AdminPage({ currentUser, onBack, initialSection = 'overview' }) 
                       {' / '}
                       运行 {formatNumber(getStatusCount(counts, 'running'))}
                       {' / '}
-                      完成 {formatNumber(getStatusCount(counts, key === 'paper_summaries' ? 'generated' : 'completed'))}
                     </span>
                   </div>
                   <StatusBadge tone={getStatusCount(counts, 'failed') + getStatusCount(counts, 'error') ? 'red' : 'green'}>

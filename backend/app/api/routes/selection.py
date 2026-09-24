@@ -1,35 +1,60 @@
 from __future__ import annotations
 
+import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models import User
+from app.models import Paper, User
+from app.models.user_translation_config import UserTranslationConfig
 from app.schemas.selection import (
     AskRequest,
     AskResponse,
-    SelectionInsightExplainResponse,
     SelectionInsightRequest,
     SelectionInsightResponse,
     SuggestQuestionGroup,
     SuggestQuestionsRequest,
     SuggestQuestionsResponse,
 )
-from app.services.ai_provider_manager import resolve_user_provider
-from app.services.crypto import decrypt_api_key
-from app.services.membership import (
-    QUOTA_SELECTION_CONTEXT_DAILY,
-    QUOTA_SELECTION_EXPLAIN_DAILY,
-    consume_quota,
+from app.services.ai_provider_manager import (
+    resolve_siliconflow_provider,
+    resolve_user_provider,
 )
-from app.services.selection_insight import _ai_explanation_or_fallback  # type: ignore[reportPrivateUsage]
-from app.services.selection_insight import build_selection_insight
+from app.services.crypto import decrypt_api_key
+from app.services.paper_context import extract_paper_full_text
+from app.services.selection_insight import (
+    TranslationProviderUnavailable,
+    build_selection_insight,
+)
+from app.services.translation_models import is_siliconflow_endpoint
 
 router = APIRouter()
+
+
+def _load_owned_paper_context(
+    db: Session,
+    user_id: int,
+    paper_id: int,
+) -> tuple[Paper, str]:
+    paper = db.scalar(
+        select(Paper).where(
+            Paper.id == paper_id,
+            Paper.user_id == user_id,
+            Paper.deleted_at.is_(None),
+        )
+    )
+    if not paper:
+        raise HTTPException(status_code=404, detail="论文不存在。")
+
+    full_text = extract_paper_full_text(paper.file_path)
+    if not full_text:
+        raise HTTPException(status_code=422, detail="未能从这篇论文中提取全文文字，暂时无法进行全文问答。")
+    return paper, full_text
 
 
 def _trim_text(value: str | None, limit: int = 120) -> str:
@@ -181,90 +206,66 @@ def selection_insight(
     text = payload.text.strip()
     if len(text) < 2:
         raise HTTPException(status_code=400, detail="Selected text is too short.")
-    consume_quota(
-        db,
-        user_id=current_user.id,
-        quota_key=QUOTA_SELECTION_CONTEXT_DAILY,
-    )
 
-    return build_selection_insight(
-        text=text,
-        paper_title=payload.paper_title,
-        domain=payload.domain,
-        summary=payload.summary,
-        context=payload.context or "",
-        provider_id=payload.provider_id,
-    )
-
-
-@router.post("/selection-insight/explain", response_model=SelectionInsightExplainResponse)
-def selection_insight_explain(
-    payload: SelectionInsightRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
-) -> SelectionInsightExplainResponse:
-    text = payload.text.strip()
-    if len(text) < 2:
-        raise HTTPException(status_code=400, detail="Selected text is too short.")
-    consume_quota(
-        db,
-        user_id=current_user.id,
-        quota_key=QUOTA_SELECTION_EXPLAIN_DAILY,
-    )
-
-    provider, api_key = _load_provider_for_user(db, current_user.id, payload.provider_id)
-    explanation = _ai_explanation_or_fallback(
-        text=text,
-        text_kind="",
-        paper_title=payload.paper_title,
-        glossary=[],
-        summary=payload.summary,
-        context=payload.context or "",
-        provider=provider,
-        api_key=api_key,
-    )
-    return SelectionInsightExplainResponse(explanation=explanation)
-
-
-@router.post("/selection-insight/explain-stream")
-def selection_insight_explain_stream(
-    payload: SelectionInsightRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
-):
-    text = payload.text.strip()
-    if len(text) < 2:
-        raise HTTPException(status_code=400, detail="Selected text is too short.")
-    consume_quota(
-        db,
-        user_id=current_user.id,
-        quota_key=QUOTA_SELECTION_EXPLAIN_DAILY,
-    )
-
-    provider, api_key = _load_provider_for_user(db, current_user.id, payload.provider_id)
-    if not provider or not api_key:
-        return StreamingResponse(
-            iter(["data: AI config unavailable\n\n"]),
-            media_type="text/event-stream",
+    # Basic selection translation must remain available independently of the
+    # optional AI explanation quota. A UI rerender once repeated this request
+    # enough times to exhaust the quota and made ordinary translation fail.
+    try:
+        provider_base_url = ""
+        provider_api_key = ""
+        if payload.translation_provider.startswith("siliconflow_"):
+            provider = (
+                resolve_siliconflow_provider(
+                    db,
+                    current_user.id,
+                    payload.provider_id,
+                )
+                if payload.provider_id
+                else resolve_siliconflow_provider(db, current_user.id)
+            )
+            if not provider or not is_siliconflow_endpoint(provider.base_url):
+                raise TranslationProviderUnavailable(
+                    "请先在 AI 厂商配置中配置 SiliconFlow 翻译厂商。"
+                )
+            try:
+                provider_api_key = decrypt_api_key(provider.encrypted_api_key).strip()
+            except Exception as exc:
+                raise TranslationProviderUnavailable(
+                    "SiliconFlow API 密钥无法读取，请重新保存配置。"
+                ) from exc
+            provider_base_url = provider.base_url.strip()
+            if not provider_api_key:
+                raise TranslationProviderUnavailable("SiliconFlow API 密钥未配置。")
+        baidu_appid = ""
+        baidu_secret = ""
+        if payload.translation_provider == "baidu":
+            tr_config = (
+                db.query(UserTranslationConfig)
+                .filter(UserTranslationConfig.user_id == current_user.id)
+                .first()
+            )
+            if tr_config and tr_config.is_configured:
+                baidu_appid = tr_config.app_id or ""
+                if tr_config.encrypted_secret_key:
+                    try:
+                        baidu_secret = decrypt_api_key(tr_config.encrypted_secret_key).strip()
+                    except Exception:
+                        pass
+        return build_selection_insight(
+            text=text,
+            paper_title=payload.paper_title,
+            domain=payload.domain,
+            translation_provider=payload.translation_provider,
+            summary=payload.summary,
+            context=payload.context or "",
+            provider_id=payload.provider_id,
+            provider_base_url=provider_base_url,
+            provider_api_key=provider_api_key,
+            baidu_appid=baidu_appid,
+            baidu_secret=baidu_secret,
         )
-
-    def generate():
-        try:
-            from app.services.llm import explain_selection_stream
-
-            for token in explain_selection_stream(
-                base_url=provider.base_url,
-                api_key=api_key,
-                model=provider.model,
-                selected_text=text,
-                summary=payload.summary or "",
-                context=payload.context or "",
-            ):
-                yield f"data: {token}\n\n"
-        except Exception:
-            yield "data: AI generation failed\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    except TranslationProviderUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/ask", response_model=AskResponse)
@@ -277,6 +278,11 @@ def ask_question(
     if len(question) < 2:
         raise HTTPException(status_code=400, detail="Question too short.")
 
+    paper, full_text = _load_owned_paper_context(
+        db,
+        current_user.id,
+        payload.paper_id,
+    )
     try:
         from app.services.llm import ask_question as llm_ask
 
@@ -290,7 +296,9 @@ def ask_question(
             model=provider.model,
             question=question,
             selected_text=getattr(payload, "selected_text", "") or "",
-            summary=getattr(payload, "summary", "") or "",
+            paper_title=paper.title or paper.file_name,
+            full_text=full_text,
+            request_kind=payload.request_kind,
         )
         return {"answer": answer}
     except Exception as exc:
@@ -307,10 +315,15 @@ def ask_question_stream(
     if len(question) < 2:
         raise HTTPException(status_code=400, detail="Question too short.")
 
+    paper, full_text = _load_owned_paper_context(
+        db,
+        current_user.id,
+        payload.paper_id,
+    )
     provider, api_key = _load_provider_for_user(db, current_user.id, getattr(payload, "provider_id", None))
     if not provider or not api_key:
         return StreamingResponse(
-            iter(["data: 没有可用的 AI 厂商，请先在 AI 配置中启用一个。\n\n"]),
+            iter([f"data: {json.dumps('没有可用的 AI 厂商，请先在 AI 配置中启用一个。', ensure_ascii=False)}\n\n"]),
             media_type="text/event-stream",
         )
 
@@ -324,11 +337,14 @@ def ask_question_stream(
                 model=provider.model,
                 question=question,
                 selected_text=getattr(payload, "selected_text", "") or "",
-                summary=getattr(payload, "summary", "") or "",
+                paper_title=paper.title or paper.file_name,
+                full_text=full_text,
+                request_kind=payload.request_kind,
             ):
-                yield f"data: {token}\n\n"
+                yield f"data: {json.dumps(token, ensure_ascii=False)}\n\n"
         except Exception as exc:
-            yield f"data: AI 回答失败：{str(exc)[:100]}\n\n"
+            message = f"AI 回答失败：{str(exc)[:100]}"
+            yield f"data: {json.dumps(message, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 

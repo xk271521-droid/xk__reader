@@ -1,32 +1,40 @@
 import {
   BookOpenText,
+  BookOpenCheck,
   ChevronLeft,
   ChevronRight,
   MessageCircleQuestion,
   NotebookPen,
-  Sparkles,
 } from 'lucide-react'
 
 const railItems = [
   { id: 'info', label: '文献信息', icon: BookOpenText },
+  { id: 'summary', label: '文献速读', icon: BookOpenCheck },
   { id: 'notes', label: '阅读笔记', icon: NotebookPen },
   { id: 'ask', label: '边读边问', icon: MessageCircleQuestion },
-  { id: 'summary', label: '文献总结', icon: Sparkles },
 ]
 
-export function UtilityRail({ activeItem, collapsed = false, onSelect, onItemIntent, onToggleCollapsed }) {
+export function UtilityRail({
+  activeItem,
+  collapsed = false,
+  briefStatus = 'idle',
+  onSelect,
+  onItemIntent,
+  onToggleCollapsed,
+}) {
   return (
     <aside className={`utility-rail${collapsed ? ' is-collapsed' : ''}`}>
       <div className="utility-rail__items">
         {railItems.map((item) => {
           const Icon = item.icon
+          const isBriefGenerating = item.id === 'summary' && ['queued', 'running'].includes(briefStatus)
           return (
             <button
               type="button"
               className={`utility-rail__item${activeItem === item.id ? ' is-active' : ''}`}
               key={item.id}
-              title={item.label}
-              aria-label={item.label}
+              title={isBriefGenerating ? `${item.label}正在生成` : item.label}
+              aria-label={isBriefGenerating ? `${item.label}正在生成` : item.label}
               onPointerEnter={() => onItemIntent?.(item.id)}
               onFocus={() => onItemIntent?.(item.id)}
               onClick={() => {
@@ -35,6 +43,7 @@ export function UtilityRail({ activeItem, collapsed = false, onSelect, onItemInt
               }}
             >
               <Icon />
+              {isBriefGenerating ? <span className="utility-rail__status" aria-hidden="true" /> : null}
               <span>{item.label}</span>
             </button>
           )

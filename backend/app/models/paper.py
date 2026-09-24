@@ -91,9 +91,15 @@ class Paper(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
-    summaries: Mapped[list["PaperSummary"]] = relationship(
+    reading_brief: Mapped["PaperReadingBrief | None"] = relationship(
         back_populates="paper",
         cascade="all, delete-orphan",
+        uselist=False,
+    )
+    ai_outline: Mapped["PaperAiOutline | None"] = relationship(
+        back_populates="paper",
+        cascade="all, delete-orphan",
+        uselist=False,
     )
     resource_layouts: Mapped[list["PaperResourceLayout"]] = relationship(
         back_populates="paper",
